@@ -10,8 +10,12 @@
  */
 #include "postgres.h"
 
-#ifdef __GLIBC__
+/* mallinfo2() arrived in glibc 2.33; features.h came in via postgres.h. */
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2, 33)
+#define PSSC_HAVE_MALLINFO2 1
 #include <malloc.h>
+#endif
 #endif
 
 #include "catalog/pg_type.h"
@@ -188,23 +192,64 @@ pssc_guc_test_vars(PG_FUNCTION_ARGS)
 }
 
 /*
- * pssc_tag_list_blob_size() for arbitrary inputs; NULL when rejected.
- * Arguments are reinterpreted as size_t, so -1 is SIZE_MAX.
+ * A bigint argument as size_t: -1 is SIZE_MAX; other negative values are an
+ * error. Returns false for values above SIZE_MAX (possible where size_t is
+ * 32 bits), which must not be truncated into small, valid sizes.
+ */
+static bool
+arg_to_size(int64 v, size_t *out)
+{
+	if (v == -1)
+	{
+		*out = SIZE_MAX;
+		return true;
+	}
+	if (v < 0)
+		elog(ERROR, "-1 is the only negative argument allowed (got " INT64_FORMAT ")", v);
+	if ((uint64) v > (uint64) SIZE_MAX)
+		return false;
+	*out = (size_t) v;
+	return true;
+}
+
+/*
+ * pssc_tag_list_blob_size() for arbitrary inputs; NULL when rejected,
+ * including arguments that do not fit in size_t.
  */
 PG_FUNCTION_INFO_V1(pssc_guc_test_blob_size);
 Datum
 pssc_guc_test_blob_size(PG_FUNCTION_ARGS)
 {
 	blob_size_fn fn = (blob_size_fn) main_sym("pssc_tag_list_blob_size");
+	size_t		nkeys;
+	size_t		keybytes;
 	size_t		size = 0;
 
-	if (!fn((size_t) PG_GETARG_INT64(0), (size_t) PG_GETARG_INT64(1), &size))
+	if (!arg_to_size(PG_GETARG_INT64(0), &nkeys) ||
+		!arg_to_size(PG_GETARG_INT64(1), &keybytes) ||
+		!fn(nkeys, keybytes, &size))
 		PG_RETURN_NULL();
 	PG_RETURN_INT64((int64) size);
 }
 
 /*
- * Bytes of malloc'd memory in use in this backend (glibc), NULL elsewhere.
+ * "major.minor" of the glibc this module was compiled against, NULL when not
+ * compiled against glibc. The malloc probe below exists exactly from 2.33 on.
+ */
+PG_FUNCTION_INFO_V1(pssc_guc_test_glibc_version);
+Datum
+pssc_guc_test_glibc_version(PG_FUNCTION_ARGS)
+{
+#ifdef __GLIBC__
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%d.%d", __GLIBC__, __GLIBC_MINOR__)));
+#else
+	PG_RETURN_NULL();
+#endif
+}
+
+/*
+ * Bytes of malloc'd memory in use in this backend (glibc >= 2.33, which has
+ * mallinfo2()), NULL elsewhere.
  * GUC "extra" blobs are malloc'd on PG14/15 and live in GUCMemoryContext,
  * itself malloc-backed, on PG16+, so a leak of them shows up here.
  */
@@ -212,7 +257,7 @@ PG_FUNCTION_INFO_V1(pssc_guc_test_malloc_used);
 Datum
 pssc_guc_test_malloc_used(PG_FUNCTION_ARGS)
 {
-#ifdef __GLIBC__
+#ifdef PSSC_HAVE_MALLINFO2
 	struct mallinfo2 mi = mallinfo2();
 
 	PG_RETURN_INT64((int64) (mi.uordblks + mi.hblkhd));

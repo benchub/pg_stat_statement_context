@@ -253,14 +253,19 @@ like(alter_err("SET $P.tags = '" . (',' x 200000) . "'"),
 	qr/more than 1024 entries/, 'huge list rejected');
 is(list('tags'), 'f|1024|{' . join(',', map { sprintf('%063d', $_) } 1 .. 1024) . '}',
 	'rejected lists leave the previous value');
-# Size computation boundaries (-1 is SIZE_MAX).
+# Size computation boundaries (-1 is SIZE_MAX). Arguments beyond SIZE_MAX
+# (e.g. 2^32 on 32-bit) are rejected, not truncated.
 is( sql(q{SELECT string_agg(coalesce(pssc_guc_test_blob_size(n, b)::text, 'null'), ',' ORDER BY i)
             FROM (VALUES (1, 0, 0), (2, 1, 64), (3, 1024, 65536), (4, 1025, 0),
                          (5, 1024, 65537), (6, 1, 65), (7, 0, 1), (8, -1, -1),
                          (9, 4294967296, 0), (10, 390000000, 780000000),
-                         (11, 1024, -1)) v(i, n, b)}),
-	'12,84,73740,null,null,null,null,null,null,null,null',
+                         (11, 1024, -1), (12, 1, 4294967296)) v(i, n, b)}),
+	'12,84,73740,null,null,null,null,null,null,null,null,null',
 	'blob size: exact at the limits, rejected beyond them (no overflow)');
+my ($bs_rc, $bs_out, $bs_err) =
+  $node->psql('postgres', 'SELECT pssc_guc_test_blob_size(-4294967296, 0)');
+like($bs_err, qr/ERROR:.*-1 is the only negative argument/,
+	'blob size: negative arguments other than -1 are an error, not truncated');
 
 
 # ---------------------------------------------------------------------------
@@ -312,10 +317,30 @@ is(sq($s, 'SELECT pssc_guc_test_generation()'), $sg1,
 $node->append_conf('postgresql.conf', "$P.tags = 'action, controller, job'\n"
 	  . "$P.exclude_tags = 'traceparent, tracestate, request_id'\n");
 my @big = map { my $c = $_; join(',', map { sprintf("$c%062d", $_) } 1 .. 1024) } ('p', 'q');
+my $m0_null = sq($s, 'SELECT pssc_guc_test_malloc_used() IS NULL');
+# The probe needs mallinfo2(), i.e. a module compiled against glibc >= 2.33.
+# Check that against the compile-time glibc version, so a NULL probe there is
+# never a silently skipped leak check.
+my $built_glibc = sq($s, 'SELECT coalesce(pssc_guc_test_glibc_version(), \'none\')');
+my $want_probe = $built_glibc =~ /^(\d+)\.(\d+)$/ && ($1 > 2 || ($1 == 2 && $2 >= 33));
+note "module built against glibc: $built_glibc; malloc probe "
+  . ($m0_null eq 't' ? 'NULL' : 'available');
+is($m0_null, $want_probe ? 'f' : 't',
+	'session: malloc probe available exactly when built against glibc >= 2.33');
+# Sanity check of the compile-time detection: a module running on glibc must
+# have been built against glibc. getconf is only an optional oracle.
 SKIP:
 {
-	my $m0 = sq($s, 'SELECT pssc_guc_test_malloc_used()');
-	skip 'malloc statistics need glibc', 2 if $m0 eq '';
+	my $rt = $^O eq 'linux' ? `getconf GNU_LIBC_VERSION 2>/dev/null` : undef;
+	skip 'runtime glibc version unknown (getconf unavailable or not glibc)', 1
+	  unless defined $rt && $? == 0 && $rt =~ /^glibc (\d+\.\d+)/;
+	note "runtime glibc: $1";
+	isnt($built_glibc, 'none', 'session: module running on glibc was built against glibc');
+}
+SKIP:
+{
+	skip 'malloc statistics need glibc >= 2.33 (mallinfo2); leak check not run', 2
+	  if $m0_null eq 't';
 	for my $i (1 .. 4)
 	{
 		alter_and_reload("SET $P.tags = '$big[$i % 2]'", "SET $P.exclude_tags = '$big[1 - $i % 2]'");

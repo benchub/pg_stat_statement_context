@@ -156,6 +156,21 @@ Decoded output goes into a caller-provided bounded buffer. Decoded NUL bytes (`%
 **Open questions:** none
 **Status:** done
 
+### 20261005-124839-1: GUC test module: old-glibc and 32-bit portability fixes
+
+**Description:** Split off from 20261005-091225-7 after its second review round. Both fixes are in test-only code in `test/modules/pssc_guc_test/pssc_guc_test.c`:
+- **~215–216:** the `mallinfo2()` leak probe is guarded only by `__GLIBC__`, but `mallinfo2` arrived in glibc 2.33, so the module fails to compile on older glibc. Add `__GLIBC_PREREQ(2, 33)` (or a feature check), and return NULL so the TAP test explicitly skips the measurement.
+- **~201:** the SQL wrapper narrows `bigint` arguments to `size_t` before checking that they fit. On 32-bit, the `(4294967296, 0)` case in `test/t/003_guc.pl:260` becomes `(0, 0)` and returns 12 instead of NULL. Reject positive arguments larger than `SIZE_MAX` before narrowing, keeping the `-1` → `SIZE_MAX` convention.
+
+**Acceptance criteria:**
+- The module compiles against glibc older than 2.33 (e.g. a Debian bullseye or Ubuntu 20.04 based image), and the leak check is reported as skipped there.
+- The boundary test passes on a 32-bit build (e.g. an i386 Docker image), or the narrowing is proven unit-wise.
+- The existing PG14–18 harness still passes.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

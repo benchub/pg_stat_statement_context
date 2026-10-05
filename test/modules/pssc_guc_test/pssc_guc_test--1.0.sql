@@ -22,10 +22,15 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_guc_test_vars() RETURNS text
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
--- pssc_tag_list_blob_size(nkeys, keybytes) as size_t; NULL when rejected.
+-- pssc_tag_list_blob_size(nkeys, keybytes) as size_t; NULL when rejected or
+-- when an argument exceeds SIZE_MAX. -1 means SIZE_MAX; other negatives error.
 CREATE FUNCTION pssc_guc_test_blob_size(nkeys bigint, keybytes bigint) RETURNS bigint
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
--- malloc'd bytes in use in this backend (glibc only; NULL elsewhere).
+-- glibc version (major.minor) the module was compiled against; NULL if not glibc.
+CREATE FUNCTION pssc_guc_test_glibc_version() RETURNS text
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- malloc'd bytes in use in this backend (glibc >= 2.33; NULL elsewhere).
 CREATE FUNCTION pssc_guc_test_malloc_used() RETURNS bigint
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
