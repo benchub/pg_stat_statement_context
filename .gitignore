@@ -1,1 +1,13 @@
 tmp/
+# build artifacts
+*.o
+*.so
+*.dylib
+*.bc
+*.dSYM/
+# pg_regress / TAP output
+/results/
+/regression.diffs
+/regression.out
+/log/
+/tmp_check/

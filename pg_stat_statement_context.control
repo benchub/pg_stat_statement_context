@@ -1,0 +1,5 @@
+# pg_stat_statement_context extension
+comment = 'per-tag statement statistics from SQL comments'
+default_version = '1.0'
+module_pathname = '$libdir/pg_stat_statement_context'
+relocatable = true

@@ -21,7 +21,7 @@ For each backlog item:
    - If a review finds nothing, land the item.
    - If findings remain after 2 rounds, land the work that is complete and passing. Split the rest into one or more new backlog items, with dependencies and questions noted.
 6. **Land.** Commit directly to `main` with a message that references the item ID.
-7. **Archive.** Move the finished item from `BACKLOG.md` to `BACKLOG-COMPLETE.md`. Update the summary table and the statuses of any items that depended on it.
+7. **Archive.** Run `scripts/backlog-complete.py <ID>`. It moves the item to `BACKLOG-COMPLETE.md`, removes its row from the summary table, and recomputes the statuses of the remaining items.
 
 ## 3. Backlog conventions
 
@@ -41,4 +41,4 @@ You can ask the user clarifying questions about any item at any time. Asking is 
 ## 6. Sandbox
 
 - Keep all file operations inside this repository directory, **including temporary files**. Use a git-ignored scratch directory such as `./tmp/`, not `/tmp` or `$TMPDIR`.
-- You may use Docker to build the extension and test it against the supported PostgreSQL versions.
+- You may use Docker to build the extension and test it against the supported PostgreSQL versions. Files written inside a container's own ephemeral filesystem are fine. Anything written to the host through a bind mount must stay under `./tmp/`.
