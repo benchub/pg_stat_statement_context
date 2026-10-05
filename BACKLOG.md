@@ -52,8 +52,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-4 | Comment scanner: forward lexer | none | no | ready |
-| 20261005-091225-5 | Statement ranges and positional (windowed) scanning | 20261005-091225-4 | no | blocked-on-deps |
+| 20261005-091225-5 | Statement ranges and positional (windowed) scanning | 20261005-091225-4 | no | ready |
 | 20261005-091225-6 | SQLCommenter and marginalia pair parsers | none | no | ready |
 | 20261005-091225-7 | Core GUCs | 20261005-091225-1, 20261005-091225-2 | no | ready |
 | 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | no | blocked-on-deps |
@@ -213,27 +212,6 @@ dependencies and is not shown.
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-4: Comment scanner: forward lexer
-
-**Description:** Implement `src/scan.c`/`scan.h` (§3.1 item 1). This is a backend-independent, single-pass state machine with no `palloc` and no `elog`. It reports comment spans in a byte range `[start, end)` of a `const char *`, following `scan.l`:
-- `'strings'` with `''` doubling, and backslash escapes when `standard_conforming_strings = off`. The setting is passed in as a parameter (§6.2).
-- `E''` strings (always backslash-escaped), `U&''` strings, and `"quoted identifiers"`, including `U&""`.
-- `$tag$...$tag$` dollar quotes, using `scan.l`'s tag-character rules, and `$1` parameters. A `$` inside an identifier, as in `a$b$`, does not start a dollar quote.
-- Nested `/* /* */ */` comments and `--` line comments.
-- An unterminated comment or string produces no span for the incomplete comment.
-
-Output goes to a caller-provided fixed array of `(offset, len)` spans, capped at 16 comments (§6.11), with a flag that reports truncation. The total size of examined comments is capped by a parameter (`scan_window`). Also expose a helper that reports whether a byte range contains only `;`, whitespace, and comments. Task 20261005-091225-5 uses it for the trailing-footer rule (§6.5).
-
-*Design note:* server encodings are ASCII-safe, so lexing byte by byte is correct for multibyte text.
-
-**Acceptance criteria:**
-- A small standalone C test driver (no server; it can later seed the fuzz corpus) covers every construct listed above, plus multibyte UTF-8 and unterminated constructs. All cases pass.
-- The scanner is O(n), performs no heap allocation, and never reads outside `[start, end)`.
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-5: Statement ranges and positional (windowed) scanning
 
 **Description:** Build the statement-level scanning API on top of the lexer (§6.2, §6.5).
@@ -262,7 +240,7 @@ Provide the trailing-footer fallback separately. It returns comment spans after 
 
 **Depends on:** 20261005-091225-4
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-6: SQLCommenter and marginalia pair parsers
 

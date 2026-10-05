@@ -26,6 +26,10 @@ REGRESS_OPTS = --inputdir=test \
 TAP_TESTS = 1
 PROVE_TESTS = test/t/*.pl
 
+# Standalone scanner unit tests (test/unit, built by "make unittest").
+EXTRA_CLEAN = test/unit/test_scan test/unit/test_scan_checked \
+	test/unit/corpus test/unit/*.dSYM
+
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
@@ -33,7 +37,7 @@ include $(PGXS)
 # TEST-ONLY module that exercises the src/compat.h shims (test/t/002_compat.pl).
 TEST_MODULES = test/modules/pssc_compat_test
 
-.PHONY: test-modules install-test-modules clean-test-modules check-version-guards
+.PHONY: test-modules install-test-modules clean-test-modules check-version-guards unittest
 
 test-modules:
 	for d in $(TEST_MODULES); do $(MAKE) -C $$d PG_CONFIG=$(PG_CONFIG) || exit 1; done
@@ -48,3 +52,8 @@ clean-test-modules:
 check-version-guards:
 	scripts/check-version-guards.sh --self-test
 	scripts/check-version-guards.sh
+
+# Standalone unit tests for src/scan.c under ASan/UBSan; no server needed.
+# Also runnable without pg_config: make -C test/unit
+unittest:
+	$(MAKE) -C test/unit

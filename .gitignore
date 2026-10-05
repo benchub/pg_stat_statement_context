@@ -11,3 +11,7 @@ tmp/
 /regression.out
 /log/
 /tmp_check/
+# scanner unit tests (test/unit)
+/test/unit/test_scan
+/test/unit/test_scan_checked
+/test/unit/corpus/

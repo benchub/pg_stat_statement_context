@@ -41,20 +41,22 @@ def main(ids):
         sys.exit(f"not found in BACKLOG.md: {', '.join(missing)}")
 
     done_text = COMPLETE.read_text() if COMPLETE.exists() else COMPLETE_HEADER
+    head, sep, dropped = done_text.partition("\n## Dropped")
     drop = set()
     for tid in ids:
         s, e = sections[tid]
         body = "".join(lines[s:e]).rstrip() + "\n"
         body = re.sub(r"(?m)^\*\*Status:\*\*.*$", "**Status:** done", body)
-        done_text = done_text.rstrip() + "\n\n" + body
+        head = head.rstrip() + "\n\n" + body
         drop.update(range(s, e))
+    done_text = head + ("\n" + sep.lstrip("\n") + dropped if sep else "")
     COMPLETE.write_text(done_text)
 
     lines = [l for i, l in enumerate(lines) if i not in drop]
     lines = [l for l in lines
              if not any(l.startswith(f"| {tid} |") for tid in ids)]
 
-    completed = set(re.findall(rf"^### ({ID_RE}):", done_text, re.M))
+    completed = set(re.findall(rf"^### ({ID_RE}):", head, re.M))
     sections = split_sections(lines)
     status = {}
     for tid, (s, e) in sections.items():
