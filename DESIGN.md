@@ -29,12 +29,18 @@ fingerprint X, how often, and at what cost?"*
 - Bounded memory with a rolling, time-bucketed history.
 - Track DML/SELECT **and** utility statements (DDL, etc.).
 - Support PostgreSQL 14+ from a single source tree.
-- Complement, not replace, `pg_stat_statements` (join on `queryid`).
+- Complement, not replace, `pg_stat_statements` (join on `queryid`). The
+  extension is a **companion** to pgss: per (query × context) it stores only
+  `calls` and `total_exec_time` (§5.1, decided 2026-10-05).
 
 ### Non-goals (v1)
 
 - Storing query text (use `pg_stat_statements` for that).
-- Plan capture, histograms, wait-event sampling.
+- Storing any per-statement counter other than `calls` and `total_exec_time`
+  (rows, buffers, WAL, I/O timing, JIT, min/max/mean/stddev, planning time).
+  pgss already tracks these per `queryid`; join to it (§7).
+- Plan capture, histograms, wait-event sampling, OS-level resource usage,
+  error counts (§8 "Rejected").
 - Being a general-purpose `pg_stat_statements` replacement (that is what
   `pg_stat_monitor` is).
 
@@ -76,9 +82,9 @@ replaces or rewrites the core `queryId`. This includes PG14/15 utility statement
                  └─────────────────────────────────────────────────────────────────────┼───┘
                                                                                        ▼
                                      ┌─────────────────── shared memory ───────────────────┐
-                                     │ HTAB: key(bucket, db, user, queryid, toplevel,      │
-                                     │           canonical tag set) → counters             │
-                                     │ ring of time buckets + per-bucket member lists,     │
+                                     │ HTAB: key(db, user, queryid, toplevel,              │
+                                     │           canonical tag set) →                      │
+                                     │       per-bucket ring of (calls, total_exec_time)   │
                                      │ LWLock + per-entry spinlocks                        │
                                      └──────────────────────────┬──────────────────────────┘
                                                                 ▼
@@ -104,9 +110,9 @@ replaces or rewrites the core `queryId`. This includes PG14/15 utility statement
    resolved tag set and statement metadata. A backend-local *active frame*
    pointer is set only while a hook is executing (§3.3), so nested statements
    (PL/pgSQL, triggers, SPI) can inherit their parent's tags.
-4. **Shared store** (`store.c`): fixed-size shared hash table plus a ring of
-   time buckets with per-bucket membership lists. It handles locking, expiry,
-   and eviction.
+4. **Shared store** (`store.c`): fixed-size shared hash table with one entry
+   per (query × context). Each entry holds a small ring of per-bucket counters
+   (§5.1, §5.2). It handles locking, expiry, and eviction.
 5. **SQL interface** (`pg_stat_statement_context--1.0.sql`): set-returning
    function, views, reset function, and info function.
 6. **Config** (`guc.c`): GUC definitions. The `check_hook` parses and fully
@@ -119,19 +125,21 @@ replaces or rewrites the core `queryId`. This includes PG14/15 utility statement
 | Hook | Responsibility |
 |------|----------------|
 | `shmem_request_hook` (PG15+) / `RequestAddinShmemSpace` in `_PG_init` (PG14) | Reserve shared memory and LWLock tranche. |
-| `shmem_startup_hook` | Create or attach the shared hash table and bucket ring. |
+| `shmem_startup_hook` | Create or attach the shared header and hash table. |
 | `post_parse_analyze_hook` | Nothing in v1. |
 | `ExecutorStart` | If enabled and `queryId != 0`: create the executor frame in `es_query_cxt` and resolve its tags eagerly (scan, or inherit from the active frame). Set up `queryDesc->totaltime`, as pgss does. |
 | `ExecutorRun` / `ExecutorFinish` | Make this frame active and increment `nesting_level`. Restore both in `PG_FINALLY`. |
-| `ExecutorEnd` | Accumulate counters into the store under the frame's key, then drop the frame. |
-| `ProcessUtility` | Before chaining, snapshot `queryId`, statement bounds, and tags into a utility frame. Activate it (and bump nesting, except for `EXECUTE`/`PREPARE`) around the chained call. Record from the snapshot afterwards. Never touch `pstmt` after chaining (§6.7). |
-| `planner_hook` (optional, `track_planning`) | Planning time, if wanted later. |
+| `ExecutorEnd` | Add one call and the elapsed time from `queryDesc->totaltime` to the store under the frame's key, then drop the frame. |
+| `ProcessUtility` | Before chaining, snapshot `queryId`, statement bounds, and tags into a utility frame. Activate it (and bump nesting, except for `EXECUTE`/`PREPARE`) around the chained call, timing it. Record from the snapshot afterwards. Never touch `pstmt` after chaining (§6.7). |
+
+No `planner_hook` is installed: planning time is left to pgss
+(`track_planning`), see §8 "Rejected".
 
 **Why the executor hooks, not `post_parse_analyze`?** Parse analysis is skipped
 when a cached plan or prepared statement is re-executed, but the executor hooks
 fire on every execution. Tags are resolved at `ExecutorStart` because children
 must be able to inherit them while the parent is still running. Counters are
-recorded at `ExecutorEnd`, where timing and row counts are final.
+recorded at `ExecutorEnd`, where the timing is final.
 
 **Load order.** pgss saves the utility `queryId`, then sets `pstmt->queryId = 0`
 **before** calling the next `ProcessUtility` hook. It does this whenever it is
@@ -139,7 +147,9 @@ enabled and `track_utility` is on, and it also warns that `pstmt` may be freed
 by `ROLLBACK`. This extension's hook must therefore run outside pgss's:
 `shared_preload_libraries = 'pg_stat_statements, pg_stat_statement_context'`
 (the library loaded last installs the outermost hook). `_PG_init` checks the
-order in `shared_preload_libraries` and logs a `WARNING` if it is wrong. At
+order in `shared_preload_libraries` and logs a `WARNING` if it is wrong. The
+warning is the only action: utility tracking is not disabled (decided
+2026-10-05, §11 Q7). At
 runtime, utility calls that arrive with `queryId = 0` are counted in
 `_info().utility_missing_queryid` rather than being recorded. The extension
 itself never modifies `pstmt->queryId`, because pgss inside it depends on that
@@ -169,7 +179,7 @@ ExecutorRun/Finish:
 
 ExecutorEnd:
   if frame recordable (track, toplevel, untagged policy):
-    store_record(frame.key, counters)     -- §5.4
+    store_record(frame.key, 1 call, totaltime)   -- §5.4
   chain
 ```
 
@@ -194,8 +204,8 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.track` | `top` | superuser | `none` / `top` / `all`, as in pgss. |
 | `pg_stat_statement_context.track_utility` | `on` | superuser | Record utility/DDL statements. |
 | `pg_stat_statement_context.nested_tags` | `inherit` | superuser | `inherit` (use top-level tags) / `scan` (scan nested source) / `none`. |
-| `pg_stat_statement_context.max_entries` | `10000` | postmaster | Total hash entries across all buckets. |
-| `pg_stat_statement_context.bucket_count` | `12` | postmaster | Number of time buckets in the ring. |
+| `pg_stat_statement_context.max_entries` | `10000` | postmaster | Max (query × context) combinations. Each entry holds a counter ring of `bucket_count` slots, so this is independent of `bucket_count` (§5.1). |
+| `pg_stat_statement_context.bucket_count` | `12` | postmaster | Number of time buckets (slots in each entry's counter ring). |
 | `pg_stat_statement_context.bucket_interval` | `300s` | postmaster | Width of each bucket. 12 × 5 min = 1 hour history. Fixed at startup so all backends agree on bucket IDs (§5.2). |
 | `pg_stat_statement_context.max_tags` | `8` | postmaster | Max tags stored per entry. |
 | `pg_stat_statement_context.max_tag_value_len` | `64` | postmaster | Bytes per tag value. Longer values are truncated on a character boundary. Keys are limited to 63 bytes, and longer keys are dropped. |
@@ -204,7 +214,13 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.extractors` | `'sqlcommenter, marginalia'` | sighup | Extractor DSL (§4.2). |
 | `pg_stat_statement_context.tags` | `'action, controller, job'` | sighup | Allowlist of tag keys to keep, applied after `rename`. Tags not listed are discarded. `'*'` keeps all tags (not recommended, see §6.1). |
 | `pg_stat_statement_context.exclude_tags` | `'traceparent, tracestate, request_id'` | sighup | Denylist (high-cardinality). Only relevant when `tags = '*'`. |
-| `pg_stat_statement_context.untagged` | `record` | sighup | `record` (empty tag set) / `skip` statements without tags. |
+| `pg_stat_statement_context.untagged` | `skip` | sighup | `skip` statements without tags (default, decided 2026-10-05, §11 Q1) / `record` them with an empty tag set. |
+
+The configuration lives in GUCs only; there is no separate config file
+(decided 2026-10-05, §11 Q3). To change it from SQL, use
+`ALTER SYSTEM SET pg_stat_statement_context.extractors = '...';` followed by
+`SELECT pg_reload_conf();`. This works for every `sighup` setting, including
+`extractors`, `tags`, and `exclude_tags`.
 
 ### 4.2 Extractor DSL
 
@@ -221,8 +237,8 @@ Common parameters:
 
 | Param | Values | Meaning |
 |-------|--------|---------|
-| `position` | `append` / `prepend` / `any` | Where the comment is expected. `append` = last comment before optional trailing `;`/whitespace. |
-| `keys` | `a\|b\|c` | Per-extractor allowlist. |
+| `position` | `append` / `prepend` / `any` | Where the comment is expected. `append` = last comment before optional trailing `;`/whitespace. Default when omitted: `append` for `sqlcommenter` and `marginalia`, `any` for `regex` (decided 2026-10-05). |
+| `keys` | `a\|b\|c` | Per-extractor allowlist. It matches the **original** key names as they appear in the comment, and is applied before `rename` (decided 2026-10-05, §6.11). |
 | `rename` | `old:new\|...` | Normalize key names across formats (`controller` vs `route`). |
 | `merge` | `on` / `off` | Union tags with earlier extractors instead of stopping. |
 
@@ -241,6 +257,10 @@ Format-specific parameters:
   capture offsets are mapped back to bytes. v1 limits: pattern ≤ 1 kB, captures
   ≤ `max_tags`, and patterns with back-references are rejected
   (`re_info & REG_UBACKREF`).
+- **appname** (roadmap, §8): `appname(format=sqlcommenter|marginalia|regex)`
+  parses `application_name` instead of comment text, using the named format's
+  rules (and `pattern`/`keys` for `regex`). Tags from comments win over
+  `appname`-derived tags on key conflicts.
 
 Examples:
 
@@ -277,19 +297,40 @@ into a private memory context that it owns, and frees the old ones with
 lazy compilation fails (for example, out of memory), that extractor is disabled
 for the backend and the failure is counted. The statement itself is not failed.
 
-> **Alternative considered:** a config table (`pg_stat_statement_context.rules`).
+> **Alternatives considered:** a config table (`pg_stat_statement_context.rules`).
 > Rejected for v1 because reading catalogs from `ExecutorEnd` adds overhead,
 > is database-local while the extension is cluster-wide, and gets complicated
 > inside aborted transactions. GUCs are already reloadable, permissioned, and
-> shown in `pg_settings`.
+> shown in `pg_settings`. A separate `config_file` GUC for complex setups was
+> also rejected (§11 Q3): `ALTER SYSTEM` plus `pg_reload_conf()` (§4.1) already
+> gives a from-SQL path with the same all-or-nothing validation.
 
 ## 5. Storage and the rolling buffer
 
 ### 5.1 Key and entry
 
+The extension is a **companion** to `pg_stat_statements`, not a replacement
+(decided 2026-10-05). Each (query × context) entry stores only two counters
+per time bucket: `calls` and `total_exec_time`. Everything else that pgss
+tracks per `queryid` (rows, shared/local/temp blocks, WAL, I/O timing, JIT,
+min/max/mean/stddev, planning time) is left to pgss, and users join to it on
+`(userid, dbid, queryid, toplevel)` (§7).
+
+*Why `total_exec_time` and not just `calls`:* `calls` alone can't apportion
+load across contexts when the per-context cost of the same `queryid` differs
+(for example, one controller passes a selective parameter and another a
+non-selective one). `total_exec_time` is the minimum needed to attribute
+cost to a context. Other pgss metrics can be apportioned approximately by
+each context's share of `total_exec_time` (§7).
+
+The key layout is **one entry per (query × context) holding a per-bucket
+counter ring**. `bucket_id` is *not* part of the key (decided 2026-10-05,
+§11 Q5). Because an entry holds only two counters per bucket, the ring costs
+about 24 bytes per bucket (288 bytes with the default 12 buckets), which is
+cheap compared with the key itself.
+
 ```c
 typedef struct ctxKey {
-    int64   bucket_id;     /* absolute bucket number, see §5.2 */
     Oid     dbid;
     Oid     userid;
     int64   queryid;
@@ -299,14 +340,19 @@ typedef struct ctxKey {
     char    tags[FLEXIBLE];/* canonical "k\0v\0k\0v\0", max_tagset_bytes */
 } ctxKey;
 
+typedef struct ctxSlot {
+    int64   bucket_id;     /* absolute bucket number this slot holds (§5.2) */
+    int64   calls;
+    double  total_exec_time;   /* ms */
+} ctxSlot;
+
 typedef struct ctxEntry {
     ctxKey   key;          /* keysize fixed at startup */
-    slock_t  mutex;
-    dlist_node bucket_link;/* membership list of its bucket (§5.2) */
-    ctxCounters counters;  /* calls, total/min/max/mean/sum_var exec time, rows,
-                              shared/local/temp blks hit/read/written, wal_*,
-                              usage */
+    slock_t  mutex;        /* protects slots[], last_bucket, usage */
+    int64    last_bucket;  /* newest bucket_id written; drives reclamation */
+    double   usage;        /* pgss-style usage for eviction (not exposed) */
     int      encoding;     /* encoding of tags[] (that of dbid) */
+    ctxSlot  slots[FLEXIBLE]; /* bucket_count slots; index = bucket_id mod bucket_count */
 } ctxEntry;
 ```
 
@@ -318,20 +364,22 @@ The compare checks the fixed fields and `tags_len`, then runs `memcmp` on only
 the used bytes. Keys are still built by `memset`-ing the whole key to zero first
 (pgss does the same), so padding and unused tag bytes are always defined.
 
-`keysize` and `entrysize` are computed at startup from `max_tagset_bytes`.
-Shared memory is sized as `hash_estimate_size(max_entries, entrysize)` plus the
-header and bucket ring, using `add_size`/`mul_size` overflow checks. The table
-is created with `init_size = max_size = max_entries`, so all entries are
-preallocated. `ShmemInitHash`'s `max_size` is only an estimate, not a limit, so
-the `max_entries` cap is enforced by the extension under the exclusive lock.
-With the defaults, an entry is on the order of 1 KB. `_info()` reports the exact
-`shmem_bytes` value.
+`keysize` is computed at startup from `max_tagset_bytes`, and `entrysize` from
+`keysize` and `bucket_count`. Shared memory is sized as
+`hash_estimate_size(max_entries, entrysize)` plus the header, using
+`add_size`/`mul_size` overflow checks. The table is created with
+`init_size = max_size = max_entries`, so all entries are preallocated.
+`ShmemInitHash`'s `max_size` is only an estimate, not a limit, so the
+`max_entries` cap is enforced by the extension under the exclusive lock.
+With the defaults, an entry is on the order of 1 KB, dominated by the tag set.
+`_info()` reports the exact `shmem_bytes` value.
 
-**Capacity is measured in (query × context) combinations × occupied buckets**,
-not in combinations alone. For example, 5,000 recurring combinations active in
-all 12 buckets need 60,000 entries. With `max_entries = 10000`, only about 833
-combinations can be live in every bucket at once. The documentation should give
-this sizing rule.
+**Capacity is measured in (query × context) combinations**, independent of
+`bucket_count`: 5,000 recurring combinations need 5,000 entries whether they
+are active in one bucket or all of them. A combination keeps its entry while
+any of its slots is live; once all its slots have expired it is *dead* and is
+reclaimed first under pressure (§5.3). The documentation should give this
+sizing rule.
 
 ### 5.2 Time buckets
 
@@ -342,54 +390,67 @@ this sizing rule.
 - The header holds `current_bucket`, which only changes under the exclusive
   lock. A writer whose computed ID is newer than `current_bucket` releases its
   shared lock, takes the exclusive lock, **re-checks** the header, and advances
-  the ring if it is still behind. Advancing drops each expired bucket by walking
-  only that bucket's membership list.
-- The ID actually written is chosen while the lock is held. An ID older than the
-  oldest live bucket (the backend stalled across a rollover) or newer than
-  `current_bucket` (another backend has not yet advanced the ring) is clamped to
-  `current_bucket`. Because the header is stable while any lock is held, no
-  entry can be inserted into an expired bucket.
+  `current_bucket` if it is still behind. Advancing is a header update only:
+  no entry is touched, because each entry's ring rolls over lazily (below).
+  This happens once per interval cluster-wide, not once per combination.
+- The ID actually written is chosen while the lock is held. An ID older than
+  `current_bucket` (the backend stalled across a rollover, or the clock moved
+  backwards) or newer than it (another backend has not yet advanced the
+  header) is clamped to `current_bucket`. Because the header is stable while
+  any lock is held, no write can land in an expired bucket.
+- **Per-entry ring rollover:** under the entry spinlock, the writer picks
+  `slot = bucket_id mod bucket_count`. If that slot holds an older
+  `bucket_id`, the slot is zeroed and relabeled before the counters are added.
+  `last_bucket` is set to the written ID. Since written IDs never exceed
+  `current_bucket`, a slot never holds a newer ID than the one being written.
 - If the wall clock moves backwards, `current_bucket` never decreases, and
-  writes clamp to it. A forward jump larger than the ring expires everything.
-  Bucket arithmetic is signed, so the cutoff can't underflow.
+  writes clamp to it. A forward jump larger than the ring makes every slot
+  stale at once. Bucket arithmetic is signed, so the cutoff can't underflow.
 - Rollover happens lazily on the write path, so no background worker is needed.
-  Readers do not depend on writers, because the SRF compares each entry to the
-  clock-derived current bucket and hides expired entries even if nothing has
-  advanced the ring.
+  Readers do not depend on writers, because the SRF compares each slot's
+  `bucket_id` to the clock-derived current bucket and hides slots outside the
+  live window `[current - bucket_count + 1, current]`, even if nothing has
+  written to that entry or advanced the header.
 - Semantics: an execution is attributed to the bucket in which its
-  `ExecutorEnd` (or utility completion) runs. Its whole accumulated work goes
+  `ExecutorEnd` (or utility completion) runs. Its whole accumulated time goes
   there, even for a long-lived cursor that started much earlier. Buckets
   therefore show **completions per interval**, not work done per interval.
 
 ### 5.3 Eviction under pressure
 
-If the table is at `max_entries`:
+If an insert finds the table at `max_entries`, then under the exclusive lock:
 
-1. Drop the **oldest** live bucket in full, using its membership list.
-2. If only the current bucket is left, evict its lowest-usage ~5% of entries,
-   pgss-style. This sorts only that bucket's members, not the whole table.
-3. Increment `dealloc` and `evicted_entries` counters exposed by `_info()`,
-   so users can tell that `max_entries` is too small.
+1. Reclaim **dead** entries first: those whose `last_bucket` is older than the
+   live window, so every slot has expired.
+2. If that frees less than ~5% of `max_entries`, evict further live entries,
+   pgss-style: order by `last_bucket` (least recently written first), then by
+   `usage` (lowest first), and evict until ~5% is free. `usage` decays as in
+   pgss.
+3. Increment `dealloc` (once per eviction pass) and `evicted_entries` (per
+   entry, live or dead), both exposed by `_info()`, so users can tell that
+   `max_entries` is too small.
+
+As in pgss, an eviction pass scans and sorts the whole table. That cost is paid
+only when the table is full; the benchmarks measure it (§9).
 
 ### 5.4 Locking
 
-The locking is modeled on `pg_stat_statements`, but the bucketed workload has a
-different miss pattern, so latency is measured rather than assumed (§9):
+The locking is modeled on `pg_stat_statements`, and latency is measured rather
+than assumed (§9):
 
 - One LWLock for the hash table. Shared mode is enough to look up an existing
-  entry and update its counters under that entry's spinlock. Exclusive mode is
-  only needed to insert, evict, or roll over a bucket.
+  entry and update its ring under that entry's spinlock, including the lazy
+  slot rollover (§5.2). Exclusive mode is only needed to insert, evict, or
+  advance `current_bucket`.
 - LWLocks cannot be upgraded. On a miss, the backend releases the shared lock,
   acquires the exclusive lock, and then re-validates everything. It re-checks
   the bucket (§5.2) and repeats the `HASH_ENTER` lookup, because another backend
   may have inserted the entry in the meantime. Only then does it evict, if
   needed, and insert.
-- At every bucket boundary, each active combination misses once and inserts.
-  This is a periodic burst of exclusive-lock acquisitions that a
-  persistent-entry design like pgss does not have. Per-bucket membership lists
-  keep rollover and eviction proportional to the affected bucket. A background
-  worker would move this work off the query path but would not remove
-  exclusive-lock stalls.
+- Because the key does not include the bucket, a recurring combination misses
+  only once, when it is first seen (or after it was evicted), as in pgss. The
+  only per-interval exclusive acquisition is the single header advance at each
+  bucket boundary.
 - Tag extraction and hashing happen **before** any lock is taken.
 
 ## 6. Gotchas and mitigations
@@ -405,8 +466,10 @@ example, an unnormalized route like `/users/123`), or if a buggy or malicious
 client sends random values for an allowed key.
 **Mitigation:** the restrictive default allowlist, a denylist of known
 high-cardinality keys for anyone who opts into `tags = '*'`,
-`max_tag_value_len` truncation, and `_info()` counters for evictions. Roadmap: per-key cardinality caps that
-collapse overflow values to `<other>`, plus exemplar storage (§8).
+`max_tag_value_len` truncation, and `_info()` counters for evictions. Roadmap
+(§8): per-key value normalization rules, per-key cardinality caps that
+collapse overflow values to JSON `null`, plus exemplar storage. `null` cannot
+collide with a real value, because a client can only send strings.
 
 ### 6.2 Long queries (e.g., 10k-element `IN` lists)
 Even a linear scan costs something on a 1 MB query string.
@@ -458,9 +521,9 @@ its own right. Statements run during the *planning* of a parent, such as
 constant-folded function calls, have no active frame. They get only their own
 tags.
 
-**Costs are inclusive.** With `track = all`, a parent's time and buffer usage
-already include its children's work. Executor instrumentation wraps Run and
-Finish, including AFTER triggers. Summing parent and child rows therefore
+**Costs are inclusive.** With `track = all`, a parent's time already includes
+its children's work. Executor instrumentation wraps Run and Finish, including
+AFTER triggers. Summing parent and child `total_exec_time` therefore
 double-counts. Per-application cost totals should filter on `toplevel` (§7).
 
 ### 6.5 Multi-statement query strings
@@ -488,12 +551,10 @@ are never attached to statements whose ranges don't own them.
 
 **Decision:** the `queryid` column always equals the core and pgss value on
 every version, because it is the join key. pgss sees the same fragmented IDs on
-PG14/15, so joins still work. The fragmentation is documented. If grouping
-across tag sets is needed there, a separately named column (e.g.
-`utility_textid`) can be added later. It would hash the statement with comments
-removed by the lexer. Literal and quoted-identifier contents stay unchanged,
-and whitespace is collapsed only outside tokens. It never replaces `queryid`
-(§11).
+PG14/15, so joins still work. The fragmentation is documented. A separate
+comment-insensitive `utility_textid` column was considered and rejected
+(decided 2026-10-05, §11 Q4): pgss has the same PG14/15 behavior, so it is not
+worth the extra column.
 
 ### 6.7 `EXECUTE`/`PREPARE` and utility nesting
 SQL `EXECUTE` goes through `ProcessUtility`, and then the executor runs the
@@ -515,25 +576,18 @@ prepared plan. Recording eligibility and nesting are separate decisions:
 
 ### 6.8 Parallel workers
 Parallel workers run executor hooks too.
-**Mitigation:** skip when `IsParallelWorker()`, as pgss does. The leader's
-instrumentation already includes worker buffer usage.
+**Mitigation:** skip when `IsParallelWorker()`, as pgss does, so each
+statement is counted once. The leader's elapsed time already covers the
+workers' execution.
 
 ### 6.9 Errors and cancellations
 `ExecutorEnd` is not reached when a statement errors, so failed statements are
 not counted. This is the same as pgss. Frames of failed executors are cleaned
 up by their memory-context callback (§3.2). The active-frame and nesting
 changes are wrapped in `PG_TRY`/`PG_FINALLY`, so they can't leak.
-**Roadmap:** count errors per tag set at the hook exception boundaries
-(`PG_CATCH` in Run/Finish/ProcessUtility), while the frame is still known. The
-error would be noted in backend-local memory and rethrown, then flushed to
-shared memory later, for example from an abort callback. An error should be
-attributed only to the innermost recorded frame, and errors caught inside
-PL/pgSQL `EXCEPTION` blocks should not be counted against the outer statement.
-Parse and planning errors happen before any frame exists and are out of scope.
-`emit_log_hook` is *not* suitable as the counter source. It only sees messages
-selected for the server log (so counts would depend on `log_min_messages`), it
-runs after unwinding when the frame is already gone, and it never sees errors
-that are caught internally.
+Per-tag-set error and cancellation counts were considered for the roadmap and
+rejected (decided 2026-10-05): they are out of scope for a pgss companion, so
+§11 Q6 (error deduplication rules) is moot.
 
 ### 6.10 Version-specific API differences (PG14–18)
 | Area | Difference |
@@ -543,20 +597,41 @@ that are caught internally.
 | `ProcessUtility` signature | `readOnlyTree` parameter (PG14+). Check each major version for further changes. |
 | `queryId` jumbling | PG16 moved to node-generated jumbling (utility statements are jumbled by node from PG16). PG18 squashes constant lists. |
 | pgss utility handling | PG14–16 exclude `EXECUTE`/`PREPARE`/`DEALLOCATE` and bump nesting only for tracked utilities. PG17+ exclude only `EXECUTE`/`PREPARE` and bump nesting for all other utilities (§6.7). |
-| Row counts | pgss uses `es_processed` (last `ExecutorRun` only) on PG14/15 and `es_total_processed` on PG16+. v1 mirrors this so `rows` matches pgss. |
 | GUC `extra` allocation | PG14/15: `malloc`, freed with `free()` (`guc_malloc` is static there). PG16+: `guc_malloc` in the GUC memory context (§4.2). |
 | Regex allocator | PG14/15 `malloc`, PG16+ `palloc` in `CurrentMemoryContext` (§4.2). |
-| Buffer/WAL/JIT counters | Fields added across versions (e.g. `shared_blk_read_time` in PG17). |
 
 **Mitigation:** a `compat.h` with `PG_VERSION_NUM` macros, and a CI matrix that
 builds and runs regression tests against every supported major version.
 
+**Counter availability.** The stored counters, `calls` and `total_exec_time`,
+exist on every supported version, so v1 needs no per-version counter shims.
+Row counts, buffer/WAL/I/O-timing and JIT fields, whose availability varies by
+version (for example `shared_blk_read_time` in PG17), are not stored at all
+(§5.1). General policy, following pgss: if a future column is unavailable on
+some server version, it is omitted on that version rather than exposed as
+`NULL`.
+
 ### 6.11 Security and privacy
 - Tag values are untrusted client input and are never interpreted. Processing
-  order: decode (URL/`\'`), then reject values that contain NUL or are invalid
-  in the database encoding (`pg_verify_mbstr`), then rename, then apply the
-  allowlist, then truncate on a character boundary (`pg_mbcliplen`), then sort
-  and serialize within `max_tagset_bytes`. Malformed tags are dropped and
+  order:
+  1. decode (URL/`\'`)
+  2. reject values that contain NUL or are invalid in the database encoding
+     (`pg_verify_mbstr`)
+  3. apply the per-extractor `keys` allowlist, matching **original** key names
+     (decided 2026-10-05)
+  4. rename
+  5. apply the global allowlist (or the denylist when `tags = '*'`), and drop
+     keys longer than 63 bytes
+  6. *(roadmap)* value normalization: per-key regex-replace rules (§8)
+  7. truncate on a character boundary (`pg_mbcliplen`)
+  8. *(roadmap)* per-key cardinality caps, collapsing overflow values to
+     JSON `null` (§8)
+  9. sort and serialize within `max_tagset_bytes`
+
+  Tags from `tags_override` (roadmap, §8) go through the same steps except
+  step 3, since no extractor is involved. `appname` (roadmap) is an extractor,
+  so its tags follow every step.
+  Malformed tags are dropped and
   counted in `_info().invalid_tags`. They never raise an error in the user's
   statement.
 - Tags are stored in the originating database's encoding, which is recorded per
@@ -590,10 +665,7 @@ CREATE FUNCTION pg_stat_statement_context(
     merge_buckets boolean DEFAULT false,
     OUT bucket_start timestamptz, OUT userid oid, OUT dbid oid,
     OUT queryid bigint, OUT toplevel bool, OUT tags jsonb,
-    OUT calls bigint, OUT total_exec_time float8, OUT min_exec_time float8,
-    OUT max_exec_time float8, OUT mean_exec_time float8,
-    OUT stddev_exec_time float8, OUT rows bigint,
-    OUT shared_blks_hit bigint, OUT shared_blks_read bigint, ...)
+    OUT calls bigint, OUT total_exec_time float8)
 RETURNS SETOF record ...;
 
 CREATE VIEW pg_stat_statement_context AS
@@ -609,22 +681,35 @@ REVOKE ALL ON FUNCTION pg_stat_statement_context_reset() FROM PUBLIC;
 
 CREATE FUNCTION pg_stat_statement_context_info(
     OUT entries bigint, OUT max_entries bigint, OUT dealloc bigint,
+    OUT evicted_entries bigint,
     OUT buckets int, OUT oldest_bucket timestamptz, OUT shmem_bytes bigint,
-    OUT invalid_tags bigint, OUT heuristic_scans bigint,
+    OUT invalid_tags bigint, OUT dropped_tags bigint,
+    OUT heuristic_scans bigint, OUT regex_compile_failures bigint,
     OUT utility_missing_queryid bigint, OUT stats_reset timestamptz) ...;
 ```
 
-Bucket merging happens in C because the statistics must be merged with
-weights. Sums add up, `min`/`max` take the min of the mins and the max of the
-maxes, and the mean is weighted by calls. Variance is pooled from the per-bucket
-`sum_var` (Chan et al.):
-`M2 = M2a + M2b + δ²·na·nb/(na+nb)`. Averaging per-bucket means would be wrong.
-For example, one 100 ms call plus 100 one-ms calls has a mean of about 1.98 ms,
-not 50.5 ms.
+The column set is deliberately minimal (§5.1, decided 2026-10-05): `calls` and
+`total_exec_time` only. Rows, buffers, WAL, I/O timing, JIT, and
+min/max/mean/stddev come from `pg_stat_statements`, joined on
+`(userid, dbid, queryid, toplevel)`. `tags` is `jsonb` (decided 2026-10-05,
+§11 Q2), with string values (and `null` for values collapsed by the roadmap
+cardinality caps, §8).
+
+`_info()` columns added on 2026-10-05: `evicted_entries` (§5.3),
+`dropped_tags` (tags dropped because the tag set would exceed
+`max_tagset_bytes`, §4.1), and `regex_compile_failures` (lazy-compile failures,
+§4.2). Regex failures happen per backend, so they are flushed into a shared
+counter in the header.
+
+Bucket merging (`merge_buckets = true`) sums `calls` and `total_exec_time`
+across an entry's live slots (§5.2). Because the key has no bucket, each entry
+yields exactly one merged row, and `bucket_start` is its oldest live slot.
 
 Counter semantics: `calls` counts completed executor instances, meaning
 `ExecutorEnd` was reached. That is not the number of Execute or FETCH messages.
-`rows` matches pgss on each version (§6.10).
+`total_exec_time` is in milliseconds and is measured the same way pgss measures
+it (`queryDesc->totaltime` for plannable statements, elapsed time around the
+chained call for utilities).
 
 Typical use, joined to `pg_stat_statements` for query text. Filtering on
 `toplevel` avoids double-counting nested work (§6.4):
@@ -640,50 +725,80 @@ GROUP BY 1, 2, s.query
 ORDER BY ms DESC LIMIT 20;
 ```
 
+Other pgss metrics can be apportioned to a context approximately by its share
+of the statement's execution time, for example
+`s.shared_blks_read * c.total_exec_time / nullif(s.total_exec_time, 0)`. This
+is an estimate: it assumes the metric is proportional to time, and pgss
+accumulates since its last reset, while this extension covers only the live
+bucket window.
+
 `toplevel` is only present in `pg_stat_statements` from PG14 onwards, which
 matches this extension's minimum supported version.
 
 ## 8. Roadmap
 
 **v1.x — hardening**
-- Per-key cardinality caps that collapse overflow values to `<other>`.
-- **Exemplars:** keep the last-seen value of excluded high-cardinality keys
-  such as `traceparent` per entry, so users can jump from an aggregate to a
-  real trace without the key exploding.
-- Optional background worker for bucket rollover on idle systems. This is not
-  needed for correctness, since readers filter expired buckets (§5.2).
-- Persist stats across clean restarts (dump/load like `pg_stat_statements.save`).
-- `track_planning` support (planning time).
-- Optional `utility_textid` column for comment-insensitive utility grouping on
-  PG14/15 (§6.6).
+- **Per-key cardinality caps.** Values beyond a key's cap collapse to JSON
+  `null` before the key is built (§6.11 step 8). `null` can't collide with a
+  real value, since clients can only send strings. Adopted configuration
+  (2026-10-05): a global default cap GUC plus optional per-key overrides, with
+  distinct values counted globally per key (not per bucket or per `queryid`).
+  Collapses are counted in `_info()`.
+- **Exemplars:** store the most recent value of an excluded high-cardinality
+  key, such as `traceparent`, per entry, so users can jump from an aggregate
+  to a real trace without the key exploding. (Key selection and per-entry
+  storage budget are still open; see the backlog.)
+- Optional background worker that reclaims dead entries (all slots expired)
+  on idle systems. This is not needed for correctness, since readers filter
+  expired slots (§5.2).
+- **Persist stats across clean restarts** (dump/load like
+  `pg_stat_statements.save`), following pgss's lead (decided 2026-10-05): the
+  saved file is discarded on a file-format or extension-version mismatch; if
+  `max_entries` shrank, load what fits and evict the rest (§5.3); if
+  `bucket_interval` or `bucket_count` changed, discard the file (pgss has no
+  bucket analogue). Slots that expired during the downtime are dropped.
 
 **v2 — more context sources**
-- Context from a session or transaction GUC, e.g.
-  `SET LOCAL pg_stat_statement_context.tags_override = 'controller=users'`. This works
-  with prepared statements and with drivers that can't add comments. It moves
-  into v1 if driver validation (§6.3) shows prepared plans being reused across
-  contexts.
-- Context from `application_name` parsing.
+- **`tags_override`:** context from a session or transaction GUC, e.g.
+  `SET LOCAL pg_stat_statement_context.tags_override = 'controller=''users'',action=''show'''`.
+  The value uses sqlcommenter syntax (`k='v',k2='v2'`, URL-encoded values). It
+  **merges** with comment tags, and the override wins on key conflicts.
+  Override tags go through the §6.11 pipeline (rename, allowlist/denylist,
+  truncation). This works with prepared statements and with drivers that can't
+  add comments. It moves into v1 if driver validation (§6.3) shows prepared
+  plans being reused across contexts.
+- **Context from `application_name`:** a DSL extractor
+  `appname(format=sqlcommenter|marginalia|regex)` (§4.2). Tags from comments
+  win over `appname`-derived tags on key conflicts.
 - A `pg_stat_statement_context_activity` view showing the **current** tags of
   each backend, as a context-aware companion to `pg_stat_activity`. It follows
   the same visibility rules as §6.11.
-- Error and cancellation counts per tag set, captured at hook exception
-  boundaries (§6.9). An `emit_log_hook` integration might be added only as an
-  optional way to enrich server log lines with tags.
-- Value normalization rules, e.g. regex rewrite `/users/\d+` → `/users/:id`.
+- **Value normalization rules:** per-key regex-replace rules, e.g.
+  `/users/\d+` → `/users/:id`. They run after rename and the allowlist/denylist,
+  and before truncation and cardinality caps (§6.11 step 6).
 
 **v3 — ecosystem**
 - Prometheus or OpenTelemetry exporter recipes (postgres_exporter queries, OTel
   Collector `postgresql` receiver config).
 - Grafana dashboard.
-- Wait-event sampling attributed to tags, via a background worker sampling
-  backends together with the activity view.
-- CPU and I/O at the OS level (`getrusage`, as in `pg_stat_kcache`) per tag set.
 - Packaging: PGXN, PGDG apt/yum, Homebrew, Docker images. Engage managed-cloud
   providers about adding the extension to their allowlists.
 - Upstream conversation: propose a core hook or field for "statement comments"
   or a query-tag mechanism, which would benefit pgss and any similar
   extension.
+
+**Rejected (2026-10-05).** Out of scope for a pgss companion, which stores only
+`calls` and `total_exec_time` per context (§5.1):
+- `track_planning` (planning time): pgss already tracks planning per `queryid`.
+- `utility_textid` for PG14/15: pgss has the same fragmented utility IDs (§6.6).
+- Error and cancellation counts per tag set: adds hook-exception machinery for
+  a metric outside the companion scope (§6.9).
+- Wait-event sampling attributed to tags: needs a sampling worker and a
+  separate store; not a per-statement counter.
+- OS-level CPU and I/O (`getrusage`) per tag set: that is `pg_stat_kcache`'s
+  job.
+- Extractor `config_file`: GUCs plus `ALTER SYSTEM`/`pg_reload_conf()` suffice
+  (§4.1, §11 Q3).
 
 ## 9. Testing strategy
 
@@ -707,10 +822,11 @@ matches this extension's minimum supported version.
   - both `shared_preload_libraries` orders, and pgss/extension `track` and
     `track_utility` settings that differ
   - nested `toplevel` parity with pgss per version
-  - stale-bucket insertion across a rollover, clock steps
+  - stale-bucket insertion across a rollover, per-entry slot rollover, clock
+    steps
   - a forced hash collision (debug hash override) followed by eviction and
     reinsertion
-  - small-`max_entries` churn
+  - small-`max_entries` churn, with dead entries reclaimed before live ones
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset
 - **CI matrix**: PG14–18 × {Linux, macOS}, plus a Valgrind and
@@ -747,25 +863,33 @@ pg_stat_statement_context/
 
 ## 11. Open questions
 
-1. Should an empty tag set be recorded by default? Doing so gives a complete
-   picture, but untagged traffic can then take up a large share of the entries.
-2. `jsonb` for `tags`, or fixed columns for a configured set of keys? `jsonb`
-   is more flexible, while fixed columns are faster to filter and simpler to
-   index in an exporter.
-3. Should the extractor DSL live in one GUC or in a separate config file
-   (`pg_stat_statement_context.config_file`) for complex setups?
-4. Is a separate `utility_textid` (§6.6) worth adding for PG14/15, given that
-   `queryid` must stay equal to core/pgss?
-5. Key layout: `bucket_id` in the key (v1, simple) versus one entry per
-   (query × context) holding a small ring of per-bucket counters. The ring
+All seven questions below were resolved by the project owner on 2026-10-05.
+They are kept, with their resolutions, for the record. Remaining undecided
+points are tracked as open questions on individual tasks in `BACKLOG.md`.
+
+1. ~~Should an empty tag set be recorded by default?~~ **Resolved: no.**
+   Untagged statements are skipped by default (`untagged = skip`, §4.1), so
+   untagged traffic doesn't consume entries. `untagged = record` remains
+   available.
+2. ~~`jsonb` for `tags`, or fixed columns for a configured set of keys?~~
+   **Resolved: `jsonb`** (§7).
+3. ~~Should the extractor DSL live in one GUC or in a separate config
+   file?~~ **Resolved: GUCs only.** The from-SQL path is
+   `ALTER SYSTEM SET ...; SELECT pg_reload_conf();` (§4.1). The `config_file`
+   idea is rejected (§8).
+4. ~~Is a separate `utility_textid` (§6.6) worth adding for PG14/15?~~
+   **Resolved: not worth it**; pgss has the same PG14/15 behavior (§6.6, §8).
+5. ~~Key layout: `bucket_id` in the key versus one entry per
+   (query × context) holding a ring of per-bucket counters?~~
+   **Resolved: per-entry counter ring** (§5.1–§5.4). With only `calls` and
+   `total_exec_time` stored, the ring costs about 24 bytes per bucket, and the
    layout avoids re-inserting entries at every boundary and makes capacity
-   count combinations, but it costs `bucket_count`× counter space even for
-   sparse entries.
-6. Error counting (§6.9): what exact rules should deduplicate nested and
-   subtransaction-caught errors, and should cancellations be separate from
-   errors?
-7. Should a load-order violation (§3.2) be a `WARNING` (v1) or should it
-   disable utility tracking until the order is fixed?
+   count combinations.
+6. ~~Error counting (§6.9): deduplication rules and separate cancellation
+   counts?~~ **Moot:** per-tag-set error counts were dropped as out of scope
+   (§6.9, §8).
+7. ~~Should a load-order violation (§3.2) be a `WARNING` or disable utility
+   tracking?~~ **Resolved: `WARNING` only** (§3.2).
 
 [marginalia]: https://github.com/basecamp/marginalia
 [SQLCommenter]: https://google.github.io/sqlcommenter/

@@ -46,3 +46,98 @@ Other files should put version-dependent code behind these macros or helpers rat
 **Depends on:** 20261005-091225-1
 **Open questions:** none
 **Status:** done
+
+## Dropped
+
+Items removed from BACKLOG.md without being built, with the reason.
+
+### 20261005-091225-31: Roadmap: extractor config file (conditional)
+
+**Description:** If Q3 is decided in favor, add `pg_stat_statement_context.config_file`, which holds the extractor DSL for complex setups. Read and validate it at reload, with the same all-or-nothing semantics as the GUC `check_hook`. If Q3 is decided against, close this task.
+
+**Acceptance criteria:**
+- Reloading with a valid file applies it.
+- An invalid file is rejected, and the previous config stays active.
+- The behavior is documented.
+
+**Depends on:** 20261005-091225-8
+**Open questions:**
+- §11 Q3: should the extractor DSL live in one GUC or in a separate config file? If in a file, what is the file format, and how does it interact with the `extractors` GUC (precedence)?
+
+**Status:** dropped
+**Dropped:** 2026-10-05 — §11 Q3 decided against: configuration stays in GUCs only. The from-SQL path is `ALTER SYSTEM SET ...; SELECT pg_reload_conf();` (the `extractors` GUC is `sighup`), documented by task 20261005-091225-28.
+
+### 20261005-091225-36: Roadmap: `track_planning` (planning time)
+
+**Description:** Add an optional `planner_hook` that records planning time and plan counts per tag set, as in pgss `track_planning` (§3.2, §8). The planner hook runs before `ExecutorStart`, so no frame exists yet. Resolve tags at plan time without adding cross-execution memoization that violates §3.3.
+
+**Acceptance criteria:**
+- Planning statistics appear in new columns (with an upgrade script) and match pgss `total_plan_time` per `queryid`.
+- Overhead is benchmarked.
+
+**Depends on:** 20261005-091225-17, 20261005-091225-20
+**Open questions:** none
+**Status:** dropped
+**Dropped:** 2026-10-05 — out of scope for a pg_stat_statements companion, which stores only `calls` and `total_exec_time` per context; pgss `track_planning` already records planning time per `queryid`.
+
+### 20261005-091225-37: Roadmap: `utility_textid` column for PG14/15
+
+**Description:** Add a separate `utility_textid` column (§6.6, §8). It hashes the utility statement with comments removed by the lexer: literal and quoted-identifier contents stay unchanged, and whitespace is collapsed only outside tokens. It never replaces `queryid`.
+
+**Acceptance criteria:**
+- On PG14/15, DDL that differs only in comments shares one `utility_textid` but keeps distinct `queryid`s.
+- Literal differences still produce distinct IDs.
+
+**Depends on:** 20261005-091225-4, 20261005-091225-18, 20261005-091225-20
+**Open questions:**
+- §11 Q4: is a separate `utility_textid` worth adding at all, given that `queryid` must stay equal to core and pgss? If it is, should it also be populated on PG16+?
+
+**Status:** dropped
+**Dropped:** 2026-10-05 — §11 Q4 answered "not worth it": pgss has the same PG14/15 utility `queryid` behavior.
+
+### 20261005-091225-40: Roadmap: error and cancellation counts per tag set
+
+**Description:** Count errors at the hook exception boundaries (`PG_CATCH` in Run/Finish/ProcessUtility) while the frame is still known (§6.9, §8 v2). Note each error in backend-local memory, rethrow, and flush it to shared memory later, for example from an abort callback. Attribute an error only to the innermost recorded frame. Don't use `emit_log_hook` as the counter source.
+
+**Acceptance criteria:**
+- A failing statement increments the error count for its tag set exactly once.
+- Errors caught in PL/pgSQL `EXCEPTION` blocks don't count against the outer statement.
+- Parse and planning errors are not counted.
+
+**Depends on:** 20261005-091225-18, 20261005-091225-20
+**Open questions:**
+- §11 Q6: what exact rules deduplicate nested errors and errors caught by subtransactions?
+- Should cancellations (and timeouts) be counted separately from errors?
+
+**Status:** dropped
+**Dropped:** 2026-10-05 — out of scope for a pg_stat_statements companion; §11 Q6 is moot.
+
+### 20261005-091225-43: Roadmap: wait-event sampling attributed to tags
+
+**Description:** Add a background worker that samples backends' wait events together with their current tags from the activity view, and aggregates the samples per tag set (§8 v3).
+
+**Acceptance criteria:**
+- Under a lock-contention workload, wait events are attributed to the right tags.
+- The worker's overhead is measured.
+
+**Depends on:** 20261005-091225-39
+**Open questions:**
+- Where are samples stored: extra counters per entry, or a separate structure and view?
+- How are the sampling rate and retention configured?
+
+**Status:** dropped
+**Dropped:** 2026-10-05 — out of scope for a pg_stat_statements companion (needs a sampling worker and separate store).
+
+### 20261005-091225-44: Roadmap: OS-level CPU/I/O (`getrusage`) per tag set
+
+**Description:** Record user and system CPU time and OS-level read and write bytes per execution via `getrusage`, in the style of `pg_stat_kcache` (§8 v3). Add the counters and columns with an upgrade script.
+
+**Acceptance criteria:**
+- A CPU-bound statement shows matching CPU time.
+- Values are inclusive in the same sense as §6.4, which is documented.
+- Overhead is benchmarked on Linux and macOS.
+
+**Depends on:** 20261005-091225-18, 20261005-091225-20
+**Open questions:** none
+**Status:** dropped
+**Dropped:** 2026-10-05 — out of scope for a pg_stat_statements companion; OS-level resource usage is `pg_stat_kcache`'s job.

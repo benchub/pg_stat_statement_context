@@ -32,10 +32,19 @@ the same ID. Never renumber or reuse an ID.
     questions can be answered now, in parallel with the dependency work.
     Dependencies are still listed in the table.
 
-The backlog has two parts: **v1** (tasks 1–29) and the **post-v1 roadmap**
-(tasks 30–46, §8). Any roadmap task that adds SQL objects or columns must ship
+The backlog has two parts: **v1** (tasks 1–29, plus later additions
+20261005-101154-1 and 20261005-103941-1) and the **post-v1 roadmap** (tasks
+30, 32–35, 38, 39, 41, 42, 45, and 46, §8). Roadmap tasks 31, 36, 37, 40, 43,
+and 44 were dropped on 2026-10-05 as out of scope for a `pg_stat_statements`
+companion; they are archived under "Dropped" in BACKLOG-COMPLETE.md. Any
+roadmap task that adds SQL objects or columns must ship
 an extension upgrade script (for example `--1.0--1.1.sql`) rather than edit the
 frozen 1.0 script.
+
+**Scope decision (2026-10-05):** the extension is a companion to
+`pg_stat_statements`, not a replacement. Per (queryid × context) it stores only
+`calls` and `total_exec_time`; every other statistic comes from pgss via a join
+on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 
 ## Summary
 
@@ -47,60 +56,58 @@ frozen 1.0 script.
 | 20261005-091225-5 | Statement ranges and positional (windowed) scanning | 20261005-091225-4 | no | blocked-on-deps |
 | 20261005-091225-6 | SQLCommenter and marginalia pair parsers | none | no | ready |
 | 20261005-091225-7 | Core GUCs | 20261005-091225-1, 20261005-091225-2 | no | ready |
-| 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | yes | blocked-on-questions |
-| 20261005-091225-9 | Tag-set canonicalization pipeline and extractor chain | 20261005-091225-5, 20261005-091225-6, 20261005-091225-8 | yes | blocked-on-questions |
+| 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | no | blocked-on-deps |
+| 20261005-091225-9 | Tag-set canonicalization pipeline and extractor chain | 20261005-091225-5, 20261005-091225-6, 20261005-091225-8 | no | blocked-on-deps |
 | 20261005-091225-10 | Regex extractor runtime | 20261005-091225-8, 20261005-091225-9 | no | blocked-on-deps |
 | 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | blocked-on-deps |
-| 20261005-091225-12 | Counter set, accumulation, and bucket-merge math | 20261005-091225-2 | yes | blocked-on-questions |
-| 20261005-091225-13 | Shared store core (shmem, HTAB, key, locking) | 20261005-091225-2, 20261005-091225-7, 20261005-091225-12 | yes | blocked-on-questions |
-| 20261005-091225-14 | Time-bucket ring and lazy rollover | 20261005-091225-13 | no | blocked-on-deps |
-| 20261005-091225-15 | Eviction under pressure | 20261005-091225-14 | no | blocked-on-deps |
+| 20261005-091225-12 | Counters (`calls`, `total_exec_time`): accumulation and bucket merge | 20261005-091225-2 | no | ready |
+| 20261005-091225-13 | Shared store core (shmem, HTAB, key, locking) | 20261005-091225-2, 20261005-091225-7, 20261005-091225-12 | no | blocked-on-deps |
+| 20261005-091225-14 | Time buckets and lazy per-entry ring rollover | 20261005-091225-13 | no | blocked-on-deps |
+| 20261005-091225-15 | Eviction under pressure (dead entries first, then pgss-style) | 20261005-091225-14 | no | blocked-on-deps |
 | 20261005-091225-16 | Execution frames and active-frame tracking | 20261005-091225-9 | no | blocked-on-deps |
 | 20261005-091225-17 | Executor hooks and recording | 20261005-091225-12, 20261005-091225-14, 20261005-091225-16 | no | blocked-on-deps |
 | 20261005-091225-18 | `ProcessUtility` hook | 20261005-091225-17 | no | blocked-on-deps |
-| 20261005-091225-19 | `shared_preload_libraries` load-order detection and policy | 20261005-091225-18 | yes | blocked-on-questions |
-| 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | yes | blocked-on-questions |
-| 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | yes | blocked-on-questions |
+| 20261005-091225-19 | `shared_preload_libraries` load-order detection and policy | 20261005-091225-18 | no | blocked-on-deps |
+| 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | no | blocked-on-deps |
+| 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
-| 20261005-091225-24 | Tests: SQL interface, visibility, encodings, merge math | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
+| 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | blocked-on-deps |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-27 | Validate prepared-statement behavior of target drivers | none | no | ready |
 | 20261005-091225-28 | User documentation | 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27 | no | blocked-on-deps |
-| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | yes | blocked-on-questions |
-| 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | yes | blocked-on-questions |
-| 20261005-091225-31 | Roadmap: extractor config file (conditional) | 20261005-091225-8 | yes | blocked-on-questions |
-| 20261005-091225-32 | Roadmap: per-key cardinality caps (`<other>`) | 20261005-091225-17, 20261005-091225-21 | yes | blocked-on-questions |
+| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
+| 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | blocked-on-deps |
+| 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | blocked-on-deps |
+| 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | yes | blocked-on-questions |
-| 20261005-091225-34 | Roadmap: background worker for bucket rollover | 20261005-091225-15 | no | blocked-on-deps |
-| 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | yes | blocked-on-questions |
-| 20261005-091225-36 | Roadmap: `track_planning` (planning time) | 20261005-091225-17, 20261005-091225-20 | no | blocked-on-deps |
-| 20261005-091225-37 | Roadmap: `utility_textid` column for PG14/15 | 20261005-091225-4, 20261005-091225-18, 20261005-091225-20 | yes | blocked-on-questions |
-| 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | yes | blocked-on-questions |
+| 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | blocked-on-deps |
+| 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | blocked-on-deps |
+| 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | blocked-on-deps |
 | 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
-| 20261005-091225-40 | Roadmap: error and cancellation counts per tag set | 20261005-091225-18, 20261005-091225-20 | yes | blocked-on-questions |
-| 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | yes | blocked-on-questions |
+| 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | no | blocked-on-deps |
 | 20261005-091225-42 | Roadmap: exporter recipes and Grafana dashboard | 20261005-091225-28 | no | blocked-on-deps |
-| 20261005-091225-43 | Roadmap: wait-event sampling attributed to tags | 20261005-091225-39 | yes | blocked-on-questions |
-| 20261005-091225-44 | Roadmap: OS-level CPU/I/O (`getrusage`) per tag set | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
-### Where the DESIGN.md §11 open questions are tracked
+### How the DESIGN.md §11 open questions were resolved
 
-| §11 question | Blocks task |
-|--------------|-------------|
-| Q1: record the empty tag set by default? | 20261005-091225-29 (the `untagged` default is `record` per §4.1 until confirmed) |
-| Q2: `jsonb` vs fixed columns for `tags` | 20261005-091225-20 |
-| Q3: DSL in one GUC vs a `config_file` | 20261005-091225-31 (v1 proceeds with the GUC per §4) |
-| Q4: is `utility_textid` worth it? | 20261005-091225-37 |
-| Q5: `bucket_id` in key vs per-entry bucket ring | 20261005-091225-13 |
-| Q6: error-count dedup rules; cancellations separate? | 20261005-091225-40 |
-| Q7: load-order violation: `WARNING` vs disable utility tracking | 20261005-091225-19 |
+All seven §11 questions were answered by the project owner on 2026-10-05.
 
-Other blocking questions came up while decomposing the design. They are
-attached to tasks 8, 9, 12, 21, 30, 32, 33, 35, 38, 41, and 43.
+| §11 question | Resolution | Recorded in task |
+|--------------|------------|------------------|
+| Q1: record the empty tag set by default? | No: `untagged = skip` is the default | 20261005-091225-29 |
+| Q2: `jsonb` vs fixed columns for `tags` | `jsonb` | 20261005-091225-20 |
+| Q3: DSL in one GUC vs a `config_file` | GUCs only; `ALTER SYSTEM` + `pg_reload_conf()` from SQL | 20261005-091225-31 (dropped), 20261005-091225-28 |
+| Q4: is `utility_textid` worth it? | No; pgss has the same PG14/15 behavior | 20261005-091225-37 (dropped) |
+| Q5: `bucket_id` in key vs per-entry bucket ring | Per-entry counter ring | 20261005-091225-13, -14, -15 |
+| Q6: error-count dedup rules; cancellations separate? | Moot: error counts dropped | 20261005-091225-40 (dropped) |
+| Q7: load-order violation: `WARNING` vs disable utility tracking | `WARNING` only | 20261005-091225-19 |
+
+Other blocking questions came up while decomposing the design. Those on tasks
+8, 9, 12, 21, 30, 32, 35, 38, and 41 were answered on 2026-10-05 (see each
+task's **Decisions**). Only task 33 (exemplars) still has open questions.
 
 ### Dependency overview (v1)
 
@@ -113,16 +120,16 @@ graph TD
   T4[4 lexer] --> T5[5 positional scan]
   T1 --> T7[7 core GUCs]
   T2 --> T7
-  T7 --> T8[8 DSL ?]
-  T5 --> T9[9 tag pipeline ?]
+  T7 --> T8[8 DSL]
+  T5 --> T9[9 tag pipeline]
   T6[6 pair parsers] --> T9
   T8 --> T9
   T8 --> T10[10 regex]
   T9 --> T10
   T9 --> T11[11 debug fn + regress]
   T10 --> T11
-  T2 --> T12[12 counters ?]
-  T2 --> T13[13 store core ?]
+  T2 --> T12[12 counters]
+  T2 --> T13[13 store core]
   T7 --> T13
   T12 --> T13
   T13 --> T14[14 buckets]
@@ -132,10 +139,10 @@ graph TD
   T14 --> T17
   T16 --> T17
   T17 --> T18[18 ProcessUtility]
-  T18 --> T19[19 load order ?]
-  T12 --> T20[20 SRF + views ?]
+  T18 --> T19[19 load order]
+  T12 --> T20[20 SRF + views]
   T14 --> T20
-  T15 --> T21[21 info/reset ?]
+  T15 --> T21[21 info/reset]
   T20 --> T21
   T18 --> T22[22 TAP lifecycle]
   T20 --> T22
@@ -153,7 +160,7 @@ graph TD
   T10 --> T28
   T19 --> T28
   T21 --> T28
-  T3 --> T29[29 release ?]
+  T3 --> T29[29 release]
   T11 --> T29
   T22 --> T29
   T23 --> T29
@@ -161,10 +168,13 @@ graph TD
   T25 --> T29
   T26 --> T29
   T28 --> T29
+  T17 --> C1[compat shim trim]
 ```
 
-`?` marks a task with open questions. Every dependency points to a
-lower-numbered task, so the graph is acyclic.
+`C1` = `20261005-103941-1`. No v1 task has open questions any more (so none is
+marked `?`). Every dependency points to a lower-numbered task, or (for `C1`)
+to an older task, so the graph is acyclic. 20261005-101154-1 has no
+dependencies and is not shown.
 
 ---
 
@@ -324,16 +334,20 @@ Return the parsed form as one flat, pointer-free blob (offsets, not pointers) al
 
 *Design note:* the number of regex `keys` should equal the number of capture groups, and a mismatch is an error.
 
+When `position` is omitted, the parser fills in the per-extractor default: `append` for `sqlcommenter` and `marginalia`, `any` for `regex` (§4.2).
+
 **Acceptance criteria:**
 - Every example in §4.2 parses.
+- Omitting `position` yields `append` for `sqlcommenter`/`marginalia` and `any` for `regex` in the parsed blob, including for the default `'sqlcommenter, marginalia'`.
 - Each class of malformed input is rejected with a specific message, and the old config survives a bad `SIGHUP`.
 - The blob contains no pointers and is freed correctly by guc.c on PG14/15 and PG16+, with no leak under Valgrind.
 
-**Depends on:** 20261005-091225-7
-**Open questions:**
-- What is the default `position` when it is omitted, for example in the default `'sqlcommenter, marginalia'`? §4.2 never says. This matters for overhead on long statements, because `any` does a full scan (§6.2).
+**Decisions:**
+- 2026-10-05: The default `position` when omitted is per extractor: `sqlcommenter` = `append`, `marginalia` = `append`, `regex` = `any`.
 
-**Status:** blocked-on-questions
+**Depends on:** 20261005-091225-7
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ### 20261005-091225-9: Tag-set canonicalization pipeline and extractor chain
 
@@ -343,8 +357,8 @@ Return the parsed form as one flat, pointer-free blob (offsets, not pointers) al
 2. Run every pair through the §6.11 order:
    1. decode
    2. reject values that contain NUL or fail `pg_verify_mbstr`
-   3. apply `rename`
-   4. apply the per-extractor `keys`
+   3. apply the per-extractor `keys`, matching the **original** key names
+   4. apply `rename`
    5. apply the global allowlist, or the denylist when `tags = '*'`
    6. drop keys longer than 63 bytes
    7. truncate values to `max_tag_value_len` with `pg_mbcliplen`
@@ -363,13 +377,15 @@ Count invalid tags, dropped tags, and heuristic scans in a backend-local stats s
 - The same tags in a different order produce byte-identical output and hash.
 - The serialized size never exceeds `max_tagset_bytes`.
 - Malformed input never raises an error.
+- A per-extractor `keys` list naming an original key keeps it even when `rename` changes its name, and naming only the renamed key does not keep it.
 - Each §6.11 step is covered by the regression suite in task 20261005-091225-11.
 
-**Depends on:** 20261005-091225-5, 20261005-091225-6, 20261005-091225-8
-**Open questions:**
-- Does a per-extractor `keys` allowlist match the original key names (before `rename`) or the renamed ones? §6.11 fixes the order only for the global allowlist ("rename, then apply the allowlist"), and §4.2 calls `keys` a per-extractor allowlist without placing it in that order.
+**Decisions:**
+- 2026-10-05: A per-extractor `keys` allowlist matches the **original** key names and is applied before `rename`. The global allowlist still applies after `rename`.
 
-**Status:** blocked-on-questions
+**Depends on:** 20261005-091225-5, 20261005-091225-6, 20261005-091225-8
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ### 20261005-091225-10: Regex extractor runtime
 
@@ -415,50 +431,47 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 **Open questions:** none
 **Status:** blocked-on-deps
 
-### 20261005-091225-12: Counter set, accumulation, and bucket-merge math
+### 20261005-091225-12: Counters (`calls`, `total_exec_time`): accumulation and bucket merge
 
-**Description:** Define `ctxCounters` (§5.1) and the pure functions that work on it:
-- Initialize the counters.
-- Accumulate from executor instrumentation (`queryDesc->totaltime`, `BufferUsage`, `WalUsage`) and from utility measurements.
-- Update the online mean and `sum_var` (Welford), plus min and max.
-- Take `rows` from the per-version source (§6.10).
-- Increment `usage` pgss-style.
-- Merge two counter sets with weights for `merge_buckets` (§7): sums add, min of mins, max of maxes, call-weighted mean, and pooled variance `M2 = M2a + M2b + δ²·na·nb/(na+nb)`.
+**Description:** Define the per-bucket counter slot from §5.1 (`ctxSlot`: `bucket_id`, `calls`, `total_exec_time`) and the pure functions that work on it. The extension is a pg_stat_statements companion, so no other counters are stored (§5.1, §7).
+- Initialize a slot, and reset/relabel it for a new `bucket_id` (used by the per-entry ring rollover in task 20261005-091225-14).
+- Accumulate one call plus elapsed milliseconds: from `queryDesc->totaltime` for the executor, and from a measured duration for utilities.
+- Merge slots for `merge_buckets` (§7): sum `calls` and `total_exec_time`, and keep the oldest contributing `bucket_id` for `bucket_start`.
+- Provide the pgss-style `usage` update used for eviction ordering (task 20261005-091225-15). `usage` is internal and not exposed.
 
 **Acceptance criteria:**
-- The struct compiles on PG14–18.
-- The merge of 1 × 100 ms and 100 × 1 ms gives a mean of about 1.98 ms (§7).
-- The pooled variance equals the variance of the concatenated samples, within floating-point tolerance.
-- `rows` matches pgss on each version.
-- Verified through a test hook or the merged view tests in task 20261005-091225-24.
+- The code compiles warning-free on PG14–18 and uses no version-specific counter fields.
+- Unit tests (or a test hook) show that accumulation and merge produce exact sums, that merge picks the oldest `bucket_id`, and that relabeling a slot zeroes its counters.
+- Executor `total_exec_time` uses the same source and units (ms) as pgss, verified end to end by task 20261005-091225-22.
+
+**Decisions:**
+- 2026-10-05: The extension is a companion to pg_stat_statements, not a replacement. Per (queryid × context) entry it stores **only** `calls` and `total_exec_time`. Rows, blocks, WAL, I/O timing, JIT, min/max/mean/stddev, and so on are left to pgss, and users join on `(userid, dbid, queryid, toplevel)`. Rationale: `calls` alone can't apportion load across contexts when per-context cost differs, and `total_exec_time` is the minimum needed for attribution.
+- 2026-10-05: The question of how to expose counters missing on older versions is moot (both stored counters exist on PG14–18). General policy, following pgss: version-unavailable columns are omitted rather than exposed as `NULL`.
 
 **Depends on:** 20261005-091225-2
-**Open questions:**
-- What is the exact counter and column set? §5.1 lists `calls`, exec-time statistics, `rows`, shared/local/temp blocks hit/read/written, `wal_*`, and `usage`. It omits `*_blks_dirtied`, I/O timing, and JIT. However, §6.10 mentions `shared_blk_read_time` (PG17) and JIT fields, and the §7 column list is elided (`...`).
-- How are counters that an older version doesn't have exposed: `NULL`, `0`, or omitted? These choices fix the 1.0 SQL signature.
-
-**Status:** blocked-on-questions
+**Open questions:** none
+**Status:** ready
 
 ### 20261005-091225-13: Shared store core (shmem, HTAB, key, locking)
 
-**Description:** Implement `src/store.c` (§3.1 item 4, §5.1, §5.4).
+**Description:** Implement `src/store.c` (§3.1 item 4, §5.1, §5.4). The layout is one entry per (query × context) holding a per-bucket counter ring; `bucket_id` is **not** part of the key.
 
 Sizing and setup:
-- Compute `keysize` and `entrysize` from `max_tagset_bytes`.
-- Size shared memory as `hash_estimate_size(max_entries, entrysize)` plus the header and bucket ring, using `add_size`/`mul_size`, and request it through the compat path with an LWLock tranche.
+- Compute `keysize` from `max_tagset_bytes`, and `entrysize` from `keysize` plus `bucket_count` ring slots (task 20261005-091225-12).
+- Size shared memory as `hash_estimate_size(max_entries, entrysize)` plus the header, using `add_size`/`mul_size`, and request it through the compat path with an LWLock tranche.
 - In `shmem_startup_hook`, create or attach the header and an HTAB with `init_size = max_size = max_entries` and custom `HASH_FUNCTION`/`HASH_COMPARE` callbacks.
 
 Keys and entries:
-- Build keys by `memset`-ing the whole key to zero first.
+- The key is `(dbid, userid, queryid, toplevel, tags_len, tags_hash, tags[])`. Build keys by `memset`-ing the whole key to zero first.
 - The hash combines the fixed fields with `tags_hash`. The compare checks the fixed fields and `tags_len`, then `memcmp`s only the used tag bytes.
-- Each entry has its own spinlock and stores the database encoding.
+- Each entry has its own spinlock, stores the database encoding, `last_bucket`, `usage`, and `bucket_count` slots.
 
 Header counters:
 - `entries`, `dealloc`, `evicted_entries`, `invalid_tags`, `dropped_tags`, `regex_compile_failures`, `heuristic_scans`, `utility_missing_queryid`, and `stats_reset`.
 
 Recording:
-- `store_record()` looks up an existing entry under the shared lock and updates it under the entry spinlock.
-- On a miss, it releases the lock, takes the exclusive lock, repeats the `HASH_ENTER` lookup, and enforces `max_entries` itself.
+- `store_record(key, bucket_id, elapsed)` looks up an existing entry under the shared lock and, under the entry spinlock, adds one call and the elapsed time to slot `bucket_id mod bucket_count`, relabeling the slot first if it holds an older `bucket_id`.
+- On a miss, it releases the lock, takes the exclusive lock, repeats the `HASH_ENTER` lookup, and enforces `max_entries` itself. Until task 20261005-091225-15 lands, a full table simply drops the record and counts it.
 
 Support code:
 - A reset routine.
@@ -466,63 +479,68 @@ Support code:
 - Until task 20261005-091225-14 lands, the `bucket_id` is supplied by the caller.
 
 **Acceptance criteria:**
-- The server starts with the default settings and with boundary values for `max_entries` and `max_tagset_bytes`.
+- The server starts with the default settings and with boundary values for `max_entries`, `max_tagset_bytes`, and `bucket_count`.
 - The reported `shmem_bytes` equals the requested size.
 - Concurrent `pgbench` recording loses no updates (the sum of `calls` matches the executed statements).
+- Recording the same key into different `bucket_id`s uses one entry with separate slots, not separate entries.
 - With forced collisions, distinct tag sets stay separate.
 - The entry count never exceeds `max_entries`.
 
+**Decisions:**
+- 2026-10-05 (§11 Q5): Key layout is one entry per (query × context) holding a per-bucket counter ring, not `bucket_id` in the key. This is cheap because each slot holds only `calls` and `total_exec_time` (about 24 bytes per bucket). Capacity counts (query × context) combinations, independent of `bucket_count`.
+
 **Depends on:** 20261005-091225-2, 20261005-091225-7, 20261005-091225-12
-**Open questions:**
-- §11 Q5: should the key include `bucket_id` (the v1 proposal), or should there be one entry per (query × context) holding a ring of per-bucket counters? This decides the key, entry size, capacity semantics, and the design of tasks 14 and 15.
+**Open questions:** none
+**Status:** blocked-on-deps
 
-**Status:** blocked-on-questions
-
-### 20261005-091225-14: Time-bucket ring and lazy rollover
+### 20261005-091225-14: Time buckets and lazy per-entry ring rollover
 
 **Description:** Implement §5.2. The header stores the epoch, `bucket_interval`, `bucket_count`, and `current_bucket`. Every backend computes `bucket_id = floor((now - epoch) / interval)` as a signed `int64`.
 
-Rollover:
+Header advance:
 - `current_bucket` changes only under the exclusive lock.
-- A writer whose computed ID is newer releases the shared lock, takes the exclusive lock, re-checks the header, and advances the ring if it is still behind.
-- Advancing drops expired buckets by walking each one's `dlist` membership list.
+- A writer whose computed ID is newer releases the shared lock, takes the exclusive lock, re-checks the header, and advances `current_bucket` if it is still behind. Advancing touches no entries.
 
 Clamping:
-- A write ID older than the oldest live bucket, or newer than `current_bucket`, is clamped to `current_bucket` while the lock is held.
+- A write ID older or newer than `current_bucket` is clamped to `current_bucket` while the lock is held.
 - `current_bucket` never decreases when the clock moves backwards.
-- A forward jump larger than the ring expires everything.
+- A forward jump larger than the ring makes every slot stale.
+
+Per-entry ring rollover:
+- Under the entry spinlock, the writer uses slot `bucket_id mod bucket_count`. If the slot holds an older `bucket_id`, it is zeroed and relabeled (task 20261005-091225-12) before the counters are added. `last_bucket` is updated.
 
 Readers:
-- Provide a helper that lets readers hide expired buckets from the clock-derived current bucket, without depending on writers.
+- Provide a helper that tells readers whether a slot is live, i.e. its `bucket_id` is within `[current - bucket_count + 1, current]` of the clock-derived current bucket, without depending on writers. An entry with no live slot is *dead* (reclaimed by task 20261005-091225-15).
 
 Testing:
 - Provide a debug-only clock offset so that clock steps can be tested (§9).
 - Executions are attributed to the bucket in which they complete (§5.2 semantics).
 
 **Acceptance criteria:**
-- With a 1 s interval, entries roll over.
-- Readers hide expired entries even when no writes happen.
+- With a 1 s interval, an entry's slots roll over and old counts disappear from readers.
+- Readers hide expired slots even when no writes happen.
 - A stalled writer's stale ID is clamped.
-- A backward clock step doesn't regress `current_bucket`, and a forward jump clears everything.
-- A concurrent stress run at bucket boundaries never leaves an entry in an expired bucket. Assert builds verify the membership lists.
+- A backward clock step doesn't regress `current_bucket`, and a forward jump hides everything.
+- A concurrent stress run at bucket boundaries never writes into an expired slot. Assert builds verify the ring invariants (each slot's `bucket_id` ≤ `current_bucket` and ≡ its index mod `bucket_count`).
 
 **Depends on:** 20261005-091225-13
 **Open questions:** none
 **Status:** blocked-on-deps
 
-### 20261005-091225-15: Eviction under pressure
+### 20261005-091225-15: Eviction under pressure (dead entries first, then pgss-style)
 
 **Description:** Implement §5.3. When an insert finds the table at `max_entries`, under the exclusive lock:
-1. Drop the oldest live bucket in full, using its membership list.
-2. If only the current bucket is left, evict the lowest-usage ~5% of that bucket's members. Sort only that bucket, and decay `usage` pgss-style.
-3. Increment `dealloc` and `evicted_entries`.
+1. Reclaim dead entries: those whose `last_bucket` is older than the live window, so all slots have expired.
+2. If that frees less than ~5% of `max_entries`, evict further entries ordered by `last_bucket` (oldest first), then by `usage` (lowest first), until ~5% is free. Decay `usage` pgss-style.
+3. Increment `dealloc` (once per pass) and `evicted_entries` (per entry).
 
 The insert that triggered eviction must then succeed.
 
 **Acceptance criteria:**
 - In a small-`max_entries` churn test, the entry count never exceeds the limit and the counters increase.
-- The oldest bucket is evicted before the current bucket.
-- Eviction work is proportional to the affected bucket. Task 20261005-091225-26 measures the latency.
+- Dead entries are reclaimed before any live entry is evicted.
+- Among live entries, the least recently written are evicted first.
+- Task 20261005-091225-26 measures the latency of an eviction pass (a full-table scan and sort, as in pgss).
 
 **Depends on:** 20261005-091225-14
 **Open questions:** none
@@ -579,8 +597,8 @@ A statement planned without an active frame gets only its own tags.
 - Activate the frame and increment `nesting_level` around the chained call, restoring both in `PG_FINALLY`. Use the compat signatures.
 
 `ExecutorEnd`:
-- Record when the frame is recordable under `track` (`top` or `all`), the `toplevel` rule, and the `untagged` policy.
-- To record, accumulate counters (task 20261005-091225-12) and call `store_record()` with the current bucket.
+- Record when the frame is recordable under `track` (`top` or `all`), the `toplevel` rule, and the `untagged` policy (default `skip`).
+- To record, take one call plus the elapsed time from `queryDesc->totaltime` (task 20261005-091225-12) and call `store_record()` with the current bucket. No other counters (rows, buffers, WAL, JIT) are collected; pgss covers them.
 - Flush the backend-local extraction stats into the header counters.
 - Then chain.
 
@@ -590,7 +608,7 @@ A statement planned without an active frame gets only its own tags.
 - Statements in a PL/pgSQL function inherit the caller's tags.
 - A parallel query is counted once.
 - A cursor fetched many times counts as one call.
-- `untagged=skip` drops untagged statements.
+- By default (`untagged=skip`) untagged statements are not recorded; with `untagged=record` they are recorded with an empty tag set.
 - `enabled=off` records nothing.
 
 **Depends on:** 20261005-091225-12, 20261005-091225-14, 20261005-091225-16
@@ -614,7 +632,7 @@ Nesting:
 - Every other utility bumps nesting and activates its frame, even when it isn't recorded, so `CALL`/`DO` children inherit tags.
 
 Measurement:
-- Measure time, buffers, and WAL around the chained call, and take `rows` from `QueryCompletion` as pgss does.
+- Measure elapsed time around the chained call, as pgss does for `total_exec_time`. No rows, buffer, or WAL counters are collected.
 - Never read `pstmt` after chaining.
 - Record from the snapshot, and restore state in `PG_FINALLY`.
 - Never modify `pstmt->queryId`.
@@ -633,26 +651,28 @@ Measurement:
 
 ### 20261005-091225-19: `shared_preload_libraries` load-order detection and policy
 
-**Description:** In `_PG_init`, parse `shared_preload_libraries` and detect when `pg_stat_statements` is loaded **after** this extension. In that order, pgss's hook runs outside ours and zeroes `pstmt->queryId` before our hook sees it (§3.2, §6.12). Apply the chosen policy: at minimum a `WARNING` that explains the required order. The runtime counter `utility_missing_queryid` already exists (task 20261005-091225-18).
+**Description:** In `_PG_init`, parse `shared_preload_libraries` and detect when `pg_stat_statements` is loaded **after** this extension. In that order, pgss's hook runs outside ours and zeroes `pstmt->queryId` before our hook sees it (§3.2, §6.12). Log a `WARNING` that explains the required order. Take no other action: utility tracking stays enabled. The runtime counter `utility_missing_queryid` already exists (task 20261005-091225-18).
 
 **Acceptance criteria:**
-- The warning (or policy action) is emitted exactly when the order is wrong.
+- The warning is emitted exactly when the order is wrong, and utility tracking is not disabled.
 - The correct order, or no pgss at all, produces no warning.
 - The TAP tests in task 20261005-091225-22 cover both orders.
 
-**Depends on:** 20261005-091225-18
-**Open questions:**
-- §11 Q7: should a load-order violation only log a `WARNING` (the v1 proposal), or should it also disable utility tracking until the order is fixed?
+**Decisions:**
+- 2026-10-05 (§11 Q7): A load-order violation produces a `WARNING` only.
 
-**Status:** blocked-on-questions
+**Depends on:** 20261005-091225-18
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ### 20261005-091225-20: Stats SRF and views
 
 **Description:** Implement the C set-returning function `pg_stat_statement_context(showtags, merge_buckets)` and its two views (§7). The SRF uses materialize mode.
 
 Reading:
-- Under the shared lock, copy the entries out, hiding expired buckets based on the clock (§5.2).
+- Under the shared lock, copy the entries out. Each entry yields one row per live ring slot, hiding expired slots based on the clock (§5.2). Dead entries yield nothing.
 - Compute `bucket_start = epoch + bucket_id × interval`.
+- Output columns are exactly those in §7: `bucket_start`, `userid`, `dbid`, `queryid`, `toplevel`, `tags`, `calls`, `total_exec_time`.
 
 Visibility (§6.11):
 - For another role's rows, `queryid` and `tags` are `NULL` unless the caller has the privileges of `pg_read_all_stats`.
@@ -661,10 +681,10 @@ Visibility (§6.11):
 Tag output:
 - Convert tags from each entry's encoding with `pg_any_to_server`.
 - For a `SQL_ASCII` origin, escape non-ASCII bytes instead of converting them.
-- Output the tags as `jsonb`, or per the Q2 answer.
+- Output the tags as `jsonb`.
 
 Merging:
-- With `merge_buckets`, merge rows by (db, user, queryid, toplevel, tags) using the task 20261005-091225-12 merge function. `bucket_start` is the oldest contributing bucket.
+- With `merge_buckets`, each entry yields one row: the task 20261005-091225-12 merge of its live slots (sums of `calls` and `total_exec_time`). `bucket_start` is the oldest live slot.
 
 SQL script:
 - Add the `pg_stat_statement_context` and `pg_stat_statement_context_totals` views and grants to the 1.0 script.
@@ -672,46 +692,48 @@ SQL script:
 *Design note:* choose and document the escape format for `SQL_ASCII` output, for example `\xNN`.
 
 **Acceptance criteria:**
-- Both views return the expected rows.
-- Merged statistics match a hand computation.
+- Both views return the expected rows and exactly the §7 columns.
+- Merged sums match a hand computation.
 - An unprivileged role sees `NULL` `queryid`/`tags` for other roles' rows, including with `showtags = false`.
 - Tags from a non-UTF8 database are converted correctly, and `SQL_ASCII` bytes are escaped.
-- Expired buckets are hidden without any writes.
+- Expired slots are hidden without any writes.
+
+**Decisions:**
+- 2026-10-05 (§11 Q2): `tags` is `jsonb`.
+- 2026-10-05: Only `calls` and `total_exec_time` are exposed; other statistics come from pgss (see task 20261005-091225-12).
 
 **Depends on:** 20261005-091225-12, 20261005-091225-14
-**Open questions:**
-- §11 Q2: should `tags` be `jsonb` (as drafted in §7), or fixed columns for a configured set of keys? This fixes the 1.0 SQL signature.
-
-**Status:** blocked-on-questions
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ### 20261005-091225-21: `_info()` and `_reset()` functions
 
 **Description:** Implement `pg_stat_statement_context_info()` (§7), which returns:
-- `entries`, `max_entries`, `dealloc`
+- `entries`, `max_entries`, `dealloc`, `evicted_entries`
 - `buckets`, `oldest_bucket`, the exact `shmem_bytes`
-- `invalid_tags`, `heuristic_scans`, `utility_missing_queryid`, `stats_reset`
+- `invalid_tags`, `dropped_tags` (tags dropped because the tag set would exceed `max_tagset_bytes`), `heuristic_scans`
+- `regex_compile_failures` (regex lazy-compile failures; these happen per backend, so the backend-local count is flushed into a shared header counter)
+- `utility_missing_queryid`, `stats_reset`
 
 Implement `pg_stat_statement_context_reset()`, which clears all entries and counters and sets `stats_reset`. In the SQL script, run `REVOKE ALL ... FROM PUBLIC` on the reset function.
 
 **Acceptance criteria:**
 - Each counter moves under the activity that drives it:
-  - `dealloc` after churn
+  - `dealloc` and `evicted_entries` after churn
   - `invalid_tags` after malformed tags
+  - `dropped_tags` after a tag set larger than `max_tagset_bytes`
   - `heuristic_scans` after `append` scans of long statements
+  - `regex_compile_failures` after an injected lazy-compile failure (task 20261005-091225-10), visible from another session
   - `utility_missing_queryid` under the wrong load order
 - Reset zeroes the counters and updates `stats_reset`.
 - An unprivileged role gets "permission denied" when calling reset.
 
+**Decisions:**
+- 2026-10-05: Add `evicted_entries`, `dropped_tags` (tags dropped for exceeding `max_tagset_bytes`), and `regex_compile_failures` (needs a shared counter) to `_info()`.
+
 **Depends on:** 20261005-091225-15, 20261005-091225-20
-**Open questions:**
-- What is the final column set of `_info()`? The design counts some events that have no column in the §7 signature:
-  - `evicted_entries` (§5.3)
-  - tags dropped for exceeding `max_tagset_bytes` (§4.1)
-  - regex lazy-compile failures (§4.2), which are per-backend events and need a shared counter if exposed
-
-  Should these be added? This fixes the 1.0 signature.
-
-**Status:** blocked-on-questions
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ### 20261005-091225-22: TAP tests: execution lifecycle and pgss parity
 
@@ -727,7 +749,7 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 
 **Acceptance criteria:**
 - The tests pass on PG14–18 in CI, including the assert and Valgrind jobs.
-- `calls`, `rows`, `queryid`, and `toplevel` match pgss wherever the design says they should.
+- `calls`, `queryid`, and `toplevel` match pgss wherever the design says they should. With `untagged=record` and both extensions freshly reset, the per-`(userid, dbid, queryid, toplevel)` sums of `calls` equal pgss, and the sums of `total_exec_time` match pgss within a small tolerance.
 - The documented divergence (pgss on PG14–16 with `track_utility=off`, §6.7) is asserted explicitly.
 
 **Depends on:** 20261005-091225-18, 20261005-091225-20
@@ -739,11 +761,11 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 **Description:** Write TAP tests for the store-related items in §9:
 - Restarts, including resizing through postmaster GUCs.
 - `SIGHUP` reconfiguration: a bad DSL is rejected and the old config is kept, and a generation change recompiles regexes.
-- Bucket rollover with a short `bucket_interval` set at startup.
+- Bucket rollover with a short `bucket_interval` set at startup: one entry per combination whose ring slots roll over lazily, with no re-insert at bucket boundaries.
 - Stale-bucket insertion across a rollover.
 - Clock steps, using the debug clock offset.
 - A forced hash collision followed by eviction and reinsertion.
-- Small-`max_entries` churn.
+- Small-`max_entries` churn, with dead entries (all slots expired) reclaimed before live ones.
 - Multi-client `pgbench` stress across bucket boundaries.
 
 **Acceptance criteria:** The tests pass on PG14–18 in CI, including the assert and Valgrind jobs.
@@ -752,15 +774,15 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 **Open questions:** none
 **Status:** blocked-on-deps
 
-### 20261005-091225-24: Tests: SQL interface, visibility, encodings, merge math
+### 20261005-091225-24: Tests: SQL interface, visibility, encodings, bucket merge
 
 **Description:** Write regression or TAP tests for the SQL surface:
 - Cross-database encodings, including `SQL_ASCII`. These need TAP, because `createdb` must use different encodings.
 - Visibility for unprivileged roles with and without `pg_read_all_stats`, including `showtags = false`.
 - `REVOKE` on the reset function.
-- `merge_buckets` math: the §7 mean example and pooled variance.
-- View column names and types.
-- The example join query from §7 runs against pgss.
+- `merge_buckets`: the totals view sums `calls` and `total_exec_time` across live buckets, and `bucket_start` is the oldest live bucket.
+- View column names and types match §7 exactly (only `calls` and `total_exec_time` as counters), and the `_info()` columns match §7.
+- The example join query from §7, including the apportioning example, runs against pgss.
 
 **Acceptance criteria:** The tests pass on PG14–18 in CI.
 
@@ -827,11 +849,13 @@ Use server logging (`log_min_duration_statement = 0`, which logs Parse/Bind/Exec
 
 **Description:** Write the README (and `docs/` if needed) covering:
 - Purpose, plus build and install.
+- Positioning as a pg_stat_statements companion: only `calls` and `total_exec_time` are stored per context, and everything else comes from pgss via the join on `(userid, dbid, queryid, toplevel)`, including the approximate apportioning recipe and its caveats (§5.1, §7).
 - `shared_preload_libraries` ordering and the restart requirement (§3.2, §6.12).
-- A reference for every GUC (§4.1).
-- The extractor DSL with examples (§4.2).
+- A reference for every GUC (§4.1), including the `untagged = skip` default.
+- Changing configuration from SQL: `ALTER SYSTEM SET pg_stat_statement_context.extractors = '...'; SELECT pg_reload_conf();` (the `extractors`, `tags`, and `exclude_tags` GUCs are `sighup`; there is no config file).
+- The extractor DSL with examples (§4.2), including the per-extractor `position` defaults and that `keys` matches original key names before `rename`.
 - Allowlist, denylist, and cardinality guidance (§6.1).
-- The capacity sizing rule (§5.1).
+- The capacity sizing rule: `max_entries` counts (query × context) combinations, independent of `bucket_count` (§5.1).
 - Bucket semantics, "completions per interval" (§5.2).
 - Eviction and the `_info()` counters (§5.3).
 - The SQL interface and the example join (§7).
@@ -858,20 +882,39 @@ It must also list the limitations:
 ### 20261005-091225-29: v1 release readiness
 
 **Description:** Prepare and cut the v1.0 release:
-- Confirm the defaults, then freeze `--1.0.sql`. Later changes go into upgrade scripts.
+- Confirm the defaults (including `untagged = skip`), then freeze `--1.0.sql`. Later changes go into upgrade scripts.
 - Verify `make install` from a clean checkout on every CI cell, including the assert and Valgrind jobs.
 - Check that the benchmark numbers are published.
-- Record in DESIGN.md (or the release notes) how each §11 question was resolved.
+- Check that DESIGN.md §11 records how each question was resolved (done on 2026-10-05) and that the release notes summarize them.
 - Add a CHANGELOG, tag `v1.0.0`, and create a GitHub release.
 
 **Acceptance criteria:**
 - The checklist is complete, CI is green, the tag and release exist, and the README install steps work from a clean checkout.
 
-**Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28
-**Open questions:**
-- §11 Q1: should statements with an empty tag set be recorded by default (`untagged = record`, as drafted in §4.1) or skipped? Recording gives a complete picture, but untagged traffic can then take a large share of the entries. This must be settled before the default and the sizing guidance ship.
+**Decisions:**
+- 2026-10-05 (§11 Q1): Untagged statements are **skipped** by default (`untagged = skip`); `untagged = record` stays available. The sizing guidance assumes this default.
 
-**Status:** blocked-on-questions
+**Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28
+**Open questions:** none
+**Status:** blocked-on-deps
+
+### 20261005-103941-1: Trim unused counter-availability shims from `compat.h`
+
+**Description:** Task 20261005-091225-2 landed counter-availability shims in `src/compat.h` for the larger counter set that was dropped on 2026-10-05 (the extension now stores only `calls` and `total_exec_time`, §5.1, §6.10). Once tasks 20261005-091225-12 and 20261005-091225-17 have settled which shims are actually used, remove or trim the unused ones:
+- `PSSC_QUERYDESC_ROWS` (`es_processed` vs `es_total_processed`)
+- `PSSC_HAS_TEMP_BLK_IO_TIME`, `PSSC_HAS_LOCAL_BLK_IO_TIME`, `PSSC_SHARED_BLK_READ_TIME`/`PSSC_SHARED_BLK_WRITE_TIME`
+- `PSSC_HAS_WAL_BUFFERS_FULL`, `PSSC_HAS_JIT_DEFORM_COUNTER`
+
+Remove the matching cases from the compat test module (`test/modules/pssc_compat_test`) and `test/t/002_compat.pl`. Keep every shim that some source file uses.
+
+**Acceptance criteria:**
+- No shim remains in `compat.h` that nothing outside the compat test module uses, except where a comment justifies keeping it.
+- The compat test module and TAP test no longer reference removed shims, and the full suite passes on PG14–18.
+- The header still compiles warning-free with `-Wall` on PG14–18.
+
+**Depends on:** 20261005-091225-17
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ---
 
@@ -879,57 +922,63 @@ It must also list the limitations:
 
 ### 20261005-091225-30: Roadmap: `tags_override` session/transaction context
 
-**Description:** Add a `USERSET` GUC, `pg_stat_statement_context.tags_override`, that can be set with `SET` or `SET LOCAL`, for example `'controller=users'` (§8 v2, §6.3). It works with prepared statements and with drivers that can't add comments. Parse it in a `check_hook` into a flat `extra` blob. Apply it when top-level frames are created, so nested frames inherit it through the normal rules. If task 20261005-091225-27 decides on go, this task moves into v1.
+**Description:** Add a `USERSET` GUC, `pg_stat_statement_context.tags_override`, that can be set with `SET` or `SET LOCAL` (§8 v2, §6.3). It works with prepared statements and with drivers that can't add comments.
+- **Syntax:** sqlcommenter style, `k='v',k2='v2'`, with URL-encoded values (for example `SET LOCAL pg_stat_statement_context.tags_override = 'controller=''users'',action=''show'''`). Parse it in a `check_hook` with the sqlcommenter parser (task 20261005-091225-6) into a flat `extra` blob; malformed values are rejected.
+- **Combination:** override tags **merge** with tags from comments; on a key conflict the override value wins.
+- **Pipeline:** override tags go through the same §6.11 pipeline as comment tags (decode and validation, `rename`, allowlist/denylist, truncation), except the per-extractor `keys` step.
+- Apply it when top-level frames are created, so nested frames inherit it through the normal rules.
+
+If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Acceptance criteria:**
 - With `SET LOCAL`, statements in the transaction get the override tags, and they no longer apply after commit.
 - Prepared statements executed after the `SET` pick up the override.
-- Invalid values are rejected.
+- An override and a comment with disjoint keys produce the union; on a shared key the override value is stored.
+- Override keys are renamed, filtered by the allowlist/denylist, and truncated exactly like comment tags.
+- Invalid values (bad syntax, bad `%` escapes) are rejected at `SET` time.
 - The feature is documented.
 
+**Decisions:**
+- 2026-10-05: Value syntax is sqlcommenter-style `k='v',k2='v2'` with URL-encoded values.
+- 2026-10-05: Override tags merge with comment tags; the `SET` value wins on key conflicts.
+- 2026-10-05: Override tags go through the same §6.11 pipeline (rename, allowlist/denylist, truncation).
+
 **Depends on:** 20261005-091225-18, 20261005-091225-27
-**Open questions:**
-- What is the value syntax beyond the single `'controller=users'` example (pair and list separators, escaping)?
-- How does the override combine with tags from comments: does it replace them entirely, merge with them, and which side wins when a key appears in both?
-- Do override tags go through the same §6.11 pipeline (`rename`, allowlist and denylist, truncation)?
+**Open questions:** none
+**Status:** blocked-on-deps
 
-**Status:** blocked-on-questions
+### 20261005-091225-32: Roadmap: per-key cardinality caps (overflow → JSON `null`)
 
-### 20261005-091225-31: Roadmap: extractor config file (conditional)
+**Description:** Cap the number of distinct values per allowed key (§6.1, §8 v1.x). Values beyond the cap collapse to JSON `null` before the key is built (§6.11 step 8, after truncation). A client can only send strings, so `null` can't collide with a real value. Count collapses in `_info()`.
+- **Configuration:** a global default cap GUC plus optional per-key overrides.
+- **Scope:** distinct values are counted globally per key (not per bucket or per `queryid`).
 
-**Description:** If Q3 is decided in favor, add `pg_stat_statement_context.config_file`, which holds the extractor DSL for complex setups. Read and validate it at reload, with the same all-or-nothing semantics as the GUC `check_hook`. If Q3 is decided against, close this task.
-
-**Acceptance criteria:**
-- Reloading with a valid file applies it.
-- An invalid file is rejected, and the previous config stays active.
-- The behavior is documented.
-
-**Depends on:** 20261005-091225-8
-**Open questions:**
-- §11 Q3: should the extractor DSL live in one GUC or in a separate config file? If in a file, what is the file format, and how does it interact with the `extractors` GUC (precedence)?
-
-**Status:** blocked-on-questions
-
-### 20261005-091225-32: Roadmap: per-key cardinality caps (`<other>`)
-
-**Description:** Cap the number of distinct values per allowed key. Values beyond the cap collapse to `<other>` before the key is built (§6.1, §8 v1.x). Count collapses in `_info()`.
+*Design notes* (propose and document; non-blocking):
+- GUC names and the per-key override syntax, for example `cardinality_cap = 100` and `cardinality_cap_overrides = 'route:500|job:50'`.
+- The shared structure that tracks distinct values per key (for example a fixed-size shared hash of `(key, value hash)`), its memory budget (postmaster-sized), and what happens when that structure itself is full.
+- Whether the distinct-value sets are cleared by `_reset()` and/or decay over time.
+- The canonical serialization of a `null` value in the key (it must differ from every string, e.g. a flag byte), and its `jsonb` output.
 
 **Acceptance criteria:**
-- Flooding an allowed key with random values produces at most *cap* + 1 distinct values for that key.
-- Collapses are visible in `_info()`.
+- Flooding an allowed key with random values produces at most *cap* distinct string values plus `null` for that key.
+- Per-key overrides take precedence over the global default.
+- `null` values appear as JSON `null` in `tags`, and are never produced by client input.
+- Collapses are visible in `_info()`, and the upgrade script is provided.
 - The hot path stays lock-free until the store write.
 
-**Depends on:** 20261005-091225-17, 20261005-091225-21
-**Open questions:**
-- How are caps configured: globally or per key, and with what GUC syntax?
-- What scope is cardinality counted over (per bucket, per `queryid`, or global), and in what shared structure and memory budget?
-- How is the literal `<other>` value kept from colliding with a real client-sent value?
+**Decisions:**
+- 2026-10-05: Overflow values are represented as JSON `null`, replacing the earlier `<other>` literal.
+- 2026-10-05 (adopted proposal, non-blocking): a global default cap GUC plus optional per-key overrides; distinct values counted globally per key. Remaining details are design notes.
 
-**Status:** blocked-on-questions
+**Depends on:** 20261005-091225-17, 20261005-091225-21
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ### 20261005-091225-33: Roadmap: exemplars for excluded high-cardinality keys
 
-**Description:** Store the last-seen value of selected excluded keys (for example `traceparent`) per entry, so users can jump from an aggregate to a real trace (§8 v1.x). The visibility rules from §6.11 apply.
+**Description:** Store the most recent value of selected excluded high-cardinality keys (for example `traceparent`) per entry, so users can jump from an aggregate to a real trace (§8 v1.x). The visibility rules from §6.11 apply.
+
+*Owner's note (2026-10-05):* the task is kept. An exemplar stores the most recent value of an excluded high-cardinality key (e.g. `traceparent`) per entry.
 
 **Acceptance criteria:**
 - The exemplar column shows the latest value without adding new entries.
@@ -943,12 +992,12 @@ It must also list the limitations:
 
 **Status:** blocked-on-questions
 
-### 20261005-091225-34: Roadmap: background worker for bucket rollover
+### 20261005-091225-34: Roadmap: background worker reclaiming dead entries
 
-**Description:** Add an optional background worker that advances the bucket ring and drops expired buckets on idle systems (§8 v1.x). It isn't needed for correctness, because readers already filter expired buckets (§5.2). Enable it with a postmaster GUC.
+**Description:** Add an optional background worker that, on idle systems, advances `current_bucket` and reclaims dead entries (every ring slot expired) so their space is free before the next insert needs it (§8 v1.x, §5.2, §5.3). It isn't needed for correctness, because readers already filter expired slots and eviction reclaims dead entries first. Enable it with a postmaster GUC.
 
 **Acceptance criteria:**
-- With the worker enabled, expired buckets are freed without any query traffic.
+- With the worker enabled, dead entries are freed without any query traffic, and `_info().entries` drops accordingly.
 - Disabling it changes nothing else.
 
 **Depends on:** 20261005-091225-15
@@ -957,59 +1006,44 @@ It must also list the limitations:
 
 ### 20261005-091225-35: Roadmap: persist stats across clean restarts
 
-**Description:** Dump the stats at shutdown and load them at startup, like `pg_stat_statements.save` (§8 v1.x). Use a versioned file format with a header that records the epoch, interval, and sizing. Drop buckets that expired during the downtime.
+**Description:** Dump the stats at shutdown and load them at startup, like `pg_stat_statements.save` (§8 v1.x). Use a versioned file format with a header that records the extension version, epoch, `bucket_interval`, `bucket_count`, and sizing. Follow pgss's lead on mismatches:
+- On a file-format or extension-version mismatch, discard the file.
+- If `bucket_interval` or `bucket_count` changed, discard the file (pgss has no bucket analogue).
+- If `max_entries` shrank, load what fits and evict the rest using the §5.3 order.
+- Otherwise keep the stored epoch, so `bucket_id`s stay valid, and drop slots that expired during the downtime.
+
+*Design note* (non-blocking): `max_tagset_bytes` changes are not covered by the decision. Proposed: load entries whose tag set still fits the new limit and skip (and log a count of) the rest.
 
 **Acceptance criteria:**
 - Stats survive a clean restart.
-- A crash or a corrupt or incompatible file starts empty with a log message.
+- Each mismatch case above behaves as specified, with a log message.
+- A crash or a corrupt file starts empty with a log message.
 - The behavior is controlled by a GUC.
 
+**Decisions:**
+- 2026-10-05: Follow pg_stat_statements: discard on format/version mismatch; if `max_entries` shrank, load what fits and evict the rest; if `bucket_interval` or `bucket_count` changed, discard.
+
 **Depends on:** 20261005-091225-15, 20261005-091225-21
-**Open questions:**
-- What happens if `bucket_interval`, `bucket_count`, `max_tagset_bytes`, or `max_entries` changed between restarts? The options are to discard the data, to re-bucket or truncate it, or to keep the old epoch.
-
-**Status:** blocked-on-questions
-
-### 20261005-091225-36: Roadmap: `track_planning` (planning time)
-
-**Description:** Add an optional `planner_hook` that records planning time and plan counts per tag set, as in pgss `track_planning` (§3.2, §8). The planner hook runs before `ExecutorStart`, so no frame exists yet. Resolve tags at plan time without adding cross-execution memoization that violates §3.3.
-
-**Acceptance criteria:**
-- Planning statistics appear in new columns (with an upgrade script) and match pgss `total_plan_time` per `queryid`.
-- Overhead is benchmarked.
-
-**Depends on:** 20261005-091225-17, 20261005-091225-20
 **Open questions:** none
 **Status:** blocked-on-deps
 
-### 20261005-091225-37: Roadmap: `utility_textid` column for PG14/15
-
-**Description:** Add a separate `utility_textid` column (§6.6, §8). It hashes the utility statement with comments removed by the lexer: literal and quoted-identifier contents stay unchanged, and whitespace is collapsed only outside tokens. It never replaces `queryid`.
-
-**Acceptance criteria:**
-- On PG14/15, DDL that differs only in comments shares one `utility_textid` but keeps distinct `queryid`s.
-- Literal differences still produce distinct IDs.
-
-**Depends on:** 20261005-091225-4, 20261005-091225-18, 20261005-091225-20
-**Open questions:**
-- §11 Q4: is a separate `utility_textid` worth adding at all, given that `queryid` must stay equal to core and pgss? If it is, should it also be populated on PG16+?
-
-**Status:** blocked-on-questions
-
 ### 20261005-091225-38: Roadmap: context from `application_name`
 
-**Description:** Add an extractor source that derives tags from `application_name` (§8 v2). Its output goes through the §6.11 pipeline.
+**Description:** Add a DSL extractor `appname(format=sqlcommenter|marginalia|regex)` that derives tags from `application_name` instead of comment text (§4.2, §8 v2). It parses with the named format's rules and parameters (`kv_sep`/`pair_sep`, `url_decode`, or `pattern`/`keys` for `regex`), and accepts the common `keys`/`rename` parameters. Its output goes through the §6.11 pipeline. Tags from comments win over `appname`-derived tags on key conflicts.
 
 **Acceptance criteria:**
-- The configured `application_name` formats produce the expected tags.
+- Each `format` produces the expected tags from a matching `application_name`.
+- On a key conflict, the comment's value is stored.
 - Malformed values are dropped and counted.
+- Invalid `appname(...)` parameters are rejected by the DSL `check_hook`.
+
+**Decisions:**
+- 2026-10-05: Parsed via a DSL extractor `appname(format=sqlcommenter|marginalia|regex)`.
+- 2026-10-05: Comment tags win over `appname`-derived tags.
 
 **Depends on:** 20261005-091225-9, 20261005-091225-17
-**Open questions:**
-- Which `application_name` formats are parsed, and how are they configured (for example, as a DSL extractor `appname(...)`)?
-- What is the precedence relative to tags from comments?
-
-**Status:** blocked-on-questions
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ### 20261005-091225-39: Roadmap: `pg_stat_statement_context_activity` view
 
@@ -1024,37 +1058,25 @@ It must also list the limitations:
 **Open questions:** none
 **Status:** blocked-on-deps
 
-### 20261005-091225-40: Roadmap: error and cancellation counts per tag set
-
-**Description:** Count errors at the hook exception boundaries (`PG_CATCH` in Run/Finish/ProcessUtility) while the frame is still known (§6.9, §8 v2). Note each error in backend-local memory, rethrow, and flush it to shared memory later, for example from an abort callback. Attribute an error only to the innermost recorded frame. Don't use `emit_log_hook` as the counter source.
-
-**Acceptance criteria:**
-- A failing statement increments the error count for its tag set exactly once.
-- Errors caught in PL/pgSQL `EXCEPTION` blocks don't count against the outer statement.
-- Parse and planning errors are not counted.
-
-**Depends on:** 20261005-091225-18, 20261005-091225-20
-**Open questions:**
-- §11 Q6: what exact rules deduplicate nested errors and errors caught by subtransactions?
-- Should cancellations (and timeouts) be counted separately from errors?
-
-**Status:** blocked-on-questions
-
 ### 20261005-091225-41: Roadmap: tag value normalization rules
 
-**Description:** Add regex rewrite rules for tag values, for example `/users/\d+` → `/users/:id` (§8 v2). They reuse the regex infrastructure from task 20261005-091225-10 and its safety limits (§6.11).
+**Description:** Add per-key regex-replace rules for tag values, for example `/users/\d+` → `/users/:id` on the `route` key (§8 v2). They run after `rename` and the allowlist/denylist, and before truncation and cardinality caps (§6.11 step 6). They reuse the regex infrastructure from task 20261005-091225-10 and its safety limits (§6.11).
+
+*Design note* (non-blocking): GUC name and rule syntax, for example `normalize = 'route:/users/\d+=>/users/:id|...'`, and whether multiple rules per key apply in order.
 
 **Acceptance criteria:**
-- Configured rules normalize values before the key is built.
+- Configured rules rewrite values of their key only, before the key is built.
+- Normalization sees renamed keys and only allowed tags, and its output is then truncated (and, once task 20261005-091225-32 lands, capped).
 - Invalid rules are rejected at `SET`/reload time.
 - CPU limits match those of the regex extractor.
 
-**Depends on:** 20261005-091225-9, 20261005-091225-10
-**Open questions:**
-- What is the configuration syntax (per key, or global)?
-- Where does normalization sit in the §6.11 order (before or after the allowlist and truncation), and relative to cardinality caps (task 20261005-091225-32)?
+**Decisions:**
+- 2026-10-05: Rules are per-key regex-replace rules.
+- 2026-10-05: Normalization runs after rename and allowlist/denylist, before truncation and cardinality caps.
 
-**Status:** blocked-on-questions
+**Depends on:** 20261005-091225-9, 20261005-091225-10
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ### 20261005-091225-42: Roadmap: exporter recipes and Grafana dashboard
 
@@ -1067,34 +1089,6 @@ It must also list the limitations:
 - Each recipe is tested against a running cluster, and the dashboard renders sample data.
 
 **Depends on:** 20261005-091225-28
-**Open questions:** none
-**Status:** blocked-on-deps
-
-### 20261005-091225-43: Roadmap: wait-event sampling attributed to tags
-
-**Description:** Add a background worker that samples backends' wait events together with their current tags from the activity view, and aggregates the samples per tag set (§8 v3).
-
-**Acceptance criteria:**
-- Under a lock-contention workload, wait events are attributed to the right tags.
-- The worker's overhead is measured.
-
-**Depends on:** 20261005-091225-39
-**Open questions:**
-- Where are samples stored: extra counters per entry, or a separate structure and view?
-- How are the sampling rate and retention configured?
-
-**Status:** blocked-on-questions
-
-### 20261005-091225-44: Roadmap: OS-level CPU/I/O (`getrusage`) per tag set
-
-**Description:** Record user and system CPU time and OS-level read and write bytes per execution via `getrusage`, in the style of `pg_stat_kcache` (§8 v3). Add the counters and columns with an upgrade script.
-
-**Acceptance criteria:**
-- A CPU-bound statement shows matching CPU time.
-- Values are inclusive in the same sense as §6.4, which is documented.
-- Overhead is benchmarked on Linux and macOS.
-
-**Depends on:** 20261005-091225-18, 20261005-091225-20
 **Open questions:** none
 **Status:** blocked-on-deps
 
