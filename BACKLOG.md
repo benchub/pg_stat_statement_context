@@ -80,7 +80,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | blocked-on-deps |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | blocked-on-deps |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
-| 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | yes | blocked-on-questions |
+| 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | blocked-on-deps |
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | blocked-on-deps |
@@ -106,7 +106,7 @@ All seven §11 questions were answered by the project owner on 2026-10-05.
 
 Other blocking questions came up while decomposing the design. Those on tasks
 8, 9, 12, 21, 30, 32, 35, 38, and 41 were answered on 2026-10-05 (see each
-task's **Decisions**). Only task 33 (exemplars) still has open questions.
+task's **Decisions**). No task currently has open questions.
 
 ### Dependency overview (v1)
 
@@ -954,21 +954,24 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 ### 20261005-091225-33: Roadmap: exemplars for excluded high-cardinality keys
 
-**Description:** Store the most recent value of selected excluded high-cardinality keys (for example `traceparent`) per entry, so users can jump from an aggregate to a real trace (§8 v1.x). The visibility rules from §6.11 apply.
+**Description:** Store the most recent value of explicitly listed high-cardinality keys (for example `traceparent`) per entry, so users can jump from an aggregate to a real trace (§8 v1.x). The visibility rules from §6.11 apply.
 
-*Owner's note (2026-10-05):* the task is kept. An exemplar stores the most recent value of an excluded high-cardinality key (e.g. `traceparent`) per entry.
+*Owner's note (2026-10-05):* the task is kept. An exemplar stores the most recent value of a high-cardinality key (e.g. `traceparent`) per entry.
 
 **Acceptance criteria:**
 - The exemplar column shows the latest value without adding new entries.
 - It is `NULL` for unprivileged roles viewing other roles' rows.
+- Only keys in the exemplar GUC are stored. Total exemplar memory never exceeds the configured cap.
 - The upgrade script is provided.
 
 **Depends on:** 20261005-091225-17, 20261005-091225-20
-**Open questions:**
-- How are exemplar keys selected: every denylisted key, or a dedicated GUC?
-- What is the per-entry storage budget? Exemplars enlarge `entrysize` for every entry, and capacity is a postmaster-level setting.
+**Decisions (2026-10-05):**
+- Exemplar keys come from an explicit list in a dedicated GUC (e.g. `pg_stat_statement_context.exemplar_keys`). The denylist (`exclude_tags`) does not double as the exemplar list. A key may need to be both denylisted (so it isn't grouped by) and listed as an exemplar.
+- Exemplar storage has a memory cap set by a config value (a postmaster-level GUC, since it sizes shared memory). Values that would exceed the cap are truncated or dropped (implementer's choice, documented and counted in `_info()`).
 
-**Status:** blocked-on-questions
+**Open questions:** none
+
+**Status:** blocked-on-deps
 
 ### 20261005-091225-34: Roadmap: background worker reclaiming dead entries
 

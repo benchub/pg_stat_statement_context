@@ -744,10 +744,12 @@ matches this extension's minimum supported version.
   (2026-10-05): a global default cap GUC plus optional per-key overrides, with
   distinct values counted globally per key (not per bucket or per `queryid`).
   Collapses are counted in `_info()`.
-- **Exemplars:** store the most recent value of an excluded high-cardinality
-  key, such as `traceparent`, per entry, so users can jump from an aggregate
-  to a real trace without the key exploding. (Key selection and per-entry
-  storage budget are still open; see the backlog.)
+- **Exemplars:** store the most recent value of a high-cardinality key, such
+  as `traceparent`, per entry, so users can jump from an aggregate to a real
+  trace without the key exploding. Exemplar keys are an explicit list in a
+  dedicated GUC; the `exclude_tags` denylist does not double as that list.
+  Total exemplar storage is bounded by a configurable memory cap (decided
+  2026-10-05).
 - Optional background worker that reclaims dead entries (all slots expired)
   on idle systems. This is not needed for correctness, since readers filter
   expired slots (§5.2).
