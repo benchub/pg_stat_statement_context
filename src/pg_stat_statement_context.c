@@ -10,6 +10,7 @@
 #include "miscadmin.h"
 
 #include "compat.h"
+#include "guc.h"
 
 PG_MODULE_MAGIC;
 
@@ -27,6 +28,9 @@ _PG_init(void)
 {
 	if (!process_shared_preload_libraries_in_progress)
 		return;
+
+	/* GUCs exist only when preloaded; postmaster GUCs need this anyway. */
+	pssc_guc_define();
 
 	/*
 	 * Make compute_query_id = auto behave as on, so query IDs match

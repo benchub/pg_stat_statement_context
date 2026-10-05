@@ -53,8 +53,8 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-121022-1 | marginalia: count malformed pairs when `kv_sep` starts with whitespace | none | no | ready |
-| 20261005-091225-7 | Core GUCs | 20261005-091225-1, 20261005-091225-2 | no | ready |
-| 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | no | blocked-on-deps |
+| 20261005-124839-1 | GUC test module: old-glibc and 32-bit portability fixes | none | no | ready |
+| 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | no | ready |
 | 20261005-091225-9 | Tag-set canonicalization pipeline and extractor chain | 20261005-091225-5, 20261005-091225-6, 20261005-091225-8 | no | blocked-on-deps |
 | 20261005-091225-10 | Regex extractor runtime | 20261005-091225-8, 20261005-091225-9 | no | blocked-on-deps |
 | 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | blocked-on-deps |
@@ -223,23 +223,18 @@ dependencies and is not shown.
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-7: Core GUCs
+### 20261005-124839-1: GUC test module: old-glibc and 32-bit portability fixes
 
-**Description:** In `src/guc.c`, define every GUC in §4.1 with its default, context, and unit:
-- `superuser` maps to `PGC_SUSET`, `postmaster` to `PGC_POSTMASTER`, and `sighup` to `PGC_SIGHUP`.
-- `bucket_interval` uses seconds as its unit, and `scan_window` uses bytes.
-- `track`, `nested_tags`, and `untagged` are enum GUCs.
-- Numeric GUCs get sane bounds, for example `bucket_count >= 1`, keys up to 63 bytes, and a minimum for `max_tagset_bytes`.
-- `tags` and `exclude_tags` are parsed in a `check_hook` into a flat `extra` blob using the compat allocator, with `'*'` handled. The `assign_hook` installs the pointer and bumps the backend-local config generation, and it can't fail (§3.1 item 6).
-- Postmaster GUCs are defined only during `shared_preload_libraries` loading, and the prefix is reserved.
+**Description:** Split off from 20261005-091225-7 after its second review round. Both fixes are in test-only code in `test/modules/pssc_guc_test/pssc_guc_test.c`:
+- **~215–216:** the `mallinfo2()` leak probe is guarded only by `__GLIBC__`, but `mallinfo2` arrived in glibc 2.33, so the module fails to compile on older glibc. Add `__GLIBC_PREREQ(2, 33)` (or a feature check), and return NULL so the TAP test explicitly skips the measurement.
+- **~201:** the SQL wrapper narrows `bigint` arguments to `size_t` before checking that they fit. On 32-bit, the `(4294967296, 0)` case in `test/t/003_guc.pl:260` becomes `(0, 0)` and returns 12 instead of NULL. Reject positive arguments larger than `SIZE_MAX` before narrowing, keeping the `-1` → `SIZE_MAX` convention.
 
 **Acceptance criteria:**
-- Every GUC appears in `pg_settings` with a description.
-- A non-superuser `SET` of a `superuser` GUC fails.
-- `ALTER SYSTEM` plus a reload changes `sighup` GUCs, and postmaster GUCs need a restart.
-- Invalid values are rejected with a clear error, and the previous value stays active.
+- The module compiles against glibc older than 2.33 (e.g. a Debian bullseye or Ubuntu 20.04 based image), and the leak check is reported as skipped there.
+- The boundary test passes on a 32-bit build (e.g. an i386 Docker image), or the narrowing is proven unit-wise.
+- The existing PG14–18 harness still passes.
 
-**Depends on:** 20261005-091225-1, 20261005-091225-2
+**Depends on:** none
 **Open questions:** none
 **Status:** ready
 
@@ -280,7 +275,7 @@ When `position` is omitted, the parser fills in the per-extractor default: `appe
 
 **Depends on:** 20261005-091225-7
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-9: Tag-set canonicalization pipeline and extractor chain
 

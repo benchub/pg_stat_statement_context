@@ -1,0 +1,271 @@
+-- Core GUCs (DESIGN.md §4.1). Requires the library in shared_preload_libraries.
+-- Defaults are read from boot_val, and values are compared with what was set
+-- before, so the test does not depend on the server's own configuration.
+-- ALTER SYSTEM is used only with invalid values: it validates them (check
+-- hooks, bounds) and fails before writing postgresql.auto.conf.
+SELECT count(*) AS auto_conf_before
+  FROM pg_file_settings
+ WHERE name LIKE 'pg\_stat\_statement\_context.%'
+   AND sourcefile LIKE '%postgresql.auto.conf' \gset
+-- Every GUC, with description, type, default, context, unit and bounds.
+\pset format unaligned
+SELECT name, short_desc, vartype, boot_val, context, unit, min_val, max_val,
+       enumvals
+  FROM pg_settings
+ WHERE name LIKE 'pg\_stat\_statement\_context.%'
+ ORDER BY name COLLATE "C";
+name|short_desc|vartype|boot_val|context|unit|min_val|max_val|enumvals
+pg_stat_statement_context.bucket_count|Sets the number of time buckets kept for each entry.|integer|12|postmaster||1|10000|
+pg_stat_statement_context.bucket_interval|Sets the width of each time bucket.|integer|300|postmaster|s|1|86400|
+pg_stat_statement_context.enabled|Enables collection of statement statistics per tag set.|bool|on|superuser||||
+pg_stat_statement_context.exclude_tags|Sets the tag keys to discard when tags is "*".|string|traceparent, tracestate, request_id|sighup||||
+pg_stat_statement_context.extractors|Sets the extractors that turn SQL comments into tags.|string|sqlcommenter, marginalia|sighup||||
+pg_stat_statement_context.max_entries|Sets the maximum number of tracked combinations of query and tag set.|integer|10000|postmaster||100|1073741823|
+pg_stat_statement_context.max_tag_value_len|Sets the maximum length of a tag value in bytes.|integer|64|postmaster||1|4096|
+pg_stat_statement_context.max_tags|Sets the maximum number of tags stored per entry.|integer|8|postmaster||1|64|
+pg_stat_statement_context.max_tagset_bytes|Sets the maximum size of a serialized tag set in bytes.|integer|512|postmaster||128|8192|
+pg_stat_statement_context.nested_tags|Selects which tags nested statements get.|enum|inherit|superuser||||{inherit,scan,none}
+pg_stat_statement_context.scan_window|Sets how many bytes at the head or tail of a long statement are searched for comments.|integer|2048|sighup|B|64|1048576|
+pg_stat_statement_context.tags|Sets the tag keys to keep ("*" keeps all).|string|action, controller, job|sighup||||
+pg_stat_statement_context.track|Selects which statements are tracked.|enum|top|superuser||||{none,top,all}
+pg_stat_statement_context.track_utility|Selects whether utility commands are tracked.|bool|on|superuser||||
+pg_stat_statement_context.untagged|Selects whether statements without tags are recorded.|enum|skip|sighup||||{skip,record}
+(15 rows)
+\pset format aligned
+SELECT count(*) AS gucs,
+       count(*) FILTER (WHERE short_desc IS NOT NULL AND short_desc <> '') AS described
+  FROM pg_settings
+ WHERE name LIKE 'pg\_stat\_statement\_context.%';
+ gucs | described 
+------+-----------
+   15 |        15
+(1 row)
+
+-- ---- superuser GUCs: a superuser can SET them ----
+SET pg_stat_statement_context.enabled = off;
+SHOW pg_stat_statement_context.enabled;
+ pg_stat_statement_context.enabled 
+-----------------------------------
+ off
+(1 row)
+
+SET pg_stat_statement_context.track = 'all';
+SHOW pg_stat_statement_context.track;
+ pg_stat_statement_context.track 
+---------------------------------
+ all
+(1 row)
+
+SET pg_stat_statement_context.track = 'none';
+SHOW pg_stat_statement_context.track;
+ pg_stat_statement_context.track 
+---------------------------------
+ none
+(1 row)
+
+SET pg_stat_statement_context.track_utility = off;
+SHOW pg_stat_statement_context.track_utility;
+ pg_stat_statement_context.track_utility 
+-----------------------------------------
+ off
+(1 row)
+
+SET pg_stat_statement_context.nested_tags = 'scan';
+SHOW pg_stat_statement_context.nested_tags;
+ pg_stat_statement_context.nested_tags 
+---------------------------------------
+ scan
+(1 row)
+
+SET pg_stat_statement_context.nested_tags = 'none';
+SHOW pg_stat_statement_context.nested_tags;
+ pg_stat_statement_context.nested_tags 
+---------------------------------------
+ none
+(1 row)
+
+-- Invalid values are rejected and the previous value stays.
+SET pg_stat_statement_context.track = 'bogus';
+ERROR:  invalid value for parameter "pg_stat_statement_context.track": "bogus"
+HINT:  Available values: none, top, all.
+SHOW pg_stat_statement_context.track;
+ pg_stat_statement_context.track 
+---------------------------------
+ none
+(1 row)
+
+SET pg_stat_statement_context.nested_tags = 'outer';
+ERROR:  invalid value for parameter "pg_stat_statement_context.nested_tags": "outer"
+HINT:  Available values: inherit, scan, none.
+SHOW pg_stat_statement_context.nested_tags;
+ pg_stat_statement_context.nested_tags 
+---------------------------------------
+ none
+(1 row)
+
+SET pg_stat_statement_context.enabled = 'maybe';
+ERROR:  parameter "pg_stat_statement_context.enabled" requires a Boolean value
+SHOW pg_stat_statement_context.enabled;
+ pg_stat_statement_context.enabled 
+-----------------------------------
+ off
+(1 row)
+
+SET pg_stat_statement_context.track_utility = 2;
+ERROR:  parameter "pg_stat_statement_context.track_utility" requires a Boolean value
+SHOW pg_stat_statement_context.track_utility;
+ pg_stat_statement_context.track_utility 
+-----------------------------------------
+ off
+(1 row)
+
+RESET pg_stat_statement_context.enabled;
+RESET pg_stat_statement_context.track;
+RESET pg_stat_statement_context.track_utility;
+RESET pg_stat_statement_context.nested_tags;
+-- ---- a non-superuser cannot SET superuser GUCs ----
+SELECT current_setting('pg_stat_statement_context.enabled') AS enabled_before,
+       current_setting('pg_stat_statement_context.track') AS track_before,
+       current_setting('pg_stat_statement_context.track_utility') AS track_utility_before,
+       current_setting('pg_stat_statement_context.nested_tags') AS nested_tags_before
+\gset
+CREATE ROLE regress_pssc_nosuper;
+SET ROLE regress_pssc_nosuper;
+SET pg_stat_statement_context.enabled = off;
+ERROR:  permission denied to set parameter "pg_stat_statement_context.enabled"
+SET pg_stat_statement_context.track = 'all';
+ERROR:  permission denied to set parameter "pg_stat_statement_context.track"
+SET pg_stat_statement_context.track_utility = off;
+ERROR:  permission denied to set parameter "pg_stat_statement_context.track_utility"
+SET pg_stat_statement_context.nested_tags = 'scan';
+ERROR:  permission denied to set parameter "pg_stat_statement_context.nested_tags"
+SELECT set_config('pg_stat_statement_context.enabled', 'off', true);
+ERROR:  permission denied to set parameter "pg_stat_statement_context.enabled"
+-- Reading them is allowed, and nothing changed.
+SELECT current_setting('pg_stat_statement_context.enabled') = :'enabled_before' AS enabled_kept,
+       current_setting('pg_stat_statement_context.track') = :'track_before' AS track_kept,
+       current_setting('pg_stat_statement_context.track_utility') = :'track_utility_before' AS track_utility_kept,
+       current_setting('pg_stat_statement_context.nested_tags') = :'nested_tags_before' AS nested_tags_kept;
+ enabled_kept | track_kept | track_utility_kept | nested_tags_kept 
+--------------+------------+--------------------+------------------
+ t            | t          | t                  | t
+(1 row)
+
+RESET ROLE;
+DROP ROLE regress_pssc_nosuper;
+-- ---- sighup and postmaster GUCs cannot be SET in a session ----
+SET pg_stat_statement_context.scan_window = '4kB';
+ERROR:  parameter "pg_stat_statement_context.scan_window" cannot be changed now
+SET pg_stat_statement_context.extractors = 'marginalia';
+ERROR:  parameter "pg_stat_statement_context.extractors" cannot be changed now
+SET pg_stat_statement_context.tags = 'a';
+ERROR:  parameter "pg_stat_statement_context.tags" cannot be changed now
+SET pg_stat_statement_context.exclude_tags = 'a';
+ERROR:  parameter "pg_stat_statement_context.exclude_tags" cannot be changed now
+SET pg_stat_statement_context.untagged = 'record';
+ERROR:  parameter "pg_stat_statement_context.untagged" cannot be changed now
+SET pg_stat_statement_context.max_entries = 1000;
+ERROR:  parameter "pg_stat_statement_context.max_entries" cannot be changed without restarting the server
+SET pg_stat_statement_context.bucket_count = 6;
+ERROR:  parameter "pg_stat_statement_context.bucket_count" cannot be changed without restarting the server
+SET pg_stat_statement_context.bucket_interval = '60s';
+ERROR:  parameter "pg_stat_statement_context.bucket_interval" cannot be changed without restarting the server
+SET pg_stat_statement_context.max_tags = 4;
+ERROR:  parameter "pg_stat_statement_context.max_tags" cannot be changed without restarting the server
+SET pg_stat_statement_context.max_tag_value_len = 32;
+ERROR:  parameter "pg_stat_statement_context.max_tag_value_len" cannot be changed without restarting the server
+SET pg_stat_statement_context.max_tagset_bytes = 256;
+ERROR:  parameter "pg_stat_statement_context.max_tagset_bytes" cannot be changed without restarting the server
+-- ---- invalid values are rejected by validation (nothing is written) ----
+-- Bounds: one past each end (bounds of GUCs with units are tested in
+-- test/t/003_guc.pl, since PG17+ adds the unit to the range message).
+ALTER SYSTEM SET pg_stat_statement_context.max_entries = 99;
+ERROR:  99 is outside the valid range for parameter "pg_stat_statement_context.max_entries" (100 .. 1073741823)
+ALTER SYSTEM SET pg_stat_statement_context.max_entries = 1073741824;
+ERROR:  1073741824 is outside the valid range for parameter "pg_stat_statement_context.max_entries" (100 .. 1073741823)
+ALTER SYSTEM SET pg_stat_statement_context.bucket_count = 0;
+ERROR:  0 is outside the valid range for parameter "pg_stat_statement_context.bucket_count" (1 .. 10000)
+ALTER SYSTEM SET pg_stat_statement_context.bucket_count = 10001;
+ERROR:  10001 is outside the valid range for parameter "pg_stat_statement_context.bucket_count" (1 .. 10000)
+ALTER SYSTEM SET pg_stat_statement_context.max_tags = 0;
+ERROR:  0 is outside the valid range for parameter "pg_stat_statement_context.max_tags" (1 .. 64)
+ALTER SYSTEM SET pg_stat_statement_context.max_tags = 65;
+ERROR:  65 is outside the valid range for parameter "pg_stat_statement_context.max_tags" (1 .. 64)
+ALTER SYSTEM SET pg_stat_statement_context.max_tag_value_len = 0;
+ERROR:  0 is outside the valid range for parameter "pg_stat_statement_context.max_tag_value_len" (1 .. 4096)
+ALTER SYSTEM SET pg_stat_statement_context.max_tag_value_len = 4097;
+ERROR:  4097 is outside the valid range for parameter "pg_stat_statement_context.max_tag_value_len" (1 .. 4096)
+ALTER SYSTEM SET pg_stat_statement_context.max_tagset_bytes = 127;
+ERROR:  127 is outside the valid range for parameter "pg_stat_statement_context.max_tagset_bytes" (128 .. 8192)
+ALTER SYSTEM SET pg_stat_statement_context.max_tagset_bytes = 8193;
+ERROR:  8193 is outside the valid range for parameter "pg_stat_statement_context.max_tagset_bytes" (128 .. 8192)
+-- Units: bucket_interval is in seconds, scan_window in bytes.
+ALTER SYSTEM SET pg_stat_statement_context.bucket_interval = '5 parsecs';
+ERROR:  invalid value for parameter "pg_stat_statement_context.bucket_interval": "5 parsecs"
+HINT:  Valid units for this parameter are "us", "ms", "s", "min", "h", and "d".
+ALTER SYSTEM SET pg_stat_statement_context.scan_window = '2 lightyears';
+ERROR:  invalid value for parameter "pg_stat_statement_context.scan_window": "2 lightyears"
+HINT:  Valid units for this parameter are "B", "kB", "MB", "GB", and "TB".
+-- Enums.
+ALTER SYSTEM SET pg_stat_statement_context.untagged = 'maybe';
+ERROR:  invalid value for parameter "pg_stat_statement_context.untagged": "maybe"
+HINT:  Available values: skip, record.
+ALTER SYSTEM SET pg_stat_statement_context.track = 'everything';
+ERROR:  invalid value for parameter "pg_stat_statement_context.track": "everything"
+HINT:  Available values: none, top, all.
+-- tags / exclude_tags syntax.
+ALTER SYSTEM SET pg_stat_statement_context.tags = 'action, contr oller';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": "action, contr oller"
+DETAIL:  Tag key "contr oller" contains whitespace.
+ALTER SYSTEM SET pg_stat_statement_context.tags = E'action,\tjob\tid';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": "action,	job	id"
+DETAIL:  Tag key "job	id" contains whitespace.
+ALTER SYSTEM SET pg_stat_statement_context.tags = 'action,,job';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": "action,,job"
+DETAIL:  The list contains an empty tag key.
+ALTER SYSTEM SET pg_stat_statement_context.tags = 'action, job,';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": "action, job,"
+DETAIL:  The list contains an empty tag key.
+ALTER SYSTEM SET pg_stat_statement_context.tags = ', action';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": ", action"
+DETAIL:  The list contains an empty tag key.
+ALTER SYSTEM SET pg_stat_statement_context.tags = ' , ';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": " , "
+DETAIL:  The list contains an empty tag key.
+ALTER SYSTEM SET pg_stat_statement_context.tags = 'action, *';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": "action, *"
+DETAIL:  "*" must be the only entry in the list.
+ALTER SYSTEM SET pg_stat_statement_context.tags = '*, *';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": "*, *"
+DETAIL:  "*" must be the only entry in the list.
+ALTER SYSTEM SET pg_stat_statement_context.tags = 'act*';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": "act*"
+DETAIL:  Tag key "act*" contains "*".
+-- 64-byte key (the limit is 63).
+SELECT 'action, ' || repeat('k', 64) AS long_key_list,
+       repeat('x', 100) AS very_long_key \gset
+ALTER SYSTEM SET pg_stat_statement_context.tags = :'long_key_list';
+ERROR:  invalid value for parameter "pg_stat_statement_context.tags": "action, kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"
+DETAIL:  Tag key "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk..." is longer than 63 bytes.
+ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = 'trace parent';
+ERROR:  invalid value for parameter "pg_stat_statement_context.exclude_tags": "trace parent"
+DETAIL:  Tag key "trace parent" contains whitespace.
+ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = '*';
+ERROR:  invalid value for parameter "pg_stat_statement_context.exclude_tags": "*"
+DETAIL:  "*" is only allowed in pg_stat_statement_context.tags.
+ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = 'request_id,,x';
+ERROR:  invalid value for parameter "pg_stat_statement_context.exclude_tags": "request_id,,x"
+DETAIL:  The list contains an empty tag key.
+ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = :'very_long_key';
+ERROR:  invalid value for parameter "pg_stat_statement_context.exclude_tags": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+DETAIL:  Tag key "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx..." is longer than 63 bytes.
+-- None of the rejected ALTER SYSTEM commands wrote anything.
+SELECT count(*) = :auto_conf_before AS auto_conf_unchanged
+  FROM pg_file_settings
+ WHERE name LIKE 'pg\_stat\_statement\_context.%'
+   AND sourcefile LIKE '%postgresql.auto.conf';
+ auto_conf_unchanged 
+---------------------
+ t
+(1 row)
+

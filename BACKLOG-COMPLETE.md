@@ -124,6 +124,26 @@ Decoded output goes into a caller-provided bounded buffer. Decoded NUL bytes (`%
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-7: Core GUCs
+
+**Description:** In `src/guc.c`, define every GUC in §4.1 with its default, context, and unit:
+- `superuser` maps to `PGC_SUSET`, `postmaster` to `PGC_POSTMASTER`, and `sighup` to `PGC_SIGHUP`.
+- `bucket_interval` uses seconds as its unit, and `scan_window` uses bytes.
+- `track`, `nested_tags`, and `untagged` are enum GUCs.
+- Numeric GUCs get sane bounds, for example `bucket_count >= 1`, keys up to 63 bytes, and a minimum for `max_tagset_bytes`.
+- `tags` and `exclude_tags` are parsed in a `check_hook` into a flat `extra` blob using the compat allocator, with `'*'` handled. The `assign_hook` installs the pointer and bumps the backend-local config generation, and it can't fail (§3.1 item 6).
+- Postmaster GUCs are defined only during `shared_preload_libraries` loading, and the prefix is reserved.
+
+**Acceptance criteria:**
+- Every GUC appears in `pg_settings` with a description.
+- A non-superuser `SET` of a `superuser` GUC fails.
+- `ALTER SYSTEM` plus a reload changes `sighup` GUCs, and postmaster GUCs need a restart.
+- Invalid values are rejected with a clear error, and the previous value stays active.
+
+**Depends on:** 20261005-091225-1, 20261005-091225-2
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

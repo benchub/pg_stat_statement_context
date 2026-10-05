@@ -1,0 +1,5 @@
+# TEST-ONLY: inspects src/guc.h state; not part of pg_stat_statement_context.
+comment = 'test-only inspector for pg_stat_statement_context GUCs'
+default_version = '1.0'
+module_pathname = '$libdir/pssc_guc_test'
+relocatable = true

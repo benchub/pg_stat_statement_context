@@ -3,7 +3,7 @@
 # installcheck needs a running server with
 #   shared_preload_libraries = 'pg_stat_statement_context'
 # (scripts/docker-test.sh <pg-major> sets one up). The TAP tests also need the
-# TEST-ONLY module from "make install-test-modules", which is never installed
+# TEST-ONLY modules from "make install-test-modules", which is never installed
 # by "make install".
 
 MODULE_big = pg_stat_statement_context
@@ -20,7 +20,7 @@ PGFILEDESC = "pg_stat_statement_context - per-tag statement statistics from SQL 
 EXTENSION = pg_stat_statement_context
 DATA = sql/pg_stat_statement_context--1.0.sql
 
-REGRESS = smoke
+REGRESS = smoke guc
 REGRESS_OPTS = --inputdir=test \
 	--temp-config=$(srcdir)/test/pg_stat_statement_context.conf
 
@@ -42,8 +42,10 @@ PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-# TEST-ONLY module that exercises the src/compat.h shims (test/t/002_compat.pl).
-TEST_MODULES = test/modules/pssc_compat_test
+# TEST-ONLY modules: pssc_compat_test exercises the src/compat.h shims
+# (test/t/002_compat.pl); pssc_guc_test inspects the parsed GUC state of
+# src/guc.h (test/t/003_guc.pl).
+TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test
 
 .PHONY: test-modules install-test-modules clean-test-modules check-version-guards unittest
 
