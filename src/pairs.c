@@ -437,6 +437,10 @@ pssc_parse_marginalia(const char *body, size_t len,
 				if (sep_at(&in, i, c, kv, kvlen) &&
 					!sep_inside(&in, i, kvlen, ps, pslen))
 				{
+					/* the bytes skipped below count toward blankness too */
+					for (k = 1; k < kvlen; k++)
+						if (!is_space((unsigned char) kv[k]))
+							blank = false;
 					have_kv = true;
 					i += kvlen;
 					val_start = val_end = i;

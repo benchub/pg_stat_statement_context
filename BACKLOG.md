@@ -52,7 +52,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-121022-1 | marginalia: count malformed pairs when `kv_sep` starts with whitespace | none | no | ready |
 | 20261005-124839-1 | GUC test module: old-glibc and 32-bit portability fixes | none | no | ready |
 | 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | no | ready |
 | 20261005-091225-9 | Tag-set canonicalization pipeline and extractor chain | 20261005-091225-5, 20261005-091225-6, 20261005-091225-8 | no | blocked-on-deps |
@@ -206,18 +205,6 @@ dependencies and is not shown.
 **Acceptance criteria:**
 - `scripts/docker-test.sh 17.0` and `scripts/docker-test.sh 18.0` build and pass. `scripts/docker-test.sh 15.0` still passes.
 - A failed download (e.g. a bad URL or a simulated mid-stream failure) or a checksum mismatch fails the build.
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
-
-### 20261005-121022-1: marginalia: count malformed pairs when `kv_sep` starts with whitespace
-
-**Description:** Split off from 20261005-091225-6 after its second review round. In `src/pairs.c` (~433–443, 470–475), the `blank` check looks only at the first byte of a matched `kv_sep`. Advancing by `kvlen` then skips its other bytes, so with a separator that starts with whitespace (e.g. `kv_sep=" :"`), a segment such as `" :"` is treated as blank. The result is `npairs=0, nmalformed=0` where it should be `nmalformed=1`. Fix this by counting every consumed separator byte when deciding whether a segment is blank. Also consider having the extractor DSL (-8) reject or trim separators that have leading or trailing whitespace.
-
-**Acceptance criteria:**
-- `kv_sep=" :"` with body `" :"` gives `nmalformed=1`, and a genuinely whitespace-only segment is still ignored and not counted.
-- The marginalia fuzz differential check covers separators that start with whitespace, including multi-byte ones.
 
 **Depends on:** none
 **Open questions:** none

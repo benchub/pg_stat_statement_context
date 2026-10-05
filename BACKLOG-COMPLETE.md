@@ -144,6 +144,18 @@ Decoded output goes into a caller-provided bounded buffer. Decoded NUL bytes (`%
 **Open questions:** none
 **Status:** done
 
+### 20261005-121022-1: marginalia: count malformed pairs when `kv_sep` starts with whitespace
+
+**Description:** Split off from 20261005-091225-6 after its second review round. In `src/pairs.c` (~433–443, 470–475), the `blank` check looks only at the first byte of a matched `kv_sep`. Advancing by `kvlen` then skips its other bytes, so with a separator that starts with whitespace (e.g. `kv_sep=" :"`), a segment such as `" :"` is treated as blank. The result is `npairs=0, nmalformed=0` where it should be `nmalformed=1`. Fix this by counting every consumed separator byte when deciding whether a segment is blank. Also consider having the extractor DSL (-8) reject or trim separators that have leading or trailing whitespace.
+
+**Acceptance criteria:**
+- `kv_sep=" :"` with body `" :"` gives `nmalformed=1`, and a genuinely whitespace-only segment is still ignored and not counted.
+- The marginalia fuzz differential check covers separators that start with whitespace, including multi-byte ones.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

@@ -313,6 +313,16 @@ static const Case cases[] = {
 	{P("a", "1"), P("b", "2"), END}},
 	{"overlap pair_sep prefix of kv_sep", MG, SEP("::", ":"), IN("a::b"), 2, {END}},
 	{"custom NUL pair_sep", MG, SEP(":", "\0"), IN("a:1\0b:2"), 0, {P("a", "1"), P("b", "2"), END}},
+	/* a kv_sep starting with whitespace is not blank (20261005-121022-1) */
+	{"ws kv_sep alone is malformed", MG, SEP(" :", ","), IN(" :"), 1, {END}},
+	{"ws kv_sep alone between pairs", MG, SEP(" :", ","), IN("a :1, :,b :2"), 1,
+	{P("a", "1"), P("b", "2"), END}},
+	{"ws multi-byte kv_sep alone", MG, SEP("\t =", ";"), IN(" \t =\n;a\t =1"), 1,
+	{P("a", "1"), END}},
+	{"ws-only kv_sep, ws segment", MG, SEP("  ", ","), IN("    ,a  1"), 0,
+	{P("a", "1"), END}},
+	{"ws kv_sep, whitespace-only segments ignored", MG, SEP(" :", ","), IN(" ,  , \t,a :1"), 0,
+	{P("a", "1"), END}},
 };
 
 #define NCASES (sizeof(cases) / sizeof(cases[0]))

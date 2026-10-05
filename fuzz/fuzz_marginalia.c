@@ -2,8 +2,9 @@
  * fuzz_marginalia.c
  *		libFuzzer entry point for pssc_parse_marginalia() (DESIGN.md §9).
  *		The input is one comment body, parsed with the default separators
- *		and a few custom ones (multi-byte, overlapping, equal, NUL, invalid),
- *		and checked against a naive split-on-pair_sep-first reference.
+ *		and a few custom ones (multi-byte, overlapping, equal, NUL, invalid,
+ *		starting with whitespace), and checked against a naive
+ *		split-on-pair_sep-first reference.
  */
 #include "fuzz_common.h"
 
@@ -122,6 +123,10 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 		{"::", 2, ":", 1},
 		{":", 1, ":", 1},
 		{"\0", 1, ",", 1},
+		{" :", 2, ",", 1},		/* kv_sep starting with whitespace */
+		{" \t:", 3, ",", 1},
+		{"\t=>", 3, ";", 1},
+		{"  ", 2, ",", 1},		/* whitespace-only kv_sep */
 	};
 	static const PsscMarginaliaOpts invalid = {"", 0, "123456789", 9};
 	const char *s = (const char *) data;
