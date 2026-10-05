@@ -22,6 +22,43 @@
  * Until backlog item 20261005-091225-15 (eviction) lands, a record whose
  * key is new while the table holds max_entries entries is dropped and
  * counted in the dropped_records header counter.
+ *
+ * Time buckets (§5.2). The header holds the epoch, bucket_interval,
+ * bucket_count and current_bucket. The epoch is the postmaster's start time
+ * rounded down to a multiple of bucket_interval since the PostgreSQL epoch
+ * (2000-01-01 00:00 UTC), so bucket boundaries fall on wall-clock multiples
+ * of the interval (e.g. :00, :05 for 300 s) and current_bucket starts at 0.
+ * Every backend computes bucket_id = floor((now - epoch) / interval) as a
+ * signed int64 (pssc_bucket_for_time(), counters.h; ids are negative if the
+ * clock is before the epoch).
+ *	- current_bucket is a shared monotonic watermark: the newest bucket
+ *	  any writer or reader has observed. It is a pg_atomic_uint64 (holding
+ *	  the signed id) raised lock-free by a CAS max loop and never decreases,
+ *	  so a clock step backwards cannot bring expired counts back.
+ *	- Writers, once they hold the lock (shared fast path, or exclusive
+ *	  insert path), re-read the clock and raise current_bucket to
+ *	  max(current_bucket, clock bucket, computed id); a stall before or
+ *	  while waiting for the lock therefore cannot leave them behind. The id
+ *	  written is current_bucket, read under the entry spinlock: an older
+ *	  computed id (stalled writer, clock stepped back) is clamped up to it,
+ *	  so every write lands in a bucket that is live at the moment of the
+ *	  write, and every written id is <= current_bucket.
+ *	- Each entry's ring rolls over lazily, under the entry spinlock: slot
+ *	  bucket_id mod bucket_count is zeroed and relabeled if it holds an older
+ *	  bucket, and last_bucket is set to the id written.
+ *	- Readers do not depend on writers: they too raise current_bucket to
+ *	  the clock bucket, then use it (read after copying each entry) as their
+ *	  current bucket. A slot is live if its id is in
+ *	  [current - bucket_count + 1, current] (pssc_bucket_is_live()); an
+ *	  entry with no live slot is dead (pssc_bucket_entry_is_dead()). Once a
+ *	  reader saw a slot expire it stays expired, whatever the clock does.
+ *
+ * Ring invariants (asserted on every write in assert-enabled builds, and
+ * checked on demand by pssc_store_check_invariants() in any build): every
+ * slot is empty (PSSC_BUCKET_NONE, zero counters) or holds an id <=
+ * current_bucket that is congruent to its index mod bucket_count and has
+ * calls >= 1; an entry's last_bucket is <= current_bucket and is the
+ * newest id in its ring.
  */
 #ifndef PSSC_STORE_H
 #define PSSC_STORE_H
@@ -104,6 +141,14 @@ typedef struct PsscStoreEntryView
 	double		usage;
 	int			bucket_count;
 	const PsscSlot *slots;		/* [bucket_count], index = bucket_id mod count */
+
+	/*
+	 * The readers' current bucket (current_bucket, read after this entry was
+	 * copied, so every id in it is <= this; non-decreasing across entries):
+	 * pass it to pssc_bucket_is_live() for each slot (expired slots must be
+	 * hidden) and to pssc_bucket_entry_is_dead().
+	 */
+	int64		current_bucket;
 } PsscStoreEntryView;
 
 typedef void (*PsscStoreVisitor) (const PsscStoreEntryView *entry, void *arg);
@@ -141,15 +186,68 @@ extern PGDLLEXPORT bool pssc_store_build_key(PsscKey *key, Oid dbid, Oid userid,
 extern PGDLLEXPORT uint32 pssc_store_key_hash(const PsscKey *key);
 
 /*
- * Records one call taking elapsed_ms into the entry for key, in ring slot
- * bucket_id mod bucket_count (relabeled first if it holds an older bucket).
- * bucket_id is supplied by the caller until item -14 clamps it to the
- * header's current bucket; meanwhile an id older than the entry's
- * last_bucket is raised to last_bucket, so slots never go backwards.
+ * Records one call taking elapsed_ms into the entry for key. The bucket is
+ * computed from the clock now (pssc_store_clock_bucket()), so an execution
+ * is attributed to the bucket in which it completes (call this at
+ * ExecutorEnd / utility completion); the clock is read again once the lock
+ * is held, so a stall moves the call forward (see the top of this file).
  */
 extern PGDLLEXPORT PsscStoreResult pssc_store_record(const PsscKey *key,
-													 int64 bucket_id,
 													 double elapsed_ms);
+
+/*
+ * The same with a bucket id the caller already computed from the clock
+ * (pssc_store_clock_bucket()). The id is only a lower bound: current_bucket
+ * is raised to max(it, the clock bucket under the lock, this id) and the
+ * call is written there.
+ */
+extern PGDLLEXPORT PsscStoreResult pssc_store_record_at(const PsscKey *key,
+														int64 bucket_id,
+														double elapsed_ms);
+
+/* The clock as the store sees it (honours the debug clock, below). */
+extern PGDLLEXPORT TimestampTz pssc_store_now(void);
+
+/* floor((pssc_store_now() - epoch) / interval); 0 if not set up. */
+extern PGDLLEXPORT int64 pssc_store_clock_bucket(void);
+
+/* Start of a bucket: epoch + bucket_id * bucket_interval. */
+extern PGDLLEXPORT TimestampTz pssc_store_bucket_start(int64 bucket_id);
+
+/* Header bucket state (§5.2), for _info() (item -21) and tests. */
+typedef enum PsscDebugClockMode
+{
+	PSSC_CLOCK_REAL = 0,		/* now = system clock + offset (0 normally) */
+	PSSC_CLOCK_PINNED			/* now = a fixed (settable) timestamp */
+} PsscDebugClockMode;
+
+typedef struct PsscStoreBuckets
+{
+	TimestampTz epoch;
+	int64		interval_us;
+	int			bucket_count;
+	int64		current_bucket; /* the watermark (written ids are <= this) */
+	int64		clock_bucket;	/* from pssc_store_now() */
+	int64		reader_bucket;	/* max(clock_bucket, current_bucket): what
+								 * the next reader will raise it to */
+	TimestampTz now;			/* pssc_store_now() */
+	int64		advances;		/* watermark advances since startup or reset */
+	PsscDebugClockMode clock_mode;
+	int64		clock_value;	/* offset (us) or pinned timestamp */
+} PsscStoreBuckets;
+
+/*
+ * A diagnostic snapshot; unlike readers it does not advance current_bucket.
+ * false (and *b zeroed) if the store is not set up.
+ */
+extern PGDLLEXPORT bool pssc_store_get_buckets(PsscStoreBuckets *b);
+
+/*
+ * Checks the ring invariants (top of this file) and the entry count of
+ * every entry under the shared lock, in any build. Raises ERROR describing
+ * the first violation; returns the number of entries checked.
+ */
+extern PGDLLEXPORT int64 pssc_store_check_invariants(void);
 
 /*
  * Calls fn for a copy of every entry (taken under its spinlock) while
@@ -185,7 +283,23 @@ extern PGDLLEXPORT void pssc_store_debug_force_collisions(bool on);
  * NULL (the default) disables it.
  */
 typedef void (*PsscStoreRecordTestHook) (void *arg);
+/* (The hook runs after the record has computed its bucket id.) */
 extern PGDLLEXPORT void pssc_store_set_record_test_hook(PsscStoreRecordTestHook hook,
 														void *arg);
+
+/*
+ * Testing aid (DESIGN.md §9): a debug clock for clock steps and bucket
+ * boundaries, shared through the header so every backend (and every reader)
+ * sees the same time. PSSC_CLOCK_REAL with value = offset in microseconds
+ * (at most +-1e17, about 3000 years) adds the offset to the system clock;
+ * PSSC_CLOCK_PINNED with value = a finite timestamp freezes the clock
+ * there. advance adds usec to the value atomically (both modes), so
+ * concurrent backends can step a pinned clock. Startup is REAL with
+ * offset 0. Reachable only from C (test/modules/pssc_store_test); it is
+ * not a GUC.
+ */
+extern PGDLLEXPORT void pssc_store_debug_set_clock(PsscDebugClockMode mode,
+												   int64 value);
+extern PGDLLEXPORT void pssc_store_debug_advance_clock(int64 usec);
 
 #endif							/* PSSC_STORE_H */

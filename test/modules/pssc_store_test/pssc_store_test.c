@@ -34,7 +34,14 @@ main_sym(const char *name)
 
 typedef bool (*build_key_fn) (PsscKey *, Oid, Oid, int64, bool, const char *,
 							  size_t, uint32);
-typedef PsscStoreResult (*record_fn) (const PsscKey *, int64, double);
+typedef PsscStoreResult (*record_fn) (const PsscKey *, double);
+typedef PsscStoreResult (*record_at_fn) (const PsscKey *, int64, double);
+typedef bool (*buckets_fn) (PsscStoreBuckets *);
+typedef int64 (*int64_fn) (void);
+typedef TimestampTz (*bucket_start_fn) (int64);
+typedef void (*set_clock_fn) (PsscDebugClockMode, int64);
+typedef void (*advance_clock_fn) (int64);
+typedef bool (*is_live_fn) (int64, int64, int);
 typedef uint32 (*key_hash_fn) (const PsscKey *);
 typedef uint32 (*tagset_hash_fn) (const char *, size_t);
 typedef void (*foreach_fn) (PsscStoreVisitor, void *);
@@ -111,8 +118,11 @@ pssc_store_test_record(PG_FUNCTION_ARGS)
 				   PG_ARGISNULL(7) ? GetUserId() : PG_GETARG_OID(7)))
 		PG_RETURN_TEXT_P(cstring_to_text("rejected"));
 
-	r = record(key, PG_ARGISNULL(2) ? 0 : PG_GETARG_INT64(2),
-			   PG_ARGISNULL(3) ? 1.0 : PG_GETARG_FLOAT8(3));
+	if (PG_ARGISNULL(2))
+		r = record(key, PG_ARGISNULL(3) ? 1.0 : PG_GETARG_FLOAT8(3));
+	else
+		r = ((record_at_fn) main_sym("pssc_store_record_at"))
+			(key, PG_GETARG_INT64(2), PG_ARGISNULL(3) ? 1.0 : PG_GETARG_FLOAT8(3));
 	switch (r)
 	{
 		case PSSC_STORE_UPDATED:
@@ -159,6 +169,8 @@ typedef struct EntriesState
 {
 	Tuplestorestate *ts;
 	TupleDesc	desc;
+	is_live_fn	is_live;
+	is_live_fn	is_dead;
 } EntriesState;
 
 static void
@@ -185,8 +197,8 @@ entries_visit(const PsscStoreEntryView *e, void *arg)
 	for (int i = 0; i < e->bucket_count; i++)
 	{
 		const PsscSlot *s = &e->slots[i];
-		Datum		v[14];
-		bool		nulls[14] = {0};
+		Datum		v[17];
+		bool		nulls[17] = {0};
 
 		if (s->bucket_id == PSSC_BUCKET_NONE)
 			continue;
@@ -204,6 +216,11 @@ entries_visit(const PsscStoreEntryView *e, void *arg)
 		v[11] = Int64GetDatum(s->bucket_id);
 		v[12] = Int64GetDatum(s->calls);
 		v[13] = Float8GetDatum(s->total_exec_time);
+		v[14] = BoolGetDatum(st->is_live(s->bucket_id, e->current_bucket,
+										 e->bucket_count));
+		v[15] = BoolGetDatum(st->is_dead(e->last_bucket, e->current_bucket,
+										 e->bucket_count));
+		v[16] = Int64GetDatum(e->current_bucket);
 		tuplestore_putvalues(st->ts, st->desc, v, nulls);
 	}
 }
@@ -220,6 +237,8 @@ pssc_store_test_entries(PG_FUNCTION_ARGS)
 	pssc_init_materialized_srf(fcinfo, 0);
 	st.ts = rsinfo->setResult;
 	st.desc = rsinfo->setDesc;
+	st.is_live = (is_live_fn) main_sym("pssc_bucket_is_live");
+	st.is_dead = (is_live_fn) main_sym("pssc_bucket_entry_is_dead");
 	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 	fe(entries_visit, &st);
 	MemoryContextSwitchTo(oldcxt);
@@ -357,5 +376,132 @@ pssc_store_test_flip_collisions_in_next_record(PG_FUNCTION_ARGS)
 {
 	flip_to = PG_GETARG_BOOL(0);
 	((set_hook_fn) main_sym("pssc_store_set_record_test_hook")) (flip_hook, NULL);
+	PG_RETURN_VOID();
+}
+
+/* ------------------------------------------------- time buckets (§5.2) */
+
+PG_FUNCTION_INFO_V1(pssc_store_test_buckets);
+Datum
+pssc_store_test_buckets(PG_FUNCTION_ARGS)
+{
+	PsscStoreBuckets b;
+	TupleDesc	desc;
+	Datum		v[10];
+	bool		nulls[10] = {0};
+
+	if (get_call_result_type(fcinfo, NULL, &desc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	if (!((buckets_fn) main_sym("pssc_store_get_buckets")) (&b))
+		elog(ERROR, "store is not set up");
+	v[0] = TimestampTzGetDatum(b.epoch);
+	v[1] = Int64GetDatum(b.interval_us);
+	v[2] = Int32GetDatum(b.bucket_count);
+	v[3] = Int64GetDatum(b.current_bucket);
+	v[4] = Int64GetDatum(b.clock_bucket);
+	v[5] = Int64GetDatum(b.reader_bucket);
+	v[6] = TimestampTzGetDatum(b.now);
+	v[7] = Int64GetDatum(b.advances);
+	v[8] = CStringGetTextDatum(b.clock_mode == PSSC_CLOCK_PINNED ? "pinned" : "real");
+	v[9] = Int64GetDatum(b.clock_value);
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(desc, v, nulls)));
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_clock_bucket);
+Datum
+pssc_store_test_clock_bucket(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(((int64_fn) main_sym("pssc_store_clock_bucket")) ());
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_bucket_start);
+Datum
+pssc_store_test_bucket_start(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TIMESTAMPTZ(((bucket_start_fn) main_sym("pssc_store_bucket_start"))
+						  (PG_GETARG_INT64(0)));
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_set_clock_offset);
+Datum
+pssc_store_test_set_clock_offset(PG_FUNCTION_ARGS)
+{
+	((set_clock_fn) main_sym("pssc_store_debug_set_clock"))
+		(PSSC_CLOCK_REAL, PG_GETARG_INT64(0));
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_pin_clock);
+Datum
+pssc_store_test_pin_clock(PG_FUNCTION_ARGS)
+{
+	((set_clock_fn) main_sym("pssc_store_debug_set_clock"))
+		(PSSC_CLOCK_PINNED, (int64) PG_GETARG_TIMESTAMPTZ(0));
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_advance_clock);
+Datum
+pssc_store_test_advance_clock(PG_FUNCTION_ARGS)
+{
+	((advance_clock_fn) main_sym("pssc_store_debug_advance_clock")) (PG_GETARG_INT64(0));
+	PG_RETURN_VOID();
+}
+
+/* current_bucket last seen by this backend, for the never-decreases check */
+static int64 seen_current_bucket = PG_INT64_MIN;
+
+PG_FUNCTION_INFO_V1(pssc_store_test_check_invariants);
+Datum
+pssc_store_test_check_invariants(PG_FUNCTION_ARGS)
+{
+	PsscStoreBuckets b;
+	int64		n;
+
+	n = ((int64_fn) main_sym("pssc_store_check_invariants")) ();
+	if (!((buckets_fn) main_sym("pssc_store_get_buckets")) (&b))
+		elog(ERROR, "store is not set up");
+	if (b.current_bucket < seen_current_bucket)
+		elog(ERROR, "current_bucket went backwards: " INT64_FORMAT " after " INT64_FORMAT,
+			 b.current_bucket, seen_current_bucket);
+	seen_current_bucket = b.current_bucket;
+	PG_RETURN_INT64(n);
+}
+
+static int64 stall_advance_us;
+static int64 stall_queryid;
+static bool stall_other;
+
+/*
+ * One-shot: runs inside the next pssc_store_record(), after it computed its
+ * bucket id and before it locks: another "backend" moves the clock and
+ * records stall_queryid (unless NULL), which advances current_bucket. The
+ * stalled record then continues with its stale id.
+ */
+static void
+stall_hook(void *arg)
+{
+	PsscKeyBuffer kb;
+	PsscKey    *key = PSSC_KEY_FROM_BUFFER(&kb);
+
+	((set_hook_fn) main_sym("pssc_store_set_record_test_hook")) (NULL, NULL);
+	((advance_clock_fn) main_sym("pssc_store_debug_advance_clock")) (stall_advance_us);
+	if (!stall_other)
+		return;
+	if (!build_key(key, stall_queryid, NULL, true, true, 0, MyDatabaseId, GetUserId()))
+		elog(ERROR, "key rejected");
+	((record_fn) main_sym("pssc_store_record")) (key, 1.0);
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_stall_next_record);
+Datum
+pssc_store_test_stall_next_record(PG_FUNCTION_ARGS)
+{
+	if (PG_ARGISNULL(0))
+		elog(ERROR, "advance_us must not be NULL");
+	stall_advance_us = PG_GETARG_INT64(0);
+	stall_other = !PG_ARGISNULL(1);
+	stall_queryid = stall_other ? PG_GETARG_INT64(1) : 0;
+	((set_hook_fn) main_sym("pssc_store_set_record_test_hook")) (stall_hook, NULL);
 	PG_RETURN_VOID();
 }

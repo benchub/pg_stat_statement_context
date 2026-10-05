@@ -451,17 +451,20 @@ sizing rule.
   shared header along with an epoch. Every backend computes
   `bucket_id = floor((now - epoch) / interval)` as an `int64`, so all backends
   agree and stored IDs always map back to the right timestamps.
-- The header holds `current_bucket`, which only changes under the exclusive
-  lock. A writer whose computed ID is newer than `current_bucket` releases its
-  shared lock, takes the exclusive lock, **re-checks** the header, and advances
-  `current_bucket` if it is still behind. Advancing is a header update only:
-  no entry is touched, because each entry's ring rolls over lazily (below).
-  This happens once per interval cluster-wide, not once per combination.
-- The ID actually written is chosen while the lock is held. An ID older than
-  `current_bucket` (the backend stalled across a rollover, or the clock moved
-  backwards) or newer than it (another backend has not yet advanced the
-  header) is clamped to `current_bucket`. Because the header is stable while
-  any lock is held, no write can land in an expired bucket.
+- `current_bucket` in the header is a shared, **monotonic watermark**: the
+  newest bucket any writer or reader has observed. It is stored as an `int64`
+  in a `pg_atomic_uint64` and raised lock-free with a compare-and-swap max loop,
+  so it never decreases (decided 2026-10-05, item -14). Advancing it touches no
+  entries, because each entry's ring rolls over lazily (below). The epoch is the
+  shared-memory init time rounded down to a multiple of `bucket_interval` since
+  2000-01-01, so bucket boundaries fall on wall-clock multiples.
+- Writers, once they hold the table lock (shared fast path or exclusive
+  insert), re-read the clock and raise `current_bucket` to
+  `max(current_bucket, clock bucket, computed id)`. The call is written to
+  `current_bucket` as read under the entry spinlock. Older ids (a stalled
+  backend, a backward clock step) and newer ones are thus clamped, and every
+  write lands in a slot that is live at that moment. Calls are attributed to
+  the bucket current when the lock is acquired.
 - **Per-entry ring rollover:** under the entry spinlock, the writer picks
   `slot = bucket_id mod bucket_count`. If that slot holds an older
   `bucket_id`, the slot is zeroed and relabeled before the counters are added.
@@ -471,10 +474,12 @@ sizing rule.
   writes clamp to it. A forward jump larger than the ring makes every slot
   stale at once. Bucket arithmetic is signed, so the cutoff can't underflow.
 - Rollover happens lazily on the write path, so no background worker is needed.
-  Readers do not depend on writers, because the SRF compares each slot's
-  `bucket_id` to the clock-derived current bucket and hides slots outside the
-  live window `[current - bucket_count + 1, current]`, even if nothing has
-  written to that entry or advanced the header.
+  Readers do not depend on writers: the SRF first raises `current_bucket` to
+  the clock bucket, then hides slots outside the live window
+  `[current - bucket_count + 1, current]`, using the watermark read after
+  copying each entry. Once a slot has been seen as expired it stays expired,
+  even if the clock later steps back. Reclamation (§5.3) uses the same
+  watermark.
 - Semantics: an execution is attributed to the bucket in which its
   `ExecutorEnd` (or utility completion) runs. Its whole accumulated time goes
   there, even for a long-lived cursor that started much earlier. Buckets

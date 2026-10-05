@@ -73,3 +73,94 @@ pssc_usage_decay(double *usage)
 {
 	*usage *= PSSC_USAGE_DECREASE_FACTOR;
 }
+
+int64
+pssc_bucket_floor_div(int64 a, int64 b)
+{
+	int64		q = a / b;		/* truncates toward zero; b > 0 */
+
+	Assert(b > 0);
+	if (a % b != 0 && a < 0)
+		q--;
+	return q;
+}
+
+int64
+pssc_bucket_for_time(int64 now_us, int64 epoch_us, int64 interval_us)
+{
+	int64		diff;
+
+	/* now - epoch, saturating instead of overflowing */
+	if (epoch_us > 0 && now_us < INT64_MIN + epoch_us)
+		diff = INT64_MIN;
+	else if (epoch_us < 0 && now_us > INT64_MAX + epoch_us)
+		diff = INT64_MAX;
+	else
+		diff = now_us - epoch_us;
+	return pssc_bucket_floor_div(diff, interval_us);
+}
+
+int
+pssc_bucket_slot_index(int64 bucket_id, int bucket_count)
+{
+	int64		i = bucket_id % bucket_count;
+
+	Assert(bucket_count >= 1);
+	return (int) (i < 0 ? i + bucket_count : i);
+}
+
+bool
+pssc_bucket_is_live(int64 bucket_id, int64 current, int bucket_count)
+{
+	if (bucket_id == PSSC_BUCKET_NONE || bucket_id > current)
+		return false;
+	/* current - bucket_id >= 0 and exact in uint64 */
+	return (uint64) current - (uint64) bucket_id < (uint64) bucket_count;
+}
+
+bool
+pssc_bucket_entry_is_dead(int64 last_bucket, int64 current, int bucket_count)
+{
+	return !pssc_bucket_is_live(last_bucket, current, bucket_count);
+}
+
+int64
+pssc_bucket_start(int64 bucket_id, int64 epoch_us, int64 interval_us)
+{
+	return epoch_us + bucket_id * interval_us;
+}
+
+const char *
+pssc_ring_check(const PsscSlot *slots, int bucket_count, int64 last_bucket,
+				int64 current_bucket, int *bad_slot)
+{
+	int64		newest = PSSC_BUCKET_NONE;
+
+	*bad_slot = -1;
+	if (last_bucket != PSSC_BUCKET_NONE && last_bucket > current_bucket)
+		return "last_bucket is newer than current_bucket";
+	for (int i = 0; i < bucket_count; i++)
+	{
+		const PsscSlot *s = &slots[i];
+
+		*bad_slot = i;
+		if (s->bucket_id == PSSC_BUCKET_NONE)
+		{
+			if (s->calls != 0 || s->total_exec_time != 0.0)
+				return "empty slot has counts";
+			continue;
+		}
+		if (s->bucket_id > current_bucket)
+			return "slot holds a bucket newer than current_bucket";
+		if (pssc_bucket_slot_index(s->bucket_id, bucket_count) != i)
+			return "slot holds a bucket that does not map to its index";
+		if (s->calls < 1)
+			return "written slot has no calls";
+		if (s->bucket_id > newest)
+			newest = s->bucket_id;
+	}
+	*bad_slot = -1;
+	if (newest != last_bucket)
+		return "last_bucket is not the newest bucket in the ring";
+	return NULL;
+}

@@ -387,9 +387,162 @@ test_usage(void)
 		  "pgss usage constants");
 }
 
+/* §5.2: floor division, also below zero (clock before the epoch) */
+static void
+test_floor_div(void)
+{
+	struct
+	{
+		int64		a,
+					b,
+					want;
+	}			c[] = {
+		{0, 10, 0}, {9, 10, 0}, {10, 10, 1}, {19, 10, 1},
+		{-1, 10, -1}, {-9, 10, -1}, {-10, 10, -1}, {-11, 10, -2}, {-20, 10, -2},
+		{-21, 10, -3}, {7, 1, 7}, {-7, 1, -7},
+		{INT64_MAX, 1, INT64_MAX}, {INT64_MIN, 1, INT64_MIN},
+		{INT64_MIN, 2, INT64_MIN / 2}, {INT64_MIN + 1, 2, INT64_MIN / 2},
+		{INT64_MAX, INT64_MAX, 1}, {INT64_MIN, INT64_MAX, -2}, {-1, INT64_MAX, -1},
+	};
+
+	for (size_t i = 0; i < sizeof(c) / sizeof(c[0]); i++)
+		CHECK(pssc_bucket_floor_div(c[i].a, c[i].b) == c[i].want,
+			  "floor_div(%lld, %lld) = %lld, want %lld", (long long) c[i].a,
+			  (long long) c[i].b, (long long) pssc_bucket_floor_div(c[i].a, c[i].b),
+			  (long long) c[i].want);
+}
+
+static void
+test_bucket_for_time(void)
+{
+	const int64 s = 1000000;	/* 1 s in us */
+	const int64 epoch = 1000 * s;
+
+	CHECK(pssc_bucket_for_time(epoch, epoch, s) == 0, "at the epoch: bucket 0");
+	CHECK(pssc_bucket_for_time(epoch + s - 1, epoch, s) == 0, "just before 1 s: 0");
+	CHECK(pssc_bucket_for_time(epoch + s, epoch, s) == 1, "at 1 s: 1");
+	CHECK(pssc_bucket_for_time(epoch + 300 * s, epoch, 300 * s) == 1, "300 s interval");
+	CHECK(pssc_bucket_for_time(epoch + 599 * s, epoch, 300 * s) == 1, "599 s / 300 s");
+	CHECK(pssc_bucket_for_time(epoch - 1, epoch, s) == -1, "1 us before the epoch: -1");
+	CHECK(pssc_bucket_for_time(epoch - s, epoch, s) == -1, "1 s before the epoch: -1");
+	CHECK(pssc_bucket_for_time(epoch - s - 1, epoch, s) == -2, "1 s + 1 us before: -2");
+	CHECK(pssc_bucket_for_time(0, epoch, 300 * s) == -4, "1000 s before, 300 s: -4");
+	/* the difference saturates instead of overflowing */
+	CHECK(pssc_bucket_for_time(INT64_MAX, -epoch, s) == INT64_MAX / s,
+		  "saturates high: %lld", (long long) pssc_bucket_for_time(INT64_MAX, -epoch, s));
+	CHECK(pssc_bucket_for_time(INT64_MIN, epoch, s) == pssc_bucket_floor_div(INT64_MIN, s),
+		  "saturates low: %lld", (long long) pssc_bucket_for_time(INT64_MIN, epoch, s));
+}
+
+static void
+test_slot_index(void)
+{
+	CHECK(pssc_bucket_slot_index(0, 12) == 0, "0 mod 12");
+	CHECK(pssc_bucket_slot_index(13, 12) == 1, "13 mod 12");
+	CHECK(pssc_bucket_slot_index(-1, 12) == 11, "-1 mod 12 = 11");
+	CHECK(pssc_bucket_slot_index(-12, 12) == 0, "-12 mod 12 = 0");
+	CHECK(pssc_bucket_slot_index(-13, 12) == 11, "-13 mod 12 = 11");
+	CHECK(pssc_bucket_slot_index(12345, 1) == 0, "one-slot ring");
+	CHECK(pssc_bucket_slot_index(INT64_MIN + 1, 10000) ==
+		  (int) (((INT64_MIN + 1) % 10000) + 10000), "INT64_MIN + 1");
+	CHECK(pssc_bucket_slot_index(INT64_MAX, 10000) == (int) (INT64_MAX % 10000), "INT64_MAX");
+	for (int64 b = -50; b < 50; b++)
+		CHECK(pssc_bucket_slot_index(b, 7) == pssc_bucket_slot_index(b + 7, 7) &&
+			  pssc_bucket_slot_index(b, 7) >= 0 && pssc_bucket_slot_index(b, 7) < 7,
+			  "slot index of %lld is periodic and in range", (long long) b);
+}
+
+static void
+test_live(void)
+{
+	/* window [current - count + 1, current] */
+	CHECK(pssc_bucket_is_live(100, 100, 12), "current is live");
+	CHECK(pssc_bucket_is_live(89, 100, 12), "current - 11 is live (12 buckets)");
+	CHECK(!pssc_bucket_is_live(88, 100, 12), "current - 12 has expired");
+	CHECK(!pssc_bucket_is_live(101, 100, 12), "a newer id is not live");
+	CHECK(!pssc_bucket_is_live(PSSC_BUCKET_NONE, 100, 12), "an empty slot is not live");
+	CHECK(pssc_bucket_is_live(5, 5, 1) && !pssc_bucket_is_live(4, 5, 1), "one bucket");
+	CHECK(pssc_bucket_is_live(-3, -1, 3) && !pssc_bucket_is_live(-4, -1, 3),
+		  "negative ids");
+	/* no overflow forming the window near the int64 limits */
+	CHECK(pssc_bucket_is_live(INT64_MIN + 1, INT64_MIN + 1, 10000), "near INT64_MIN");
+	CHECK(!pssc_bucket_is_live(INT64_MIN + 1, INT64_MAX, 10000), "far apart");
+	CHECK(pssc_bucket_is_live(INT64_MAX, INT64_MAX, 10000) &&
+		  pssc_bucket_is_live(INT64_MAX - 9999, INT64_MAX, 10000) &&
+		  !pssc_bucket_is_live(INT64_MAX - 10000, INT64_MAX, 10000), "near INT64_MAX");
+	CHECK(!pssc_bucket_is_live(PSSC_BUCKET_NONE, INT64_MIN + 1, 10000),
+		  "empty is never live, even next to INT64_MIN");
+
+	CHECK(!pssc_bucket_entry_is_dead(100, 100, 12), "written now: alive");
+	CHECK(!pssc_bucket_entry_is_dead(89, 100, 12), "oldest live: alive");
+	CHECK(pssc_bucket_entry_is_dead(88, 100, 12), "every slot expired: dead");
+	CHECK(pssc_bucket_entry_is_dead(PSSC_BUCKET_NONE, 100, 12), "never written: dead");
+}
+
+static void
+test_bucket_start(void)
+{
+	const int64 s = 1000000;
+
+	CHECK(pssc_bucket_start(0, 7 * s, 300 * s) == 7 * s, "bucket 0 starts at the epoch");
+	CHECK(pssc_bucket_start(3, 7 * s, 300 * s) == 907 * s, "bucket 3");
+	CHECK(pssc_bucket_start(-1, 7 * s, 300 * s) == -293 * s, "bucket -1");
+	for (int64 b = -20; b < 20; b++)
+		CHECK(pssc_bucket_for_time(pssc_bucket_start(b, 7 * s, 300 * s), 7 * s, 300 * s) == b &&
+			  pssc_bucket_for_time(pssc_bucket_start(b, 7 * s, 300 * s) - 1, 7 * s, 300 * s) == b - 1,
+			  "bucket_start(%lld) round-trips", (long long) b);
+}
+
+static void
+test_ring_check(void)
+{
+	PsscSlot	r[4];
+	int			bad;
+	const char *e;
+
+	for (int i = 0; i < 4; i++)
+		pssc_slot_init(&r[i]);
+	CHECK(pssc_ring_check(r, 4, PSSC_BUCKET_NONE, 0, &bad) == NULL && bad == -1,
+		  "an empty ring is fine");
+	r[1] = mk(9, 1, 0.5);		/* 9 mod 4 = 1 */
+	r[2] = mk(-2, 3, 0.0);		/* -2 mod 4 = 2 */
+	CHECK(pssc_ring_check(r, 4, 9, 9, &bad) == NULL, "a valid ring");
+	CHECK(pssc_ring_check(r, 4, 9, 12, &bad) == NULL, "current ahead of last_bucket");
+	e = pssc_ring_check(r, 4, 9, 8, &bad);
+	CHECK(e != NULL && bad == -1, "last_bucket newer than current: %s", e ? e : "-");
+	e = pssc_ring_check(r, 4, 8, 9, &bad);
+	CHECK(e != NULL && bad == -1, "last_bucket not the newest: %s", e ? e : "-");
+	e = pssc_ring_check(r, 4, PSSC_BUCKET_NONE, 9, &bad);
+	CHECK(e != NULL, "last_bucket NONE with written slots: %s", e ? e : "-");
+
+	r[3] = mk(5, 1, 0.0);		/* 5 mod 4 = 1, not 3 */
+	e = pssc_ring_check(r, 4, 9, 9, &bad);
+	CHECK(e != NULL && bad == 3, "incongruent slot: %s (%d)", e ? e : "-", bad);
+	r[3] = mk(11, 1, 0.0);		/* 11 mod 4 = 3, newer than current 9 */
+	e = pssc_ring_check(r, 4, 9, 9, &bad);
+	CHECK(e != NULL && bad == 3, "slot newer than current: %s (%d)", e ? e : "-", bad);
+	r[3] = mk(7, 0, 0.0);
+	e = pssc_ring_check(r, 4, 9, 9, &bad);
+	CHECK(e != NULL && bad == 3, "written slot without calls: %s (%d)", e ? e : "-", bad);
+	r[3] = mk(PSSC_BUCKET_NONE, 1, 0.0);
+	e = pssc_ring_check(r, 4, 9, 9, &bad);
+	CHECK(e != NULL && bad == 3, "empty slot with calls: %s (%d)", e ? e : "-", bad);
+	r[3] = mk(PSSC_BUCKET_NONE, 0, 0.25);
+	e = pssc_ring_check(r, 4, 9, 9, &bad);
+	CHECK(e != NULL && bad == 3, "empty slot with time: %s (%d)", e ? e : "-", bad);
+	r[3] = mk(7, 2, 1.0);
+	CHECK(pssc_ring_check(r, 4, 9, 9, &bad) == NULL, "valid again");
+}
+
 int
 main(void)
 {
+	test_ring_check();
+	test_floor_div();
+	test_bucket_for_time();
+	test_slot_index();
+	test_live();
+	test_bucket_start();
 	test_layout();
 	test_init();
 	test_relabel();

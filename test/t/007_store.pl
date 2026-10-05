@@ -151,7 +151,7 @@ sub pgbench
 		'minimum settings: shmem_bytes equals the formula');
 	is($c->{keysize}, 152, 'minimum settings: keysize');
 	# "a\0" + 125 x "v" + "\0" = 128 bytes
-	is(rec(q{1, ARRAY['a', repeat('v', 125)]}), 'inserted', 'a 128-byte tag set fits');
+	is(rec(q{1, ARRAY['a', repeat('v', 125)], 0}), 'inserted', 'a 128-byte tag set fits');
 	is(rec(q{1, ARRAY['a', repeat('v', 126)]}), 'rejected', 'a 129-byte tag set is rejected');
 	is(rec(q{1, ARRAY['a', repeat('v', 125)], 1}), 'updated', 'bucket 1, one-slot ring');
 	is(slots(), "1:a,@{['v' x 125]}:0:1:1:1", 'one slot: bucket 1 relabeled the slot of bucket 0');
@@ -205,9 +205,9 @@ configure(max_entries => undef);
 	is(rec(q{1, ARRAY['a', '1'], 15, 8}), 'updated', 'bucket 15 (slot 3)');
 	is(slots(), '1:a,1:3:15:1:8 1:a,1:4:4:1:4',
 		'an older slot is zeroed and relabeled before adding; others kept');
-	is(rec(q{1, ARRAY['a', '1'], 10, 1}), 'updated', 'an id older than last_bucket');
+	is(rec(q{1, ARRAY['a', '1'], 10, 1}), 'updated', 'an id older than current_bucket');
 	is(slots(), '1:a,1:3:15:2:9 1:a,1:4:4:1:4',
-		'an id older than last_bucket is raised to last_bucket (until item -14 clamps)');
+		'an id older than current_bucket is clamped to current_bucket (15)');
 
 	my $oid2 = sql(q{SELECT oid FROM pg_database WHERE datname = 'template1'});
 	is(rec(q{1, ARRAY['a', '1'], 3, 1, false}), 'inserted', 'toplevel = false: new entry');

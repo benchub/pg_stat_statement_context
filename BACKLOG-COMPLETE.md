@@ -348,6 +348,40 @@ Support code:
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-14: Time buckets and lazy per-entry ring rollover
+
+**Description:** Implement §5.2. The header stores the epoch, `bucket_interval`, `bucket_count`, and `current_bucket`. Every backend computes `bucket_id = floor((now - epoch) / interval)` as a signed `int64`.
+
+Header advance:
+- `current_bucket` changes only under the exclusive lock.
+- A writer whose computed ID is newer releases the shared lock, takes the exclusive lock, re-checks the header, and advances `current_bucket` if it is still behind. Advancing touches no entries.
+
+Clamping:
+- A write ID older or newer than `current_bucket` is clamped to `current_bucket` while the lock is held.
+- `current_bucket` never decreases when the clock moves backwards.
+- A forward jump larger than the ring makes every slot stale.
+
+Per-entry ring rollover:
+- Under the entry spinlock, the writer uses slot `bucket_id mod bucket_count`. If the slot holds an older `bucket_id`, it is zeroed and relabeled (task 20261005-091225-12) before the counters are added. `last_bucket` is updated.
+
+Readers:
+- Provide a helper that tells readers whether a slot is live, i.e. its `bucket_id` is within `[current - bucket_count + 1, current]` of the clock-derived current bucket, without depending on writers. An entry with no live slot is *dead* (reclaimed by task 20261005-091225-15).
+
+Testing:
+- Provide a debug-only clock offset so that clock steps can be tested (§9).
+- Executions are attributed to the bucket in which they complete (§5.2 semantics).
+
+**Acceptance criteria:**
+- With a 1 s interval, an entry's slots roll over and old counts disappear from readers.
+- Readers hide expired slots even when no writes happen.
+- A stalled writer's stale ID is clamped.
+- A backward clock step doesn't regress `current_bucket`, and a forward jump hides everything.
+- A concurrent stress run at bucket boundaries never writes into an expired slot. Assert builds verify the ring invariants (each slot's `bucket_id` ≤ `current_bucket` and ≡ its index mod `bucket_count`).
+
+**Depends on:** 20261005-091225-13
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

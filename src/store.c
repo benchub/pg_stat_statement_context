@@ -12,6 +12,7 @@
 #include "postgres.h"
 
 #include "common/hashfn.h"
+#include "common/int.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "port/atomics.h"
@@ -54,6 +55,28 @@ typedef struct PsscSharedState
 
 	/* changed only under the exclusive lock while the table is empty */
 	bool		force_collisions;
+
+	/* time buckets (§5.2): fixed at startup */
+	TimestampTz epoch;			/* bucket 0 starts here */
+	int64		interval_us;
+
+	/*
+	 * current_bucket: the shared monotonic watermark of the newest bucket
+	 * observed by any writer or reader (an int64 stored in a uint64; see
+	 * watermark_advance()). Lock-free; it never decreases.
+	 */
+	pg_atomic_uint64 current_bucket;
+	pg_atomic_uint64 bucket_advances;
+
+	/*
+	 * Debug clock (tests only, store.h). clock_debug is read without a lock
+	 * on every clock read; only when it is set are clock_mode and
+	 * clock_value read, together, under clock_mutex.
+	 */
+	pg_atomic_uint32 clock_debug;
+	slock_t		clock_mutex;
+	PsscDebugClockMode clock_mode;
+	int64		clock_value;
 
 	/* under the lock (exclusive to change) */
 	int64		entries;
@@ -100,14 +123,8 @@ entry_slots(void *entry)
 	return (PsscSlot *) ((char *) entry + ENTRY_SLOTS_OFFSET(store_keysize));
 }
 
-/* Ring index of a bucket id (also correct for negative ids). */
-static inline int
-slot_index(int64 bucket_id, int bucket_count)
-{
-	int64		i = bucket_id % bucket_count;
-
-	return (int) (i < 0 ? i + bucket_count : i);
-}
+/* Largest debug clock offset either way: about 3000 years. */
+#define PSSC_DEBUG_CLOCK_MAX_OFFSET INT64CONST(100000000000000000)
 
 /* ---------------------------------------------------------------- sizing */
 
@@ -285,6 +302,23 @@ store_shmem_startup(void)
 		state->dealloc = 0;
 		state->evicted_entries = 0;
 		state->stats_reset = GetCurrentTimestamp();
+
+		/*
+		 * The epoch is the start time rounded down to a multiple of the
+		 * interval since the PostgreSQL epoch, so bucket boundaries fall on
+		 * wall-clock multiples of the interval and current_bucket starts at 0.
+		 */
+		state->interval_us = (int64) pssc_bucket_interval * USECS_PER_SEC;
+		state->epoch = pssc_bucket_floor_div(state->stats_reset, state->interval_us)
+			* state->interval_us;
+		pg_atomic_init_u64(&state->current_bucket,
+						   (uint64) pssc_bucket_for_time(state->stats_reset, state->epoch,
+														 state->interval_us));
+		pg_atomic_init_u64(&state->bucket_advances, 0);
+		pg_atomic_init_u32(&state->clock_debug, 0);
+		SpinLockInit(&state->clock_mutex);
+		state->clock_mode = PSSC_CLOCK_REAL;
+		state->clock_value = 0;
 		pg_atomic_init_u64(&state->invalid_tags, 0);
 		pg_atomic_init_u64(&state->dropped_tags, 0);
 		pg_atomic_init_u64(&state->regex_compile_failures, 0);
@@ -318,6 +352,103 @@ pssc_store_init(void)
 	shmem_startup_hook = store_shmem_startup;
 }
 
+/* ----------------------------------------------------------- the clock */
+
+static TimestampTz
+store_now(void)
+{
+	PsscDebugClockMode mode;
+	int64		value;
+
+	if (likely(pg_atomic_read_u32(&store_state->clock_debug) == 0))
+		return GetCurrentTimestamp();
+
+	SpinLockAcquire(&store_state->clock_mutex);
+	mode = store_state->clock_mode;
+	value = store_state->clock_value;
+	SpinLockRelease(&store_state->clock_mutex);
+
+	if (mode == PSSC_CLOCK_PINNED)
+		return (TimestampTz) value;
+	/* |value| <= PSSC_DEBUG_CLOCK_MAX_OFFSET, so this cannot overflow */
+	return GetCurrentTimestamp() + value;
+}
+
+static inline int64
+store_clock_bucket_at(TimestampTz now)
+{
+	return pssc_bucket_for_time(now, store_state->epoch, store_state->interval_us);
+}
+
+/*
+ * current_bucket, the shared monotonic watermark (§5.2). It is advanced
+ * lock-free by a CAS max loop, by writers and readers alike, and never
+ * decreases: a clock step backwards cannot bring expired counts back, and a
+ * stale id can never be written. Every id in any ring is <= it.
+ */
+static inline int64
+watermark_read(void)
+{
+	return (int64) pg_atomic_read_u64(&store_state->current_bucket);
+}
+
+/* Raises current_bucket to at least target; returns the (new) value. */
+static int64
+watermark_advance(int64 target)
+{
+	uint64		old = pg_atomic_read_u64(&store_state->current_bucket);
+
+	while ((int64) old < target)
+	{
+		/* on failure, old is reloaded with the value another backend set */
+		if (pg_atomic_compare_exchange_u64(&store_state->current_bucket,
+										   &old, (uint64) target))
+		{
+			pg_atomic_fetch_add_u64(&store_state->bucket_advances, 1);
+			return target;
+		}
+	}
+	return (int64) old;
+}
+
+/*
+ * Reads the clock and raises current_bucket to max(it, the clock's bucket,
+ * at_least). Readers call this so that liveness never depends on writers;
+ * writers call it after taking the lock, so a stall (or a stale caller id)
+ * cannot make them write an expired bucket. Must not be called with an
+ * entry spinlock held (the debug clock takes its own spinlock).
+ */
+static inline int64
+observe_current_bucket(int64 at_least)
+{
+	return watermark_advance(Max(at_least, store_clock_bucket_at(store_now())));
+}
+
+TimestampTz
+pssc_store_now(void)
+{
+	if (store_state == NULL)
+		return GetCurrentTimestamp();
+	return store_now();
+}
+
+int64
+pssc_store_clock_bucket(void)
+{
+	if (store_state == NULL)
+		return 0;
+	return store_clock_bucket_at(store_now());
+}
+
+TimestampTz
+pssc_store_bucket_start(int64 bucket_id)
+{
+	if (store_state == NULL)
+		elog(ERROR, "pg_stat_statement_context shared store is not set up");
+	return (TimestampTz) pssc_bucket_start(bucket_id, store_state->epoch,
+										   store_state->interval_us);
+}
+
 /* ------------------------------------------------------------- recording */
 
 static void
@@ -334,34 +465,64 @@ entry_init(void *entry)
 		pssc_slot_init(&slots[i]);
 }
 
-/* Adds one call to the entry's ring; caller holds the lock (any mode). */
-static void
-entry_accum(void *entry, int64 bucket_id, double elapsed_ms)
+/*
+ * Adds one call to the entry's ring in bucket current_bucket, read under the
+ * entry spinlock: that bucket is live at the moment of the write, and it is
+ * >= the entry's last_bucket (which an earlier writer read the same way from
+ * the monotonic watermark), so every id in the ring stays <= current_bucket.
+ * The caller holds the lock (any mode) and has already advanced the
+ * watermark (observe_current_bucket()). Returns the id written.
+ */
+static int64
+entry_accum(void *entry, double elapsed_ms)
 {
 	PsscEntryHeader *hdr = entry_header(entry);
-	PsscSlot   *slot;
+	PsscSlot   *slots = entry_slots(entry);
+	int			count = store_state->bucket_count;
+	int64		bucket_id;
 
 	SpinLockAcquire(&hdr->mutex);
+	bucket_id = watermark_read();
+	Assert(hdr->last_bucket == PSSC_BUCKET_NONE || hdr->last_bucket <= bucket_id);
 
-	/*
-	 * Written ids never go backwards within an entry, so a slot never holds
-	 * a newer id than the one written. Item -14 guarantees this by clamping
-	 * to current_bucket; until then, raise a stale caller-supplied id.
-	 */
-	if (bucket_id < hdr->last_bucket)
-		bucket_id = hdr->last_bucket;
+	/* lazy per-entry rollover: relabel the slot if it holds an older bucket */
+	{
+		PsscSlot   *slot = &slots[pssc_bucket_slot_index(bucket_id, count)];
 
-	slot = &entry_slots(entry)[slot_index(bucket_id, store_state->bucket_count)];
-	pssc_slot_roll(slot, bucket_id);
-	pssc_slot_accum(slot, elapsed_ms);
+		pssc_slot_roll(slot, bucket_id);
+		pssc_slot_accum(slot, elapsed_ms);
+	}
 	hdr->last_bucket = bucket_id;
 	pssc_usage_exec(&hdr->usage);
 
+#ifdef USE_ASSERT_CHECKING
+	{
+		int			bad;
+
+		Assert(pssc_ring_check(slots, count, hdr->last_bucket,
+							   bucket_id, &bad) == NULL);
+	}
+#endif
+
 	SpinLockRelease(&hdr->mutex);
+	return bucket_id;
 }
 
 PsscStoreResult
-pssc_store_record(const PsscKey *key, int64 bucket_id, double elapsed_ms)
+pssc_store_record(const PsscKey *key, double elapsed_ms)
+{
+	if (store_state == NULL || store_htab == NULL)
+		return PSSC_STORE_UNAVAILABLE;
+
+	/*
+	 * The bucket in which the execution completes. record_at() re-reads the
+	 * clock once it holds the lock, so a stall moves the call forward.
+	 */
+	return pssc_store_record_at(key, pssc_store_clock_bucket(), elapsed_ms);
+}
+
+PsscStoreResult
+pssc_store_record_at(const PsscKey *key, int64 bucket_id, double elapsed_ms)
 {
 	PsscStoreResult result;
 	uint32		normal;
@@ -379,13 +540,22 @@ pssc_store_record(const PsscKey *key, int64 bucket_id, double elapsed_ms)
 	if (unlikely(record_test_hook != NULL))
 		record_test_hook(record_test_hook_arg);
 
-	/* Fast path: an existing entry, under the shared lock. */
+	/*
+	 * §5.2: once the lock is held (a wait for it is a stall too), re-read
+	 * the clock and raise current_bucket to max(it, clock bucket, the
+	 * computed id). entry_accum() writes into current_bucket as read under
+	 * the entry spinlock, so an older computed id (stalled writer, clock
+	 * stepped back) is clamped up and the write always lands in a live slot.
+	 */
 	LWLockAcquire(store_state->lock, LW_SHARED);
+	(void) observe_current_bucket(bucket_id);
+
+	/* Fast path: an existing entry, under the shared lock. */
 	hash = key_hash_effective(normal);
 	entry = hash_search_with_hash_value(store_htab, key, hash, HASH_FIND, NULL);
 	if (entry != NULL)
 	{
-		entry_accum(entry, bucket_id, elapsed_ms);
+		(void) entry_accum(entry, elapsed_ms);
 		LWLockRelease(store_state->lock);
 		return PSSC_STORE_UPDATED;
 	}
@@ -396,6 +566,7 @@ pssc_store_record(const PsscKey *key, int64 bucket_id, double elapsed_ms)
 	 * look again (another backend may have inserted the key meanwhile).
 	 */
 	LWLockAcquire(store_state->lock, LW_EXCLUSIVE);
+	(void) observe_current_bucket(bucket_id);	/* the clock moved while waiting */
 	hash = key_hash_effective(normal);	/* the mode may have changed */
 	if (store_state->entries < store_state->max_entries)
 	{
@@ -421,7 +592,7 @@ pssc_store_record(const PsscKey *key, int64 bucket_id, double elapsed_ms)
 		result = PSSC_STORE_FULL;
 	}
 	else
-		entry_accum(entry, bucket_id, elapsed_ms);
+		(void) entry_accum(entry, elapsed_ms);
 
 	Assert(store_state->entries == hash_get_num_entries(store_htab));
 	Assert(store_state->entries <= store_state->max_entries);
@@ -447,6 +618,9 @@ pssc_store_foreach(PsscStoreVisitor fn, void *arg)
 	copy = palloc(entrysize);
 
 	LWLockAcquire(store_state->lock, LW_SHARED);
+
+	/* readers advance the watermark to the clock: no dependence on writers */
+	(void) observe_current_bucket(PSSC_BUCKET_NONE);
 	hash_seq_init(&seq, store_htab);
 	while ((entry = hash_seq_search(&seq)) != NULL)
 	{
@@ -458,6 +632,12 @@ pssc_store_foreach(PsscStoreVisitor fn, void *arg)
 		SpinLockAcquire(&hdr->mutex);
 		memcpy(copy + keysize, (char *) entry + keysize, entrysize - keysize);
 		SpinLockRelease(&hdr->mutex);
+
+		/*
+		 * Read after the copy: the copied ids were written from the
+		 * watermark under the spinlock, so they are all <= this value.
+		 */
+		view.current_bucket = watermark_read();
 
 		chdr = entry_header(copy);
 		view.key = (const PsscKey *) copy;
@@ -495,6 +675,8 @@ pssc_store_reset(void)
 	pg_atomic_write_u64(&store_state->heuristic_scans, 0);
 	pg_atomic_write_u64(&store_state->utility_missing_queryid, 0);
 	pg_atomic_write_u64(&store_state->dropped_records, 0);
+	/* current_bucket never decreases, and the epoch is fixed: both kept */
+	pg_atomic_write_u64(&store_state->bucket_advances, 0);
 	store_state->stats_reset = GetCurrentTimestamp();
 	Assert(hash_get_num_entries(store_htab) == 0);
 	LWLockRelease(store_state->lock);
@@ -580,4 +762,167 @@ pssc_store_set_record_test_hook(PsscStoreRecordTestHook hook, void *arg)
 {
 	record_test_hook = hook;
 	record_test_hook_arg = arg;
+}
+
+
+/* ------------------------------------------------------- bucket state */
+
+bool
+pssc_store_get_buckets(PsscStoreBuckets *b)
+{
+	memset(b, 0, sizeof(*b));
+	if (store_state == NULL || store_htab == NULL)
+		return false;
+
+	b->epoch = store_state->epoch;
+	b->interval_us = store_state->interval_us;
+	b->bucket_count = store_state->bucket_count;
+
+	SpinLockAcquire(&store_state->clock_mutex);
+	b->clock_mode = store_state->clock_mode;
+	b->clock_value = store_state->clock_value;
+	SpinLockRelease(&store_state->clock_mutex);
+
+	/* a diagnostic snapshot: unlike readers, it does not advance anything */
+	b->now = store_now();
+	b->clock_bucket = store_clock_bucket_at(b->now);
+	b->current_bucket = watermark_read();
+	b->advances = (int64) pg_atomic_read_u64(&store_state->bucket_advances);
+	b->reader_bucket = Max(b->clock_bucket, b->current_bucket);
+	return true;
+}
+
+int64
+pssc_store_check_invariants(void)
+{
+	HASH_SEQ_STATUS seq;
+	void	   *entry;
+	char	   *copy;
+	Size		keysize = store_keysize;
+	Size		entrysize;
+	int64		current = 0;
+	int64		n = 0;
+	int64		entries;
+	int64		hash_entries;
+	const char *problem = NULL;
+	int			bad_slot = -1;
+	PsscKey    *bad_key = NULL;
+	int64		bad_last = 0;
+	PsscSlot	bad_contents = {0};
+
+	if (store_state == NULL || store_htab == NULL)
+		elog(ERROR, "pg_stat_statement_context shared store is not set up");
+	entrysize = store_state->entrysize;
+	copy = palloc(entrysize);
+
+	LWLockAcquire(store_state->lock, LW_SHARED);
+	(void) observe_current_bucket(PSSC_BUCKET_NONE);
+	entries = store_state->entries;
+	hash_entries = (int64) hash_get_num_entries(store_htab);
+	hash_seq_init(&seq, store_htab);
+	while ((entry = hash_seq_search(&seq)) != NULL)
+	{
+		PsscEntryHeader *hdr = entry_header(entry);
+
+		memcpy(copy, entry, keysize);
+		SpinLockAcquire(&hdr->mutex);
+		memcpy(copy + keysize, (char *) entry + keysize, entrysize - keysize);
+		SpinLockRelease(&hdr->mutex);
+		current = watermark_read();	/* after the copy, as readers do */
+
+		n++;
+		problem = pssc_ring_check(entry_slots(copy), store_state->bucket_count,
+								  entry_header(copy)->last_bucket, current,
+								  &bad_slot);
+		if (problem != NULL)
+		{
+			bad_key = (PsscKey *) copy;
+			bad_last = entry_header(copy)->last_bucket;
+			if (bad_slot >= 0)
+				bad_contents = entry_slots(copy)[bad_slot];
+			hash_seq_term(&seq);
+			break;
+		}
+	}
+	LWLockRelease(store_state->lock);
+
+	if (problem != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pg_stat_statement_context ring invariant violated: %s", problem),
+				 errdetail("queryid " INT64_FORMAT ", last_bucket " INT64_FORMAT
+						   ", current_bucket " INT64_FORMAT ", slot %d (bucket "
+						   INT64_FORMAT ", calls " INT64_FORMAT ").",
+						   bad_key->queryid, bad_last, current, bad_slot,
+						   bad_contents.bucket_id, bad_contents.calls)));
+	if (entries != hash_entries || n != entries)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pg_stat_statement_context entry count mismatch"),
+				 errdetail("header " INT64_FORMAT ", hash table " INT64_FORMAT
+						   ", scanned " INT64_FORMAT ".", entries, hash_entries, n)));
+	pfree(copy);
+	return n;
+}
+
+/* ------------------------------------------------------- debug clock */
+
+static void
+check_clock_value(PsscDebugClockMode mode, int64 value)
+{
+	if (mode == PSSC_CLOCK_PINNED ? !IS_VALID_TIMESTAMP(value)
+		: (value > PSSC_DEBUG_CLOCK_MAX_OFFSET || value < -PSSC_DEBUG_CLOCK_MAX_OFFSET))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("pg_stat_statement_context debug clock value out of range")));
+}
+
+static inline void
+clock_set_locked(PsscDebugClockMode mode, int64 value)
+{
+	store_state->clock_mode = mode;
+	store_state->clock_value = value;
+	pg_atomic_write_u32(&store_state->clock_debug,
+						(mode == PSSC_CLOCK_REAL && value == 0) ? 0 : 1);
+}
+
+void
+pssc_store_debug_set_clock(PsscDebugClockMode mode, int64 value)
+{
+	if (store_state == NULL)
+		elog(ERROR, "pg_stat_statement_context shared store is not set up");
+	if (mode != PSSC_CLOCK_REAL && mode != PSSC_CLOCK_PINNED)
+		elog(ERROR, "invalid debug clock mode %d", (int) mode);
+	check_clock_value(mode, value);
+
+	SpinLockAcquire(&store_state->clock_mutex);
+	clock_set_locked(mode, value);
+	SpinLockRelease(&store_state->clock_mutex);
+}
+
+void
+pssc_store_debug_advance_clock(int64 usec)
+{
+	PsscDebugClockMode mode;
+	int64		value;
+	bool		overflow;
+
+	if (store_state == NULL)
+		elog(ERROR, "pg_stat_statement_context shared store is not set up");
+
+	SpinLockAcquire(&store_state->clock_mutex);
+	mode = store_state->clock_mode;
+	overflow = pg_add_s64_overflow(store_state->clock_value, usec, &value);
+	if (!overflow &&
+		(mode == PSSC_CLOCK_PINNED ? IS_VALID_TIMESTAMP(value)
+		 : (value <= PSSC_DEBUG_CLOCK_MAX_OFFSET && value >= -PSSC_DEBUG_CLOCK_MAX_OFFSET)))
+	{
+		clock_set_locked(mode, value);
+		SpinLockRelease(&store_state->clock_mutex);
+		return;
+	}
+	SpinLockRelease(&store_state->clock_mutex);
+	ereport(ERROR,
+			(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+			 errmsg("pg_stat_statement_context debug clock value out of range")));
 }

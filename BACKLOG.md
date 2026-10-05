@@ -53,13 +53,12 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | ready |
-| 20261005-091225-14 | Time buckets and lazy per-entry ring rollover | 20261005-091225-13 | no | ready |
-| 20261005-091225-15 | Eviction under pressure (dead entries first, then pgss-style) | 20261005-091225-14 | no | blocked-on-deps |
+| 20261005-091225-15 | Eviction under pressure (dead entries first, then pgss-style) | 20261005-091225-14 | no | ready |
 | 20261005-091225-16 | Execution frames and active-frame tracking | 20261005-091225-9 | no | ready |
 | 20261005-091225-17 | Executor hooks and recording | 20261005-091225-12, 20261005-091225-14, 20261005-091225-16 | no | blocked-on-deps |
 | 20261005-091225-18 | `ProcessUtility` hook | 20261005-091225-17 | no | blocked-on-deps |
 | 20261005-091225-19 | `shared_preload_libraries` load-order detection and policy | 20261005-091225-18 | no | blocked-on-deps |
-| 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | no | blocked-on-deps |
+| 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | no | ready |
 | 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
@@ -228,40 +227,6 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-14: Time buckets and lazy per-entry ring rollover
-
-**Description:** Implement §5.2. The header stores the epoch, `bucket_interval`, `bucket_count`, and `current_bucket`. Every backend computes `bucket_id = floor((now - epoch) / interval)` as a signed `int64`.
-
-Header advance:
-- `current_bucket` changes only under the exclusive lock.
-- A writer whose computed ID is newer releases the shared lock, takes the exclusive lock, re-checks the header, and advances `current_bucket` if it is still behind. Advancing touches no entries.
-
-Clamping:
-- A write ID older or newer than `current_bucket` is clamped to `current_bucket` while the lock is held.
-- `current_bucket` never decreases when the clock moves backwards.
-- A forward jump larger than the ring makes every slot stale.
-
-Per-entry ring rollover:
-- Under the entry spinlock, the writer uses slot `bucket_id mod bucket_count`. If the slot holds an older `bucket_id`, it is zeroed and relabeled (task 20261005-091225-12) before the counters are added. `last_bucket` is updated.
-
-Readers:
-- Provide a helper that tells readers whether a slot is live, i.e. its `bucket_id` is within `[current - bucket_count + 1, current]` of the clock-derived current bucket, without depending on writers. An entry with no live slot is *dead* (reclaimed by task 20261005-091225-15).
-
-Testing:
-- Provide a debug-only clock offset so that clock steps can be tested (§9).
-- Executions are attributed to the bucket in which they complete (§5.2 semantics).
-
-**Acceptance criteria:**
-- With a 1 s interval, an entry's slots roll over and old counts disappear from readers.
-- Readers hide expired slots even when no writes happen.
-- A stalled writer's stale ID is clamped.
-- A backward clock step doesn't regress `current_bucket`, and a forward jump hides everything.
-- A concurrent stress run at bucket boundaries never writes into an expired slot. Assert builds verify the ring invariants (each slot's `bucket_id` ≤ `current_bucket` and ≡ its index mod `bucket_count`).
-
-**Depends on:** 20261005-091225-13
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-15: Eviction under pressure (dead entries first, then pgss-style)
 
 **Description:** Implement §5.3. When an insert finds the table at `max_entries`, under the exclusive lock:
@@ -279,7 +244,7 @@ The insert that triggered eviction must then succeed.
 
 **Depends on:** 20261005-091225-14
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-16: Execution frames and active-frame tracking
 
@@ -441,7 +406,7 @@ SQL script:
 
 **Depends on:** 20261005-091225-12, 20261005-091225-14
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-21: `_info()` and `_reset()` functions
 

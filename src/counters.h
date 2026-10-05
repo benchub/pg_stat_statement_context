@@ -52,6 +52,51 @@ extern void pssc_slot_relabel(PsscSlot *slot, int64 bucket_id);
  */
 extern bool pssc_slot_roll(PsscSlot *slot, int64 bucket_id);
 
+/*
+ * Bucket arithmetic (§5.2). Times and the interval are in microseconds
+ * (TimestampTz units); interval_us must be > 0, bucket_count >= 1.
+ *
+ * pssc_bucket_floor_div: floor(a / b) for b > 0, also for negative a (C's
+ * "/" truncates toward zero, so -1 / 10 would be bucket 0, not -1).
+ *
+ * pssc_bucket_for_time: floor((now - epoch) / interval). now - epoch
+ * saturates instead of overflowing.
+ *
+ * pssc_bucket_slot_index: ring index of a (real) bucket id,
+ * bucket_id mod bucket_count in [0, bucket_count), also for negative ids.
+ *
+ * pssc_bucket_is_live: bucket_id (not PSSC_BUCKET_NONE) is in the live
+ * window [current - bucket_count + 1, current]. Computed without forming
+ * current - bucket_count + 1, so it cannot overflow.
+ *
+ * pssc_bucket_entry_is_dead: an entry whose newest written bucket
+ * (last_bucket) is not live has no live slot at all: it is dead and may be
+ * reclaimed (§5.3). An entry that was never written (PSSC_BUCKET_NONE) is
+ * dead too.
+ *
+ * pssc_bucket_start: epoch + bucket_id * interval (the bucket's start).
+ */
+extern PGDLLEXPORT int64 pssc_bucket_floor_div(int64 a, int64 b);
+extern PGDLLEXPORT int64 pssc_bucket_for_time(int64 now_us, int64 epoch_us, int64 interval_us);
+extern PGDLLEXPORT int pssc_bucket_slot_index(int64 bucket_id, int bucket_count);
+extern PGDLLEXPORT bool pssc_bucket_is_live(int64 bucket_id, int64 current, int bucket_count);
+extern PGDLLEXPORT bool pssc_bucket_entry_is_dead(int64 last_bucket, int64 current, int bucket_count);
+extern PGDLLEXPORT int64 pssc_bucket_start(int64 bucket_id, int64 epoch_us, int64 interval_us);
+
+/*
+ * Ring invariants of one entry (§5.2), given its ring, its last_bucket and
+ * the header's current_bucket: every slot is empty (PSSC_BUCKET_NONE with
+ * zero counters) or holds an id <= current_bucket that is congruent to its
+ * index mod bucket_count and has calls >= 1; last_bucket is <=
+ * current_bucket and is the newest id in the ring (PSSC_BUCKET_NONE only
+ * while every slot is empty). Returns NULL if they hold; otherwise a static
+ * description of the first violation, with *bad_slot set to the slot index
+ * (-1 if the violation is not about one slot). Pure: safe under a spinlock.
+ */
+extern PGDLLEXPORT const char *pssc_ring_check(const PsscSlot *slots, int bucket_count,
+											   int64 last_bucket, int64 current_bucket,
+											   int *bad_slot);
+
 /* Add one call that took elapsed_ms milliseconds. */
 extern void pssc_slot_accum(PsscSlot *slot, double elapsed_ms);
 
