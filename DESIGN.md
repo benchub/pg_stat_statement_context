@@ -289,7 +289,7 @@ pg_stat_statement_context.extractors = 'sqlcommenter(position=append, rename=rou
 pg_stat_statement_context.tags       = 'endpoint,action,job'
 
 # Custom house format: /* svc=billing op=charge */
-pg_stat_statement_context.extractors = 'regex(pattern=''svc=(\w+)\s+op=(\w+)'', keys=service|operation)'
+pg_stat_statement_context.extractors = 'regex(pattern=''svc=(\\w+)\\s+op=(\\w+)'', keys=service|operation)'
 pg_stat_statement_context.tags       = 'service,operation'
 ```
 
@@ -302,6 +302,22 @@ allocated with `malloc` on PG14/15, where guc.c frees it with `free()`, and with
 helper hides this difference. The `assign_hook` only stores the pointer and
 bumps a config generation number. GUC assign hooks must not fail, because they
 also run during transaction rollback.
+
+The `check_hook` rejects the following (decided 2026-10-05, item -8):
+
+- unknown extractors or parameters, and duplicate parameters
+- more than 16 extractors
+- keys that are empty or longer than 63 bytes
+- empty separators, or separators longer than 8 bytes
+- a `kv_sep` that contains `pair_sep`, because pairs are split on `pair_sep` first, so such a `kv_sep` could never match
+
+Separators that start with whitespace are allowed (for example `kv_sep=' :'`).
+For `regex`, the number of `keys` must equal the number of capture groups.
+The generation number is bumped only when the parsed blob changes.
+
+Note: values in `postgresql.conf` undergo backslash-escape processing, so a
+regex there must double its backslashes (`\\w`). `ALTER SYSTEM` writes the
+escaping for you.
 
 Compiled regexes are not part of `extra`, because GUC frees only the top-level
 block. Each backend compiles them lazily on first use after a generation change,

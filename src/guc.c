@@ -12,11 +12,17 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_collation.h"
 #include "mb/pg_wchar.h"
+#include "regex/regex.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 
 #include "compat.h"
 #include "guc.h"
+#include "pairs.h"
+#include "scan.h"
 
 /* Bounds (DESIGN.md §4.1). */
 #define MAX_ENTRIES_MIN			100
@@ -99,13 +105,12 @@ static const PsscTagList empty_tag_list = {0, 0, false};
 static const PsscTagList *cur_tags = &empty_tag_list;
 static const PsscTagList *cur_exclude_tags = &empty_tag_list;
 
-/*
- * extractors: until the DSL parser exists (backlog item 20261005-091225-8),
- * the extra blob is just a NUL-terminated copy of the value, which lets the
- * assign hook detect changes without depending on when guc.c updates the
- * variable.
- */
-static const char *cur_extractors = NULL;
+static const PsscExtractorList empty_extractor_list = {
+	offsetof(PsscExtractorList, extractors), 0
+};
+
+/* NULL until the first assignment, so that one always bumps the generation. */
+static const PsscExtractorList *cur_extractors = NULL;
 
 static uint64 config_generation = 0;
 
@@ -154,6 +159,12 @@ const PsscTagList *
 pssc_guc_exclude_tags(void)
 {
 	return cur_exclude_tags;
+}
+
+const PsscExtractorList *
+pssc_guc_extractors(void)
+{
+	return cur_extractors ? cur_extractors : &empty_extractor_list;
 }
 
 uint64
@@ -402,38 +413,805 @@ assign_exclude_tags(const char *newval, void *extra)
 	install_tag_list(&cur_exclude_tags, extra);
 }
 
+/* ---------------- extractors DSL (§4.2) ---------------- */
+
 /*
- * extractors check_hook. Hook point for backlog item 20261005-091225-8, which
- * replaces this with the DSL parser (§4.2): it will validate the value and
- * return the parsed, pointer-free blob as extra. For now any string is
- * accepted and the blob is a copy of it.
+ *	list		:= [ extractor { ',' extractor } ]
+ *	extractor	:= name [ '(' param { ',' param } ')' ]
+ *	param		:= key '=' value
+ *	value		:= quoted | unquoted
+ *
+ * ASCII whitespace may surround every token. Names, parameter keys and
+ * keyword values (position, Booleans) are case-insensitive. A quoted value is
+ * '...' with '' standing for one quote and is taken verbatim (separators may
+ * be or contain whitespace). An unquoted value runs up to whitespace, ',' or
+ * ')' and must not contain a quote or '('. Empty values are rejected.
+ *
+ * The check_hook parses into palloc'd DslExtractors in a private memory
+ * context, validates them (test-compiling regexes), then serializes them
+ * into one PsscExtractorList blob (guc.h) and deletes the context.
+ */
+
+/* Longest value text quoted in an error detail. */
+#define DSL_SHOW_MAX	64
+
+typedef struct DslStr
+{
+	const char *s;				/* not NUL-terminated */
+	size_t		len;			/* 0: absent */
+} DslStr;
+
+typedef struct DslRename
+{
+	DslStr		from;
+	DslStr		to;
+} DslRename;
+
+typedef enum DslParam
+{
+	DSL_POSITION,
+	DSL_KEYS,
+	DSL_RENAME,
+	DSL_MERGE,
+	DSL_URL_DECODE,
+	DSL_KV_SEP,
+	DSL_PAIR_SEP,
+	DSL_PATTERN,
+	DSL_NPARAMS
+} DslParam;
+
+#define KIND_BIT(k) (1u << (k))
+#define ALL_KINDS	(KIND_BIT(PSSC_EXTRACTOR_SQLCOMMENTER) | \
+					 KIND_BIT(PSSC_EXTRACTOR_MARGINALIA) | \
+					 KIND_BIT(PSSC_EXTRACTOR_REGEX))
+
+static const struct
+{
+	const char *name;
+	uint32		kinds;			/* KIND_BITs of the extractors that take it */
+}			dsl_params[DSL_NPARAMS] = {
+	[DSL_POSITION] = {"position", ALL_KINDS},
+	[DSL_KEYS] = {"keys", ALL_KINDS},
+	[DSL_RENAME] = {"rename", ALL_KINDS},
+	[DSL_MERGE] = {"merge", ALL_KINDS},
+	[DSL_URL_DECODE] = {"url_decode", KIND_BIT(PSSC_EXTRACTOR_SQLCOMMENTER)},
+	[DSL_KV_SEP] = {"kv_sep", KIND_BIT(PSSC_EXTRACTOR_MARGINALIA)},
+	[DSL_PAIR_SEP] = {"pair_sep", KIND_BIT(PSSC_EXTRACTOR_MARGINALIA)},
+	[DSL_PATTERN] = {"pattern", KIND_BIT(PSSC_EXTRACTOR_REGEX)},
+};
+
+static const char *const dsl_kind_names[] = {
+	[PSSC_EXTRACTOR_SQLCOMMENTER] = "sqlcommenter",
+	[PSSC_EXTRACTOR_MARGINALIA] = "marginalia",
+	[PSSC_EXTRACTOR_REGEX] = "regex",
+};
+
+typedef struct DslExtractor
+{
+	PsscExtractorKind kind;
+	const char *name;			/* canonical, for messages */
+	uint32		given;			/* bit per DslParam */
+	PsscPosition position;
+	bool		merge;
+	bool		url_decode;
+	int			nkeys;
+	DslStr	   *keys;
+	int			nrename;
+	DslRename  *rename;
+	DslStr		kv_sep;
+	DslStr		pair_sep;
+	DslStr		pattern;
+} DslExtractor;
+
+/* Value text for an error detail, clipped to DSL_SHOW_MAX bytes. */
+static char *
+dsl_show(const char *s, size_t len)
+{
+	int			clip;
+
+	if (len <= DSL_SHOW_MAX)
+		return pnstrdup(s, len);
+	clip = pg_mbcliplen(s, (int) Min(len, (size_t) DSL_SHOW_MAX + MAX_MULTIBYTE_CHAR_LEN),
+						DSL_SHOW_MAX);
+	return psprintf("%.*s...", clip, s);
+}
+
+/* Length of the character at p (p non-empty, NUL-terminated). */
+static int
+dsl_charlen(const char *p)
+{
+	return (int) Min((size_t) pg_mblen(p), strlen(p));
+}
+
+static bool
+dsl_ident_start(char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+static bool
+dsl_ident_char(char c)
+{
+	return dsl_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+static const char *
+dsl_skip_ws(const char *p)
+{
+	while (IS_ASCII_SPACE(*p))
+		p++;
+	return p;
+}
+
+static bool
+dsl_word_eq(const char *s, size_t len, const char *word)
+{
+	return strlen(word) == len && pg_strncasecmp(s, word, len) == 0;
+}
+
+static DslStr
+dsl_trim(const char *s, size_t len)
+{
+	DslStr		r;
+
+	while (len > 0 && IS_ASCII_SPACE(*s))
+		s++, len--;
+	while (len > 0 && IS_ASCII_SPACE(s[len - 1]))
+		len--;
+	r.s = s;
+	r.len = len;
+	return r;
+}
+
+/*
+ * Validate a (trimmed) tag key named in parameter param: 1..PSSC_MAX_KEY_LEN
+ * bytes, no whitespace.
+ */
+static bool
+dsl_check_key(const DslExtractor *e, const char *param, DslStr k)
+{
+	if (k.len == 0)
+	{
+		GUC_check_errdetail("Parameter \"%s\" of extractor \"%s\" contains an empty key.",
+							param, e->name);
+		return false;
+	}
+	if (k.len > PSSC_MAX_KEY_LEN)
+	{
+		int			shown = pg_mbcliplen(k.s,
+										 (int) Min(k.len, (size_t) PSSC_MAX_KEY_LEN + MAX_MULTIBYTE_CHAR_LEN),
+										 PSSC_MAX_KEY_LEN);
+
+		GUC_check_errdetail("Key \"%.*s...\" in parameter \"%s\" of extractor \"%s\" is longer than %d bytes.",
+							shown, k.s, param, e->name, PSSC_MAX_KEY_LEN);
+		return false;
+	}
+	for (size_t i = 0; i < k.len; i++)
+	{
+		if (IS_ASCII_SPACE(k.s[i]))
+		{
+			GUC_check_errdetail("Key \"%.*s\" in parameter \"%s\" of extractor \"%s\" contains whitespace.",
+								(int) k.len, k.s, param, e->name);
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+ * Split v on '|' into *nitems trimmed items (palloc'd array). Fails if there
+ * are more than PSSC_MAX_TAG_LIST_ENTRIES.
+ */
+static bool
+dsl_split_bar(const DslExtractor *e, const char *param, DslStr v,
+			  DslStr **items, int *nitems)
+{
+	int			n = 1;
+	int			i = 0;
+	size_t		start = 0;
+
+	for (size_t k = 0; k < v.len; k++)
+	{
+		if (v.s[k] == '|' && ++n > PSSC_MAX_TAG_LIST_ENTRIES)
+		{
+			GUC_check_errdetail("Parameter \"%s\" of extractor \"%s\" has more than %d entries.",
+								param, e->name, PSSC_MAX_TAG_LIST_ENTRIES);
+			return false;
+		}
+	}
+	*items = palloc(sizeof(DslStr) * n);
+	for (size_t k = 0; k <= v.len; k++)
+	{
+		if (k == v.len || v.s[k] == '|')
+		{
+			(*items)[i++] = dsl_trim(v.s + start, k - start);
+			start = k + 1;
+		}
+	}
+	Assert(i == n);
+	*nitems = n;
+	return true;
+}
+
+static bool
+dsl_bool(const DslExtractor *e, DslParam param, DslStr v, bool *result)
+{
+	if (!parse_bool_with_len(v.s, v.len, result))
+	{
+		GUC_check_errdetail("Invalid value \"%s\" for parameter \"%s\" of extractor \"%s\": expected a Boolean value.",
+							dsl_show(v.s, v.len), dsl_params[param].name, e->name);
+		return false;
+	}
+	return true;
+}
+
+static bool
+dsl_separator(const DslExtractor *e, DslParam param, DslStr v, DslStr *out)
+{
+	if (v.len > PSSC_MAX_SEP_LEN)
+	{
+		GUC_check_errdetail("Parameter \"%s\" of extractor \"%s\" is longer than %d bytes.",
+							dsl_params[param].name, e->name, PSSC_MAX_SEP_LEN);
+		return false;
+	}
+	*out = v;
+	return true;
+}
+
+/* Apply one param = value (value non-empty). */
+static bool
+dsl_apply(DslExtractor *e, DslParam param, DslStr v)
+{
+	switch (param)
+	{
+		case DSL_POSITION:
+			if (dsl_word_eq(v.s, v.len, "append"))
+				e->position = PSSC_POS_APPEND;
+			else if (dsl_word_eq(v.s, v.len, "prepend"))
+				e->position = PSSC_POS_PREPEND;
+			else if (dsl_word_eq(v.s, v.len, "any"))
+				e->position = PSSC_POS_ANY;
+			else
+			{
+				GUC_check_errdetail("Invalid value \"%s\" for parameter \"%s\" of extractor \"%s\": expected append, prepend or any.",
+									dsl_show(v.s, v.len), dsl_params[param].name, e->name);
+				return false;
+			}
+			return true;
+		case DSL_MERGE:
+			return dsl_bool(e, param, v, &e->merge);
+		case DSL_URL_DECODE:
+			return dsl_bool(e, param, v, &e->url_decode);
+		case DSL_KEYS:
+			if (!dsl_split_bar(e, "keys", v, &e->keys, &e->nkeys))
+				return false;
+			for (int i = 0; i < e->nkeys; i++)
+				if (!dsl_check_key(e, "keys", e->keys[i]))
+					return false;
+			return true;
+		case DSL_RENAME:
+			{
+				DslStr	   *items;
+
+				if (!dsl_split_bar(e, "rename", v, &items, &e->nrename))
+					return false;
+				e->rename = palloc(sizeof(DslRename) * e->nrename);
+				for (int i = 0; i < e->nrename; i++)
+				{
+					DslStr		it = items[i];
+					const char *colon = memchr(it.s, ':', it.len);
+
+					if (it.len == 0)
+						return dsl_check_key(e, "rename", it);
+					if (colon == NULL ||
+						memchr(colon + 1, ':', it.len - (colon + 1 - it.s)) != NULL)
+					{
+						GUC_check_errdetail("Entry \"%s\" in parameter \"rename\" of extractor \"%s\" is not of the form old:new.",
+											dsl_show(it.s, it.len), e->name);
+						return false;
+					}
+					e->rename[i].from = dsl_trim(it.s, colon - it.s);
+					e->rename[i].to = dsl_trim(colon + 1, it.len - (colon + 1 - it.s));
+					if (!dsl_check_key(e, "rename", e->rename[i].from) ||
+						!dsl_check_key(e, "rename", e->rename[i].to))
+						return false;
+					for (int j = 0; j < i; j++)
+					{
+						if (e->rename[j].from.len == e->rename[i].from.len &&
+							memcmp(e->rename[j].from.s, e->rename[i].from.s,
+								   e->rename[i].from.len) == 0)
+						{
+							GUC_check_errdetail("Key \"%.*s\" is renamed more than once in parameter \"rename\" of extractor \"%s\".",
+												(int) e->rename[i].from.len,
+												e->rename[i].from.s, e->name);
+							return false;
+						}
+					}
+				}
+				return true;
+			}
+		case DSL_KV_SEP:
+			return dsl_separator(e, param, v, &e->kv_sep);
+		case DSL_PAIR_SEP:
+			return dsl_separator(e, param, v, &e->pair_sep);
+		case DSL_PATTERN:
+			e->pattern = v;
+			return true;
+		case DSL_NPARAMS:
+			break;
+	}
+	Assert(false);
+	return false;
+}
+
+/*
+ * Test-compile a regex extractor's pattern with the core engine and check
+ * the v1 limits (§4.2, §6.11). The compiled regex is freed right away;
+ * backends compile their own copies lazily.
+ */
+static bool
+dsl_check_regex(const DslExtractor *e, MemoryContext cxt)
+{
+	regex_t		re;
+	pg_wchar   *wpat;
+	int			wlen;
+	int			rc;
+	long		info;
+	size_t		nsub;
+
+	if (e->pattern.len > PSSC_MAX_REGEX_PATTERN_LEN)
+	{
+		GUC_check_errdetail("Pattern of extractor \"%s\" is longer than %d bytes.",
+							e->name, PSSC_MAX_REGEX_PATTERN_LEN);
+		return false;
+	}
+	if (!pg_verify_mbstr(GetDatabaseEncoding(), e->pattern.s, (int) e->pattern.len, true))
+	{
+		GUC_check_errdetail("Pattern of extractor \"%s\" is not valid in encoding \"%s\".",
+							e->name, GetDatabaseEncodingName());
+		return false;
+	}
+	wpat = palloc(sizeof(pg_wchar) * (e->pattern.len + 1));
+	wlen = pg_mb2wchar_with_len(e->pattern.s, wpat, (int) e->pattern.len);
+
+	rc = pssc_regcomp(cxt, &re, wpat, wlen, REG_ADVANCED, C_COLLATION_OID);
+	if (rc != REG_OKAY)
+	{
+		char		msg[128];
+
+		pg_regerror(rc, &re, msg, sizeof(msg));
+		GUC_check_errdetail("Pattern of extractor \"%s\" is invalid: %s.", e->name, msg);
+		return false;
+	}
+	info = re.re_info;
+	nsub = re.re_nsub;
+	pssc_regfree(&re);
+
+	if (info & REG_UBACKREF)
+	{
+		GUC_check_errdetail("Pattern of extractor \"%s\" uses back-references, which are not allowed.",
+							e->name);
+		return false;
+	}
+	if (nsub > (size_t) pssc_max_tags)
+	{
+		GUC_check_errdetail("Pattern of extractor \"%s\" has %zu capture groups, more than max_tags (%d).",
+							e->name, nsub, pssc_max_tags);
+		return false;
+	}
+	if ((size_t) e->nkeys != nsub)
+	{
+		GUC_check_errdetail("Extractor \"%s\" has %d %s but its pattern has %zu capture %s.",
+							e->name, e->nkeys, e->nkeys == 1 ? "key" : "keys",
+							nsub, nsub == 1 ? "group" : "groups");
+		return false;
+	}
+	return true;
+}
+
+/* Defaults and cross-parameter checks, once all parameters are known. */
+static bool
+dsl_finish(DslExtractor *e, MemoryContext cxt)
+{
+	switch (e->kind)
+	{
+		case PSSC_EXTRACTOR_SQLCOMMENTER:
+			break;
+		case PSSC_EXTRACTOR_MARGINALIA:
+			if (e->kv_sep.len == 0)
+				e->kv_sep = (DslStr) {":", 1};
+			if (e->pair_sep.len == 0)
+				e->pair_sep = (DslStr) {",", 1};
+
+			/*
+			 * pairs.c splits on pair_sep first, and a kv_sep match that
+			 * contains the start of a pair_sep does not count, so a kv_sep
+			 * containing pair_sep can never match (every pair would be
+			 * malformed). This includes kv_sep = pair_sep.
+			 */
+			for (size_t i = 0; i + e->pair_sep.len <= e->kv_sep.len; i++)
+			{
+				if (memcmp(e->kv_sep.s + i, e->pair_sep.s, e->pair_sep.len) == 0)
+				{
+					GUC_check_errdetail("Parameter \"kv_sep\" (\"%.*s\") of extractor \"%s\" contains its pair_sep (\"%.*s\"), so it can never match.",
+										(int) e->kv_sep.len, e->kv_sep.s, e->name,
+										(int) e->pair_sep.len, e->pair_sep.s);
+					return false;
+				}
+			}
+			break;
+		case PSSC_EXTRACTOR_REGEX:
+			if (e->pattern.len == 0)
+			{
+				GUC_check_errdetail("Extractor \"%s\" requires parameter \"pattern\".", e->name);
+				return false;
+			}
+			if (!(e->given & (1u << DSL_KEYS)))
+			{
+				GUC_check_errdetail("Extractor \"%s\" requires parameter \"keys\".", e->name);
+				return false;
+			}
+			return dsl_check_regex(e, cxt);
+	}
+	return true;
+}
+
+/*
+ * Parse one value at *pp (just after '=' and whitespace) into *v. Quoted
+ * values are unescaped into a palloc'd copy. On success *pp is at the next
+ * non-whitespace character, which is ',', ')' or the end.
+ */
+static bool
+dsl_value(const DslExtractor *e, DslParam param, const char **pp, DslStr *v)
+{
+	const char *p = *pp;
+	const char *pname = dsl_params[param].name;
+
+	if (*p == '\'')
+	{
+		char	   *buf = palloc(strlen(p) + 1);
+		size_t		n = 0;
+
+		for (p++;; p++)
+		{
+			if (*p == '\0')
+			{
+				GUC_check_errdetail("Unterminated quoted value for parameter \"%s\" of extractor \"%s\".",
+									pname, e->name);
+				return false;
+			}
+			if (*p == '\'')
+			{
+				if (p[1] != '\'')
+					break;
+				p++;
+			}
+			buf[n++] = *p;
+		}
+		p = dsl_skip_ws(p + 1);
+		if (*p != '\0' && *p != ',' && *p != ')')
+		{
+			GUC_check_errdetail("Unexpected \"%.*s\" after the quoted value of parameter \"%s\" of extractor \"%s\".",
+								dsl_charlen(p), p, pname, e->name);
+			return false;
+		}
+		v->s = buf;
+		v->len = n;
+	}
+	else
+	{
+		const char *start = p;
+
+		for (; *p != '\0' && *p != ',' && *p != ')' && !IS_ASCII_SPACE(*p); p++)
+		{
+			if (*p == '\'' || *p == '(')
+			{
+				if (*p == '\'')
+					GUC_check_errdetail("Value of parameter \"%s\" of extractor \"%s\" contains a quote; quote the whole value.",
+										pname, e->name);
+				else
+					GUC_check_errdetail("Value of parameter \"%s\" of extractor \"%s\" contains \"(\"; quote the whole value.",
+										pname, e->name);
+				return false;
+			}
+		}
+		v->s = start;
+		v->len = p - start;
+		p = dsl_skip_ws(p);
+		if (*p != '\0' && *p != ',' && *p != ')')
+		{
+			GUC_check_errdetail("Unexpected \"%.*s\" after the value of parameter \"%s\" of extractor \"%s\".",
+								dsl_charlen(p), p, pname, e->name);
+			return false;
+		}
+	}
+	if (v->len == 0)
+	{
+		GUC_check_errdetail("Parameter \"%s\" of extractor \"%s\" has an empty value.",
+							pname, e->name);
+		return false;
+	}
+	*pp = p;
+	return true;
+}
+
+/* Parse "( param, ... )" at *pp (at the '('). */
+static bool
+dsl_params_list(DslExtractor *e, const char **pp)
+{
+	const char *p = *pp + 1;
+	const char *after = "(";
+
+	for (;;)
+	{
+		const char *id;
+		size_t		idlen;
+		int			param;
+		DslStr		v;
+
+		p = dsl_skip_ws(p);
+		if (!dsl_ident_start(*p))
+		{
+			GUC_check_errdetail("Expected a parameter name after \"%s\" of extractor \"%s\".",
+								after, e->name);
+			return false;
+		}
+		for (id = p; dsl_ident_char(*p); p++)
+			;
+		idlen = p - id;
+		for (param = 0; param < DSL_NPARAMS; param++)
+			if (dsl_word_eq(id, idlen, dsl_params[param].name))
+				break;
+		if (param == DSL_NPARAMS || !(dsl_params[param].kinds & KIND_BIT(e->kind)))
+		{
+			GUC_check_errdetail("Unknown parameter \"%.*s\" for extractor \"%s\".",
+								(int) idlen, id, e->name);
+			return false;
+		}
+		if (e->given & (1u << param))
+		{
+			GUC_check_errdetail("Parameter \"%s\" of extractor \"%s\" is given more than once.",
+								dsl_params[param].name, e->name);
+			return false;
+		}
+		e->given |= 1u << param;
+
+		p = dsl_skip_ws(p);
+		if (*p != '=')
+		{
+			GUC_check_errdetail("Expected \"=\" after parameter \"%s\" of extractor \"%s\".",
+								dsl_params[param].name, e->name);
+			return false;
+		}
+		p = dsl_skip_ws(p + 1);
+		if (!dsl_value(e, param, &p, &v) || !dsl_apply(e, param, v))
+			return false;
+
+		if (*p == ',')
+		{
+			p++;
+			after = ",";
+			continue;
+		}
+		if (*p == ')')
+			break;
+		GUC_check_errdetail("Missing \")\" after the parameters of extractor \"%s\".", e->name);
+		return false;
+	}
+	*pp = p + 1;
+	return true;
+}
+
+/* Parse and validate the whole value into ext[0 .. *n - 1]. */
+static bool
+dsl_parse(const char *value, DslExtractor *ext, int *n, MemoryContext cxt)
+{
+	const char *p = dsl_skip_ws(value);
+
+	*n = 0;
+	if (*p == '\0')
+		return true;
+	for (;;)
+	{
+		DslExtractor *e;
+		const char *id;
+		size_t		idlen;
+		int			kind;
+
+		if (*p == ',' || *p == '\0')
+		{
+			GUC_check_errdetail("Empty entry in the extractor list.");
+			return false;
+		}
+		if (!dsl_ident_start(*p))
+		{
+			GUC_check_errdetail("Expected an extractor name at \"%s\".", dsl_show(p, strlen(p)));
+			return false;
+		}
+		for (id = p; dsl_ident_char(*p); p++)
+			;
+		idlen = p - id;
+		for (kind = 0; kind < (int) lengthof(dsl_kind_names); kind++)
+			if (dsl_word_eq(id, idlen, dsl_kind_names[kind]))
+				break;
+		if (kind == (int) lengthof(dsl_kind_names))
+		{
+			GUC_check_errdetail("Unknown extractor \"%s\".", dsl_show(id, idlen));
+			return false;
+		}
+		if (*n == PSSC_MAX_EXTRACTORS)
+		{
+			GUC_check_errdetail("The list has more than %d extractors.", PSSC_MAX_EXTRACTORS);
+			return false;
+		}
+
+		e = &ext[(*n)++];
+		memset(e, 0, sizeof(*e));
+		e->kind = (PsscExtractorKind) kind;
+		e->name = dsl_kind_names[kind];
+		e->position = kind == PSSC_EXTRACTOR_REGEX ? PSSC_POS_ANY : PSSC_POS_APPEND;
+		e->url_decode = kind == PSSC_EXTRACTOR_SQLCOMMENTER;
+
+		p = dsl_skip_ws(p);
+		if (*p == '(')
+		{
+			if (!dsl_params_list(e, &p))
+				return false;
+			p = dsl_skip_ws(p);
+		}
+		if (!dsl_finish(e, cxt))
+			return false;
+
+		if (*p == '\0')
+			return true;
+		if (*p != ',')
+		{
+			GUC_check_errdetail("Unexpected \"%.*s\" after extractor \"%s\".",
+								dsl_charlen(p), p, e->name);
+			return false;
+		}
+		p = dsl_skip_ws(p + 1);
+	}
+}
+
+/* Copy s into the blob at *dpos (NUL-terminated); returns its reference. */
+static PsscBlobStr
+blob_put(char *blob, size_t *dpos, DslStr s)
+{
+	PsscBlobStr r = {0, 0};
+
+	if (s.len == 0)
+		return r;
+	r.off = (uint32) *dpos;
+	r.len = (uint32) s.len;
+	memcpy(blob + *dpos, s.s, s.len);
+	*dpos += s.len + 1;			/* the NUL is already there */
+	return r;
+}
+
+/*
+ * Serialize ext[0 .. n - 1] into one zero-filled PsscExtractorList: header,
+ * extractors, then each extractor's key and rename arrays, then all strings
+ * in a fixed order. Returns NULL (detail set) on out-of-memory.
+ */
+static PsscExtractorList *
+dsl_serialize(const DslExtractor *ext, int n)
+{
+	size_t		size = offsetof(PsscExtractorList, extractors) + n * sizeof(PsscExtractor);
+	size_t		apos;
+	size_t		dpos;
+	PsscExtractorList *list;
+
+	/* Bounded: at most 16 extractors with 1024 keys and renames of 63 bytes. */
+	for (int i = 0; i < n; i++)
+		size += ext[i].nkeys * sizeof(PsscBlobStr) + ext[i].nrename * sizeof(PsscBlobRename);
+	dpos = size;
+	for (int i = 0; i < n; i++)
+	{
+		const DslExtractor *e = &ext[i];
+
+		size += (e->kv_sep.len ? e->kv_sep.len + 1 : 0) +
+			(e->pair_sep.len ? e->pair_sep.len + 1 : 0) +
+			(e->pattern.len ? e->pattern.len + 1 : 0);
+		for (int k = 0; k < e->nkeys; k++)
+			size += e->keys[k].len + 1;
+		for (int k = 0; k < e->nrename; k++)
+			size += e->rename[k].from.len + 1 + e->rename[k].to.len + 1;
+	}
+	Assert(size <= MaxAllocSize);
+
+	list = pssc_guc_extra_alloc(size);
+	if (list == NULL)
+	{
+		GUC_check_errcode(ERRCODE_OUT_OF_MEMORY);
+		GUC_check_errdetail("Out of memory.");
+		return NULL;
+	}
+	memset(list, 0, size);
+	list->size = (uint32) size;
+	list->nextractors = (uint32) n;
+	apos = offsetof(PsscExtractorList, extractors) + n * sizeof(PsscExtractor);
+	for (int i = 0; i < n; i++)
+	{
+		const DslExtractor *e = &ext[i];
+		PsscExtractor *out = &list->extractors[i];
+		PsscBlobStr *keys;
+		PsscBlobRename *ren;
+
+		out->kind = (uint8) e->kind;
+		out->position = (uint8) e->position;
+		out->merge = e->merge;
+		out->url_decode = e->url_decode;
+		out->has_keys = (e->given & (1u << DSL_KEYS)) != 0;
+		out->nkeys = (uint32) e->nkeys;
+		out->keys_off = (uint32) apos;
+		apos += e->nkeys * sizeof(PsscBlobStr);
+		out->nrename = (uint32) e->nrename;
+		out->rename_off = (uint32) apos;
+		apos += e->nrename * sizeof(PsscBlobRename);
+
+		out->kv_sep = blob_put((char *) list, &dpos, e->kv_sep);
+		out->pair_sep = blob_put((char *) list, &dpos, e->pair_sep);
+		out->pattern = blob_put((char *) list, &dpos, e->pattern);
+		keys = (PsscBlobStr *) ((char *) list + out->keys_off);
+		for (int k = 0; k < e->nkeys; k++)
+			keys[k] = blob_put((char *) list, &dpos, e->keys[k]);
+		ren = (PsscBlobRename *) ((char *) list + out->rename_off);
+		for (int k = 0; k < e->nrename; k++)
+		{
+			ren[k].from = blob_put((char *) list, &dpos, e->rename[k].from);
+			ren[k].to = blob_put((char *) list, &dpos, e->rename[k].to);
+		}
+	}
+	Assert(dpos == size);
+	return list;
+}
+
+/*
+ * extractors check_hook: parse and validate the DSL (§4.2) and return the
+ * PsscExtractorList blob as extra. On error, sets the GUC error detail and
+ * returns false; the previous config stays in effect.
  */
 static bool
 check_extractors(char **newval, void **extra, GucSource source)
 {
-	const char *v = *newval ? *newval : "";
-	size_t		len = strlen(v);
-	char	   *copy = pssc_guc_extra_alloc(len + 1);
+	MemoryContext cxt;
+	MemoryContext oldcxt;
+	DslExtractor ext[PSSC_MAX_EXTRACTORS];
+	int			n;
+	PsscExtractorList *list = NULL;
+	bool		ok;
 
-	if (copy == NULL)
+	cxt = AllocSetContextCreate(CurrentMemoryContext,
+								"pg_stat_statement_context extractors check",
+								ALLOCSET_SMALL_SIZES);
+	oldcxt = MemoryContextSwitchTo(cxt);
+	ok = dsl_parse(*newval ? *newval : "", ext, &n, cxt);
+	if (ok)
 	{
-		GUC_check_errcode(ERRCODE_OUT_OF_MEMORY);
-		GUC_check_errdetail("Out of memory.");
-		return false;
+		list = dsl_serialize(ext, n);
+		ok = list != NULL;
 	}
-	memcpy(copy, v, len + 1);
-	*extra = copy;
-	return true;
+	MemoryContextSwitchTo(oldcxt);
+
+	/* GUC_check_errdetail's text lives outside cxt (guc.c copies it). */
+	MemoryContextDelete(cxt);
+
+	if (ok)
+		*extra = list;
+	return ok;
 }
 
 static void
 assign_extractors(const char *newval, void *extra)
 {
-	const char *v = extra ? (const char *) extra : "";
+	const PsscExtractorList *list =
+		extra ? (const PsscExtractorList *) extra : &empty_extractor_list;
 
-	if (cur_extractors == NULL || strcmp(cur_extractors, v) != 0)
+	if (cur_extractors == NULL || cur_extractors->size != list->size ||
+		memcmp(cur_extractors, list, list->size) != 0)
 		config_generation++;
-	cur_extractors = v;
+	cur_extractors = list;
 }
 
 /* ---------------- definitions ---------------- */

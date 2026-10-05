@@ -34,3 +34,14 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 -- malloc'd bytes in use in this backend (glibc >= 2.33; NULL elsewhere).
 CREATE FUNCTION pssc_guc_test_malloc_used() RETURNS bigint
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Parsed pg_stat_statement_context.extractors in this backend, one canonical
+-- line per extractor with every default filled in. With relocate, renders a
+-- copy of the blob (checking it holds no pointers into itself) and checks
+-- the original renders the same. Errors out if the blob is inconsistent.
+CREATE FUNCTION pssc_guc_test_extractors(relocate bool DEFAULT true) RETURNS text
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Size in bytes of that blob.
+CREATE FUNCTION pssc_guc_test_extractors_size() RETURNS bigint
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

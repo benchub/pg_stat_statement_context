@@ -6,14 +6,15 @@
  * All GUCs are defined by pssc_guc_define(), which _PG_init calls only while
  * shared_preload_libraries is being processed. Plain variables are owned by
  * guc.c and updated by the GUC machinery. Parsed settings (tags,
- * exclude_tags, and later extractors) are flat, pointer-free blobs built by
+ * exclude_tags and extractors) are flat, pointer-free blobs built by
  * a check_hook and installed by an assign_hook that cannot fail; each
  * effective change bumps the backend-local config generation, so caches
  * derived from the config (e.g. compiled regexes) can tell they are stale.
  *
- * Never keep a PsscTagList pointer across statements: the GUC machinery
- * frees a blob once it is replaced. Fetch it again with pssc_guc_tags() /
- * pssc_guc_exclude_tags() each time it is needed.
+ * Never keep a PsscTagList or PsscExtractorList pointer across statements:
+ * the GUC machinery frees a blob once it is replaced. Fetch it again with
+ * pssc_guc_tags(), pssc_guc_exclude_tags() or pssc_guc_extractors() each
+ * time it is needed.
  */
 #ifndef PSSC_GUC_H
 #define PSSC_GUC_H
@@ -74,7 +75,7 @@ extern PGDLLEXPORT int pssc_max_tagset_bytes;
 
 /* sighup (PGC_SIGHUP) */
 extern PGDLLEXPORT int pssc_scan_window;	/* bytes */
-extern PGDLLEXPORT char *pssc_extractors;	/* raw DSL text; parsed by backlog item -8 */
+extern PGDLLEXPORT char *pssc_extractors;	/* raw DSL text; use pssc_guc_extractors() */
 extern PGDLLEXPORT char *pssc_tags;			/* raw text; use pssc_guc_tags() */
 extern PGDLLEXPORT char *pssc_exclude_tags; /* raw text; use pssc_guc_exclude_tags() */
 extern PGDLLEXPORT int pssc_untagged;		/* PsscUntagged */
@@ -109,6 +110,94 @@ extern PGDLLEXPORT int pssc_tag_list_find(const PsscTagList *list,
 /* Current parsed tags / exclude_tags. Never NULL once the GUCs are defined. */
 extern PGDLLEXPORT const PsscTagList *pssc_guc_tags(void);
 extern PGDLLEXPORT const PsscTagList *pssc_guc_exclude_tags(void);
+
+/*
+ * Parsed pg_stat_statement_context.extractors (DESIGN.md §4.2).
+ *
+ * One flat, pointer-free blob: the header, then the extractors, then the
+ * PsscBlobStr / PsscBlobRename arrays they reference, then the string bytes.
+ * Every reference is a byte offset from the start of the blob, so the blob
+ * can be copied or moved as a whole. Strings are NUL-terminated; a PsscBlobStr
+ * with len 0 is absent (the parser rejects empty values). The blob is built
+ * deterministically (zero-filled first), so equivalent settings give
+ * byte-identical blobs.
+ *
+ * Every field is filled in: omitted parameters get their defaults (position:
+ * append for sqlcommenter and marginalia, any for regex; merge off;
+ * url_decode on for sqlcommenter; kv_sep ":" and pair_sep "," for
+ * marginalia).
+ */
+#define PSSC_MAX_EXTRACTORS			16
+#define PSSC_MAX_REGEX_PATTERN_LEN	1024	/* bytes */
+
+typedef enum PsscExtractorKind
+{
+	PSSC_EXTRACTOR_SQLCOMMENTER,
+	PSSC_EXTRACTOR_MARGINALIA,
+	PSSC_EXTRACTOR_REGEX
+} PsscExtractorKind;
+
+typedef struct PsscBlobStr
+{
+	uint32		off;			/* from the start of the blob */
+	uint32		len;			/* bytes, excluding the NUL */
+} PsscBlobStr;
+
+typedef struct PsscBlobRename
+{
+	PsscBlobStr from;
+	PsscBlobStr to;
+} PsscBlobRename;
+
+typedef struct PsscExtractor
+{
+	uint8		kind;			/* PsscExtractorKind */
+	uint8		position;		/* PsscPosition (scan.h) */
+	bool		merge;
+	bool		url_decode;		/* sqlcommenter only; false otherwise */
+
+	/*
+	 * keys: for sqlcommenter and marginalia, the per-extractor allowlist of
+	 * original key names, active only if has_keys. For regex, always present:
+	 * keys[i] names capture group i + 1 (one key per group).
+	 */
+	bool		has_keys;
+	uint32		nkeys;
+	uint32		keys_off;		/* PsscBlobStr[nkeys] */
+	uint32		nrename;
+	uint32		rename_off;		/* PsscBlobRename[nrename], distinct "from" */
+	PsscBlobStr kv_sep;			/* marginalia only */
+	PsscBlobStr pair_sep;		/* marginalia only */
+	PsscBlobStr pattern;		/* regex only */
+} PsscExtractor;
+
+typedef struct PsscExtractorList
+{
+	uint32		size;			/* total blob size in bytes */
+	uint32		nextractors;
+	PsscExtractor extractors[FLEXIBLE_ARRAY_MEMBER];
+} PsscExtractorList;
+
+static inline const char *
+pssc_blob_str(const PsscExtractorList *list, PsscBlobStr s)
+{
+	return (const char *) list + s.off;
+}
+
+static inline const PsscBlobStr *
+pssc_extractor_keys(const PsscExtractorList *list, const PsscExtractor *e)
+{
+	return (const PsscBlobStr *) ((const char *) list + e->keys_off);
+}
+
+static inline const PsscBlobRename *
+pssc_extractor_renames(const PsscExtractorList *list, const PsscExtractor *e)
+{
+	return (const PsscBlobRename *) ((const char *) list + e->rename_off);
+}
+
+/* Current parsed extractors. Never NULL once the GUCs are defined. */
+extern PGDLLEXPORT const PsscExtractorList *pssc_guc_extractors(void);
 
 /*
  * Backend-local config generation: bumped whenever the effective value of

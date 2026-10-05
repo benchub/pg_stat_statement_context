@@ -123,6 +123,22 @@ ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = 'trace parent';
 ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = '*';
 ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = 'request_id,,x';
 ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = :'very_long_key';
+-- ---- extractors (DESIGN.md §4.2): malformed DSL is rejected with a detail ----
+-- (max_tags is assumed to be at its default of 8.)
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'sqlcomenter';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'marginalia(url_decode=on)';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'sqlcommenter(position=append, position=prepend)';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'sqlcommenter(position=middle)';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'marginalia(kv_sep='','')';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'marginalia(kv_sep=''123456789'')';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a), keys=k)';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=(a), keys=k)';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a)\1'', keys=k)';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a)(b)(c)(d)(e)(f)(g)(h)(i)'', keys=a|b|c|d|e|f|g|h|i)';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a)(b)'', keys=k)';
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a'', keys=k)';
+SELECT 'regex(pattern=''(a)' || repeat('x', 1022) || ''', keys=k)' AS long_pattern \gset
+ALTER SYSTEM SET pg_stat_statement_context.extractors = :'long_pattern';
 
 -- None of the rejected ALTER SYSTEM commands wrote anything.
 SELECT count(*) = :auto_conf_before AS auto_conf_unchanged

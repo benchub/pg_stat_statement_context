@@ -26,6 +26,7 @@
 #include "utils/builtins.h"
 
 #include "guc.h"
+#include "scan.h"
 
 PG_MODULE_MAGIC;
 
@@ -38,6 +39,7 @@ typedef const char *(*key_fn) (const PsscTagList *, int, int *);
 typedef int (*find_fn) (const PsscTagList *, const char *, int);
 typedef uint64 (*generation_fn) (void);
 typedef bool (*blob_size_fn) (size_t, size_t, size_t *);
+typedef const PsscExtractorList *(*extractors_fn) (void);
 
 static void *
 main_sym(const char *name)
@@ -264,4 +266,195 @@ pssc_guc_test_malloc_used(PG_FUNCTION_ARGS)
 #else
 	PG_RETURN_NULL();
 #endif
+}
+
+/* ---------------- parsed extractors ---------------- */
+
+/* Check that s lies inside the blob and is NUL-terminated there. */
+static const char *
+blob_str(const PsscExtractorList *list, PsscBlobStr s, const char *what)
+{
+	if (s.len == 0)
+		elog(ERROR, "%s: empty string in blob", what);
+	if ((uint64) s.off + s.len + 1 > list->size || s.off < offsetof(PsscExtractorList, extractors))
+		elog(ERROR, "%s: string [%u, +%u] outside blob of %u bytes", what, s.off, s.len, list->size);
+	if (pssc_blob_str(list, s)[s.len] != '\0' || strlen(pssc_blob_str(list, s)) != s.len)
+		elog(ERROR, "%s: string not NUL-terminated at its length", what);
+	return pssc_blob_str(list, s);
+}
+
+static void
+check_array(const PsscExtractorList *list, uint32 off, uint32 n, size_t elem, const char *what)
+{
+	if (n > 0 && ((uint64) off + (uint64) n * elem > list->size || off % sizeof(uint32) != 0))
+		elog(ERROR, "%s: array [%u, %u x %zu] outside blob or misaligned", what, off, n, elem);
+}
+
+static void
+append_quoted(StringInfo buf, const char *s)
+{
+	appendStringInfoChar(buf, '\'');
+	for (; *s; s++)
+	{
+		if (*s == '\'')
+			appendStringInfoChar(buf, '\'');
+		appendStringInfoChar(buf, *s);
+	}
+	appendStringInfoChar(buf, '\'');
+}
+
+static const char *
+position_name(int p)
+{
+	switch (p)
+	{
+		case PSSC_POS_ANY:
+			return "any";
+		case PSSC_POS_APPEND:
+			return "append";
+		case PSSC_POS_PREPEND:
+			return "prepend";
+	}
+	elog(ERROR, "bad position %d", p);
+	return NULL;
+}
+
+/*
+ * Canonical text of a parsed extractor list, one extractor per line, with
+ * every field the parser filled in. Validates the blob's internal
+ * consistency (every offset inside the blob, strings NUL-terminated, fields
+ * only set for the kinds that use them) and errors out otherwise.
+ */
+static char *
+render_extractors(const PsscExtractorList *list)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	if (list->size < offsetof(PsscExtractorList, extractors) +
+		(uint64) list->nextractors * sizeof(PsscExtractor))
+		elog(ERROR, "blob of %u bytes too small for %u extractors", list->size, list->nextractors);
+	for (uint32 i = 0; i < list->nextractors; i++)
+	{
+		const PsscExtractor *e = &list->extractors[i];
+		const PsscBlobStr *keys = pssc_extractor_keys(list, e);
+		const PsscBlobRename *ren = pssc_extractor_renames(list, e);
+
+		if (i > 0)
+			appendStringInfoChar(&buf, '\n');
+		switch (e->kind)
+		{
+			case PSSC_EXTRACTOR_SQLCOMMENTER:
+				appendStringInfoString(&buf, "sqlcommenter(");
+				break;
+			case PSSC_EXTRACTOR_MARGINALIA:
+				appendStringInfoString(&buf, "marginalia(");
+				break;
+			case PSSC_EXTRACTOR_REGEX:
+				appendStringInfoString(&buf, "regex(");
+				break;
+			default:
+				elog(ERROR, "extractor %u: bad kind %d", i, e->kind);
+		}
+		appendStringInfo(&buf, "position=%s, merge=%s", position_name(e->position),
+						 e->merge ? "on" : "off");
+		if (e->kind == PSSC_EXTRACTOR_SQLCOMMENTER)
+			appendStringInfo(&buf, ", url_decode=%s", e->url_decode ? "on" : "off");
+		else if (e->url_decode)
+			elog(ERROR, "extractor %u: url_decode set on a non-sqlcommenter extractor", i);
+		if (e->kind == PSSC_EXTRACTOR_MARGINALIA)
+		{
+			appendStringInfoString(&buf, ", kv_sep=");
+			append_quoted(&buf, blob_str(list, e->kv_sep, "kv_sep"));
+			appendStringInfoString(&buf, ", pair_sep=");
+			append_quoted(&buf, blob_str(list, e->pair_sep, "pair_sep"));
+		}
+		else if (e->kv_sep.len != 0 || e->pair_sep.len != 0)
+			elog(ERROR, "extractor %u: separators set on a non-marginalia extractor", i);
+		if (e->kind == PSSC_EXTRACTOR_REGEX)
+		{
+			appendStringInfoString(&buf, ", pattern=");
+			append_quoted(&buf, blob_str(list, e->pattern, "pattern"));
+			if (!e->has_keys || e->nkeys == 0)
+				elog(ERROR, "extractor %u: regex without keys", i);
+		}
+		else if (e->pattern.len != 0)
+			elog(ERROR, "extractor %u: pattern set on a non-regex extractor", i);
+
+		if (!e->has_keys && e->nkeys != 0)
+			elog(ERROR, "extractor %u: keys without has_keys", i);
+		check_array(list, e->keys_off, e->nkeys, sizeof(PsscBlobStr), "keys");
+		check_array(list, e->rename_off, e->nrename, sizeof(PsscBlobRename), "rename");
+		if (e->has_keys)
+		{
+			appendStringInfoString(&buf, ", keys=");
+			for (uint32 k = 0; k < e->nkeys; k++)
+				appendStringInfo(&buf, "%s%s", k ? "|" : "", blob_str(list, keys[k], "key"));
+		}
+		if (e->nrename > 0)
+		{
+			appendStringInfoString(&buf, ", rename=");
+			for (uint32 k = 0; k < e->nrename; k++)
+				appendStringInfo(&buf, "%s%s:%s", k ? "|" : "",
+								 blob_str(list, ren[k].from, "rename from"),
+								 blob_str(list, ren[k].to, "rename to"));
+		}
+		appendStringInfoChar(&buf, ')');
+	}
+	return buf.data;
+}
+
+/*
+ * The parsed extractors of this backend, rendered by render_extractors().
+ * With relocate, the blob is first copied (by its recorded size only) to a
+ * fresh buffer, the copy is rendered, and every aligned pointer-sized word
+ * of the blob is checked not to point into the original: a blob that used
+ * pointers instead of offsets would fail one of these checks.
+ */
+PG_FUNCTION_INFO_V1(pssc_guc_test_extractors);
+Datum
+pssc_guc_test_extractors(PG_FUNCTION_ARGS)
+{
+	extractors_fn fn = (extractors_fn) main_sym("pssc_guc_extractors");
+	const PsscExtractorList *list = fn();
+	bool		relocate = PG_GETARG_BOOL(0);
+
+	if (list == NULL)
+		elog(ERROR, "parsed extractors blob is NULL");
+	if (relocate)
+	{
+		uintptr_t	lo = (uintptr_t) list;
+		uintptr_t	hi = lo + list->size;
+		char	   *copy = palloc0(list->size + sizeof(uintptr_t));
+		char	   *result;
+
+		memcpy(copy, list, list->size);
+		for (uint32 o = 0; o + sizeof(uintptr_t) <= list->size; o += sizeof(uint32))
+		{
+			uintptr_t	w;
+
+			memcpy(&w, copy + o, sizeof(w));
+			if (w >= lo && w < hi)
+				elog(ERROR, "blob word at offset %u points into the blob", o);
+		}
+		result = render_extractors((const PsscExtractorList *) copy);
+		/* The original must render the same. */
+		if (strcmp(result, render_extractors(list)) != 0)
+			elog(ERROR, "relocated blob renders differently");
+		PG_RETURN_TEXT_P(cstring_to_text(result));
+	}
+	PG_RETURN_TEXT_P(cstring_to_text(render_extractors(list)));
+}
+
+/* Size in bytes of this backend's parsed extractors blob. */
+PG_FUNCTION_INFO_V1(pssc_guc_test_extractors_size);
+Datum
+pssc_guc_test_extractors_size(PG_FUNCTION_ARGS)
+{
+	extractors_fn fn = (extractors_fn) main_sym("pssc_guc_extractors");
+	const PsscExtractorList *list = fn();
+
+	if (list == NULL)
+		elog(ERROR, "parsed extractors blob is NULL");
+	PG_RETURN_INT64((int64) list->size);
 }

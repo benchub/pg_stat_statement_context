@@ -52,8 +52,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | no | ready |
-| 20261005-091225-9 | Tag-set canonicalization pipeline and extractor chain | 20261005-091225-5, 20261005-091225-6, 20261005-091225-8 | no | blocked-on-deps |
+| 20261005-091225-9 | Tag-set canonicalization pipeline and extractor chain | 20261005-091225-5, 20261005-091225-6, 20261005-091225-8 | no | ready |
 | 20261005-091225-10 | Regex extractor runtime | 20261005-091225-8, 20261005-091225-9 | no | blocked-on-deps |
 | 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | blocked-on-deps |
 | 20261005-091225-12 | Counters (`calls`, `total_exec_time`): accumulation and bucket merge | 20261005-091225-2 | no | ready |
@@ -209,45 +208,6 @@ dependencies and is not shown.
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-8: Extractor DSL parser and GUC check/assign hooks
-
-**Description:** Implement the `pg_stat_statement_context.extractors` grammar from §4.2 in the `check_hook`.
-
-Accepted parameters:
-- Extractor names: `sqlcommenter`, `marginalia`, `regex`.
-- Common parameters: `position`, `keys` (`|`-separated), `rename` (`old:new|...`), `merge`.
-- Format-specific parameters: `url_decode`; `kv_sep` and `pair_sep`; `pattern` and `keys` for `regex`.
-- Values may be quoted, with `''` escaping, as in the regex example.
-
-Reject the following with `GUC_check_errdetail` and keep the previous config:
-- unknown names or parameters
-- duplicate parameters
-- invalid values
-
-Validate `regex` extractors by test-compiling each pattern with `pg_regcomp`, using `REG_ADVANCED` and `C_COLLATION_OID`, then freeing it with `pg_regfree`. Reject a pattern when any of these is true:
-- it is longer than 1 kB
-- it uses back-references (`re_info & REG_UBACKREF`)
-- it has more than `max_tags` capture groups
-
-Return the parsed form as one flat, pointer-free blob (offsets, not pointers) allocated through the compat helper. The `assign_hook` only stores it and bumps the generation.
-
-*Design note:* the number of regex `keys` should equal the number of capture groups, and a mismatch is an error.
-
-When `position` is omitted, the parser fills in the per-extractor default: `append` for `sqlcommenter` and `marginalia`, `any` for `regex` (§4.2).
-
-**Acceptance criteria:**
-- Every example in §4.2 parses.
-- Omitting `position` yields `append` for `sqlcommenter`/`marginalia` and `any` for `regex` in the parsed blob, including for the default `'sqlcommenter, marginalia'`.
-- Each class of malformed input is rejected with a specific message, and the old config survives a bad `SIGHUP`.
-- The blob contains no pointers and is freed correctly by guc.c on PG14/15 and PG16+, with no leak under Valgrind.
-
-**Decisions:**
-- 2026-10-05: The default `position` when omitted is per extractor: `sqlcommenter` = `append`, `marginalia` = `append`, `regex` = `any`.
-
-**Depends on:** 20261005-091225-7
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-9: Tag-set canonicalization pipeline and extractor chain
 
 **Description:** In `src/extract.c`, turn `(sourceText, stmt range, config blob, database encoding, standard_conforming_strings)` into a canonical tag set (§3.1 item 2, §4.2, §6.11):
@@ -284,7 +244,7 @@ Count invalid tags, dropped tags, and heuristic scans in a backend-local stats s
 
 **Depends on:** 20261005-091225-5, 20261005-091225-6, 20261005-091225-8
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-10: Regex extractor runtime
 

@@ -259,6 +259,48 @@ DETAIL:  The list contains an empty tag key.
 ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = :'very_long_key';
 ERROR:  invalid value for parameter "pg_stat_statement_context.exclude_tags": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 DETAIL:  Tag key "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx..." is longer than 63 bytes.
+-- ---- extractors (DESIGN.md §4.2): malformed DSL is rejected with a detail ----
+-- (max_tags is assumed to be at its default of 8.)
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'sqlcomenter';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "sqlcomenter"
+DETAIL:  Unknown extractor "sqlcomenter".
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'marginalia(url_decode=on)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "marginalia(url_decode=on)"
+DETAIL:  Unknown parameter "url_decode" for extractor "marginalia".
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'sqlcommenter(position=append, position=prepend)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "sqlcommenter(position=append, position=prepend)"
+DETAIL:  Parameter "position" of extractor "sqlcommenter" is given more than once.
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'sqlcommenter(position=middle)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "sqlcommenter(position=middle)"
+DETAIL:  Invalid value "middle" for parameter "position" of extractor "sqlcommenter": expected append, prepend or any.
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'marginalia(kv_sep='','')';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "marginalia(kv_sep=',')"
+DETAIL:  Parameter "kv_sep" (",") of extractor "marginalia" contains its pair_sep (","), so it can never match.
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'marginalia(kv_sep=''123456789'')';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "marginalia(kv_sep='123456789')"
+DETAIL:  Parameter "kv_sep" of extractor "marginalia" is longer than 8 bytes.
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a), keys=k)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "regex(pattern='(a), keys=k)"
+DETAIL:  Unterminated quoted value for parameter "pattern" of extractor "regex".
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=(a), keys=k)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "regex(pattern=(a), keys=k)"
+DETAIL:  Value of parameter "pattern" of extractor "regex" contains "("; quote the whole value.
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a)\1'', keys=k)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "regex(pattern='(a)\1', keys=k)"
+DETAIL:  Pattern of extractor "regex" uses back-references, which are not allowed.
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a)(b)(c)(d)(e)(f)(g)(h)(i)'', keys=a|b|c|d|e|f|g|h|i)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "regex(pattern='(a)(b)(c)(d)(e)(f)(g)(h)(i)', keys=a|b|c|d|e|f|g|h|i)"
+DETAIL:  Pattern of extractor "regex" has 9 capture groups, more than max_tags (8).
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a)(b)'', keys=k)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "regex(pattern='(a)(b)', keys=k)"
+DETAIL:  Extractor "regex" has 1 key but its pattern has 2 capture groups.
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'regex(pattern=''(a'', keys=k)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "regex(pattern='(a', keys=k)"
+DETAIL:  Pattern of extractor "regex" is invalid: parentheses () not balanced.
+SELECT 'regex(pattern=''(a)' || repeat('x', 1022) || ''', keys=k)' AS long_pattern \gset
+ALTER SYSTEM SET pg_stat_statement_context.extractors = :'long_pattern';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "regex(pattern='(a)xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', keys=k)"
+DETAIL:  Pattern of extractor "regex" is longer than 1024 bytes.
 -- None of the rejected ALTER SYSTEM commands wrote anything.
 SELECT count(*) = :auto_conf_before AS auto_conf_unchanged
   FROM pg_file_settings

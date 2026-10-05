@@ -171,6 +171,45 @@ Decoded output goes into a caller-provided bounded buffer. Decoded NUL bytes (`%
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-8: Extractor DSL parser and GUC check/assign hooks
+
+**Description:** Implement the `pg_stat_statement_context.extractors` grammar from §4.2 in the `check_hook`.
+
+Accepted parameters:
+- Extractor names: `sqlcommenter`, `marginalia`, `regex`.
+- Common parameters: `position`, `keys` (`|`-separated), `rename` (`old:new|...`), `merge`.
+- Format-specific parameters: `url_decode`; `kv_sep` and `pair_sep`; `pattern` and `keys` for `regex`.
+- Values may be quoted, with `''` escaping, as in the regex example.
+
+Reject the following with `GUC_check_errdetail` and keep the previous config:
+- unknown names or parameters
+- duplicate parameters
+- invalid values
+
+Validate `regex` extractors by test-compiling each pattern with `pg_regcomp`, using `REG_ADVANCED` and `C_COLLATION_OID`, then freeing it with `pg_regfree`. Reject a pattern when any of these is true:
+- it is longer than 1 kB
+- it uses back-references (`re_info & REG_UBACKREF`)
+- it has more than `max_tags` capture groups
+
+Return the parsed form as one flat, pointer-free blob (offsets, not pointers) allocated through the compat helper. The `assign_hook` only stores it and bumps the generation.
+
+*Design note:* the number of regex `keys` should equal the number of capture groups, and a mismatch is an error.
+
+When `position` is omitted, the parser fills in the per-extractor default: `append` for `sqlcommenter` and `marginalia`, `any` for `regex` (§4.2).
+
+**Acceptance criteria:**
+- Every example in §4.2 parses.
+- Omitting `position` yields `append` for `sqlcommenter`/`marginalia` and `any` for `regex` in the parsed blob, including for the default `'sqlcommenter, marginalia'`.
+- Each class of malformed input is rejected with a specific message, and the old config survives a bad `SIGHUP`.
+- The blob contains no pointers and is freed correctly by guc.c on PG14/15 and PG16+, with no leak under Valgrind.
+
+**Decisions:**
+- 2026-10-05: The default `position` when omitted is per extractor: `sqlcommenter` = `append`, `marginalia` = `append`, `regex` = `any`.
+
+**Depends on:** 20261005-091225-7
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
