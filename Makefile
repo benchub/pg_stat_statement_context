@@ -51,9 +51,10 @@ include $(PGXS)
 # (test/t/002_compat.pl); pssc_guc_test inspects the parsed GUC state of
 # src/guc.h (test/t/003_guc.pl); pssc_extract_test runs the tag-set pipeline
 # of src/extract.h on given text and injects faults into the regex runtime
-# (test/t/005_extract.pl, test/t/006_regex.pl).
+# (test/t/005_extract.pl, test/t/006_regex.pl); pssc_store_test drives the
+# shared store of src/store.h (test/t/007_store.pl).
 TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test \
-	test/modules/pssc_extract_test
+	test/modules/pssc_extract_test test/modules/pssc_store_test
 
 .PHONY: test-modules install-test-modules clean-test-modules check-version-guards unittest
 

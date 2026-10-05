@@ -307,6 +307,47 @@ Use server logging (`log_min_duration_statement = 0`, which logs Parse/Bind/Exec
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-13: Shared store core (shmem, HTAB, key, locking)
+
+**Description:** Implement `src/store.c` (§3.1 item 4, §5.1, §5.4). The layout is one entry per (query × context) holding a per-bucket counter ring; `bucket_id` is **not** part of the key.
+
+Sizing and setup:
+- Compute `keysize` from `max_tagset_bytes`, and `entrysize` from `keysize` plus `bucket_count` ring slots (task 20261005-091225-12).
+- Size shared memory as `hash_estimate_size(max_entries, entrysize)` plus the header, using `add_size`/`mul_size`, and request it through the compat path with an LWLock tranche.
+- In `shmem_startup_hook`, create or attach the header and an HTAB with `init_size = max_size = max_entries` and custom `HASH_FUNCTION`/`HASH_COMPARE` callbacks.
+
+Keys and entries:
+- The key is `(dbid, userid, queryid, toplevel, tags_len, tags_hash, tags[])`. Build keys by `memset`-ing the whole key to zero first.
+- The hash combines the fixed fields with `tags_hash`. The compare checks the fixed fields and `tags_len`, then `memcmp`s only the used tag bytes.
+- Each entry has its own spinlock, stores the database encoding, `last_bucket`, `usage`, and `bucket_count` slots.
+
+Header counters:
+- `entries`, `dealloc`, `evicted_entries`, `invalid_tags`, `dropped_tags`, `regex_compile_failures`, `heuristic_scans`, `utility_missing_queryid`, and `stats_reset`.
+
+Recording:
+- `store_record(key, bucket_id, elapsed)` looks up an existing entry under the shared lock and, under the entry spinlock, adds one call and the elapsed time to slot `bucket_id mod bucket_count`, relabeling the slot first if it holds an older `bucket_id`.
+- On a miss, it releases the lock, takes the exclusive lock, repeats the `HASH_ENTER` lookup, and enforces `max_entries` itself. Until task 20261005-091225-15 lands, a full table simply drops the record and counts it.
+
+Support code:
+- A reset routine.
+- A debug-only hash override, via an assert build or a developer GUC, to force collisions (§9).
+- Until task 20261005-091225-14 lands, the `bucket_id` is supplied by the caller.
+
+**Acceptance criteria:**
+- The server starts with the default settings and with boundary values for `max_entries`, `max_tagset_bytes`, and `bucket_count`.
+- The reported `shmem_bytes` equals the requested size.
+- Concurrent `pgbench` recording loses no updates (the sum of `calls` matches the executed statements).
+- Recording the same key into different `bucket_id`s uses one entry with separate slots, not separate entries.
+- With forced collisions, distinct tag sets stay separate.
+- The entry count never exceeds `max_entries`.
+
+**Decisions:**
+- 2026-10-05 (§11 Q5): Key layout is one entry per (query × context) holding a per-bucket counter ring, not `bucket_id` in the key. This is cheap because each slot holds only `calls` and `total_exec_time` (about 24 bytes per bucket). Capacity counts (query × context) combinations, independent of `bucket_count`.
+
+**Depends on:** 20261005-091225-2, 20261005-091225-7, 20261005-091225-12
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

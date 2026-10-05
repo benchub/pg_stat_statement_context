@@ -422,8 +422,9 @@ The compare checks the fixed fields and `tags_len`, then runs `memcmp` on only
 the used bytes. Keys are still built by `memset`-ing the whole key to zero first
 (pgss does the same), so padding and unused tag bytes are always defined.
 
-`keysize` is computed at startup from `max_tagset_bytes`, and `entrysize` from
-`keysize` and `bucket_count`. Shared memory is sized as
+`keysize` is computed at startup from `max_tagset_bytes` (`MAXALIGN(24 +
+max_tagset_bytes)`; 24 is the fixed key header), and `entrysize` from `keysize`
+and `bucket_count` (`keysize + MAXALIGN(entry header) + bucket_count × 24`). Shared memory is sized as
 `hash_estimate_size(max_entries, entrysize)` plus the header, using
 `add_size`/`mul_size` overflow checks. The table is created with
 `init_size = max_size = max_entries`, so all entries are preallocated.
@@ -431,6 +432,11 @@ the used bytes. Keys are still built by `memset`-ing the whole key to zero first
 `max_entries` cap is enforced by the extension under the exclusive lock.
 With the defaults, an entry is on the order of 1 KB, dominated by the tag set.
 `_info()` reports the exact `shmem_bytes` value.
+
+Until eviction (§5.3, item -15) lands, a record that finds the table full is
+dropped and counted in the header counter `dropped_records`. Testing (§9) uses
+a forced-collision mode, set only through the test module and only while the
+table is empty. The effective hash is chosen under the table lock.
 
 **Capacity is measured in (query × context) combinations**, independent of
 `bucket_count`: 5,000 recurring combinations need 5,000 entries whether they

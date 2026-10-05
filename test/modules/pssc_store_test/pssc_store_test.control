@@ -1,0 +1,5 @@
+# TEST-ONLY: drives src/store.h; not part of pg_stat_statement_context.
+comment = 'test-only driver for the pg_stat_statement_context shared store'
+default_version = '1.0'
+module_pathname = '$libdir/pssc_store_test'
+relocatable = true

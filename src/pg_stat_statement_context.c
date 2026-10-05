@@ -13,6 +13,7 @@
 #include "extract.h"
 #include "guc.h"
 #include "regex_runtime.h"
+#include "store.h"
 
 PG_MODULE_MAGIC;
 
@@ -35,6 +36,7 @@ _PG_init(void)
 	pssc_guc_define();
 	pssc_extract_init();
 	pssc_regex_init();
+	pssc_store_init();
 
 	/*
 	 * Make compute_query_id = auto behave as on, so query IDs match
