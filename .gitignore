@@ -18,6 +18,8 @@ tmp/
 /test/unit/test_stmt_checked
 /test/unit/test_pairs
 /test/unit/test_pairs_checked
+/test/unit/test_tagset
+/test/unit/test_tagset_checked
 /test/unit/pairs_alloc_check.o
 /test/unit/corpus/
 # fuzz targets (fuzz/)

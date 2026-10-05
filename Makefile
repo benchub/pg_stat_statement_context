@@ -12,6 +12,7 @@ OBJS = \
 	src/guc.o \
 	src/scan.o \
 	src/pairs.o \
+	src/tagset.o \
 	src/extract.o \
 	src/context.o \
 	src/store.o
@@ -32,6 +33,7 @@ PROVE_TESTS = test/t/*.pl
 EXTRA_CLEAN = test/unit/test_scan test/unit/test_scan_checked \
 	test/unit/test_stmt test/unit/test_stmt_checked \
 	test/unit/test_pairs test/unit/test_pairs_checked \
+	test/unit/test_tagset test/unit/test_tagset_checked \
 	test/unit/pairs_alloc_check.o \
 	test/unit/corpus test/unit/*.dSYM \
 	fuzz/fuzz_sqlcommenter fuzz/fuzz_marginalia \
@@ -44,8 +46,10 @@ include $(PGXS)
 
 # TEST-ONLY modules: pssc_compat_test exercises the src/compat.h shims
 # (test/t/002_compat.pl); pssc_guc_test inspects the parsed GUC state of
-# src/guc.h (test/t/003_guc.pl).
-TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test
+# src/guc.h (test/t/003_guc.pl); pssc_extract_test runs the tag-set pipeline
+# of src/extract.h on given text (test/t/005_extract.pl).
+TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test \
+	test/modules/pssc_extract_test
 
 .PHONY: test-modules install-test-modules clean-test-modules check-version-guards unittest
 
@@ -64,7 +68,8 @@ check-version-guards:
 	scripts/check-version-guards.sh
 
 # Standalone unit tests for src/scan.c (lexer, statement ranges, positional
-# scans) and src/pairs.c (SQLCommenter/marginalia parsers) under ASan/UBSan,
+# scans), src/pairs.c (SQLCommenter/marginalia parsers) and src/tagset.c
+# (tag-set pipeline and extractor chain) under ASan/UBSan,
 # then the parser fuzz targets through their standalone driver; no server
 # needed. Also runnable without pg_config: make -C test/unit; make -C fuzz
 # (libFuzzer builds: make -C fuzz fuzz, needs clang with -fsanitize=fuzzer).

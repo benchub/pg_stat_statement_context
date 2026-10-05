@@ -209,7 +209,7 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.bucket_interval` | `300s` | postmaster | Width of each bucket. 12 × 5 min = 1 hour history. Fixed at startup so all backends agree on bucket IDs (§5.2). |
 | `pg_stat_statement_context.max_tags` | `8` | postmaster | Max tags stored per entry. |
 | `pg_stat_statement_context.max_tag_value_len` | `64` | postmaster | Bytes per tag value. Longer values are truncated on a character boundary. Keys are limited to 63 bytes, and longer keys are dropped. |
-| `pg_stat_statement_context.max_tagset_bytes` | `512` | postmaster | Hard cap on the serialized tag set, which is part of the hash key (§5.1). Tags that don't fit are dropped in allowlist order and counted. |
+| `pg_stat_statement_context.max_tagset_bytes` | `512` | postmaster | Hard cap on the serialized tag set, which is part of the hash key (§5.1). Tags are kept greedily in priority order (allowlist order, or sorted keys for `'*'`); a tag that doesn't fit is dropped and counted, and smaller lower-priority tags may still be kept (§6.11). |
 | `pg_stat_statement_context.scan_window` | `2kB` | sighup | Max bytes from the head/tail searched for comments (see §6.2). |
 | `pg_stat_statement_context.extractors` | `'sqlcommenter, marginalia'` | sighup | Extractor DSL (§4.2). |
 | `pg_stat_statement_context.tags` | `'action, controller, job'` | sighup | Allowlist of tag keys to keep, applied after `rename`. Tags not listed are discarded. `'*'` keeps all tags (not recommended, see §6.1). |
@@ -653,20 +653,41 @@ some server version, it is omitted on that version rather than exposed as
      (`pg_verify_mbstr`)
   3. apply the per-extractor `keys` allowlist, matching **original** key names
      (decided 2026-10-05)
-  4. rename
+  4. rename. The renamed key is checked against the database encoding, because
+     the GUC is cluster-wide but databases may have different encodings
   5. apply the global allowlist (or the denylist when `tags = '*'`), and drop
      keys longer than 63 bytes
   6. *(roadmap)* value normalization: per-key regex-replace rules (§8)
   7. truncate on a character boundary (`pg_mbcliplen`)
   8. *(roadmap)* per-key cardinality caps, collapsing overflow values to
      JSON `null` (§8)
-  9. sort and serialize within `max_tagset_bytes`
+  9. sort and serialize within `max_tags` and `max_tagset_bytes`, using greedy
+     fill (decided 2026-10-05):
+     - Tags are considered in priority order: allowlist order, or sorted-key
+       order when `tags = '*'`.
+     - A tag is kept if it still fits; one that doesn't is dropped and counted
+       in `dropped_tags`, and the next tag is tried.
+     - So an oversized tag never evicts smaller lower-priority tags.
+
+  Extractor-chain semantics:
+  - An extractor "produces" only if at least one pair survives these steps.
+  - Once one has produced, later non-`merge` extractors are skipped, but later
+    `merge=on` extractors still run.
+  - The first occurrence of a key wins: by chain order, then comment order,
+    then pair order.
+  - The trailing-footer fallback (§6.5) is used only when the statement's own
+    range yields no tags.
 
   Tags from `tags_override` (roadmap, §8) go through the same steps except
   step 3, since no extractor is involved. `appname` (roadmap) is an extractor,
   so its tags follow every step.
-  Malformed tags are dropped and
-  counted in `_info().invalid_tags`. They never raise an error in the user's
+  Malformed tags are dropped and counted in `_info().invalid_tags`. This
+  includes:
+  - NUL or invalid encoding
+  - keys longer than 63 bytes
+  - parser-malformed segments, counted only for a comment from which the same
+    parser obtained at least one well-formed pair, so probing another format's
+    comment isn't counted (decided 2026-10-05) They never raise an error in the user's
   statement.
 - Tags are stored in the originating database's encoding, which is recorded per
   entry as pgss does, and converted with `pg_any_to_server` when read. For a

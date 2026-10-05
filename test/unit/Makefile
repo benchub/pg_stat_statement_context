@@ -3,6 +3,8 @@
 #   test_scan.c   the comment lexer (pssc_scan_comments, pssc_scan_only_trivia)
 #   test_stmt.c   statement ranges, positional/windowed scans, footers
 #   test_pairs.c  SQLCommenter / marginalia pair parsers, pssc_comment_body
+#   test_tagset.c tag-set pipeline and extractor chain (src/tagset.c, built
+#                 with -DPSSC_STANDALONE and the c.h shim pssc_standalone.h)
 #   make -C test/unit          build and run (top-level: make unittest)
 #   make -C test/unit corpus   write the case inputs to corpus/ (fuzz seeds)
 # Each runs as two builds under AddressSanitizer + UBSan: test_X uses the
@@ -26,8 +28,11 @@ export UBSAN_OPTIONS ?= print_stacktrace=1
 
 DEPS = ../../src/scan.c ../../src/scan.h
 PAIRS_DEPS = ../../src/pairs.c ../../src/pairs.h
+TAGSET_DEPS = ../../src/tagset.c ../../src/tagset.h ../../src/guc.h \
+	pssc_standalone.h $(DEPS) $(PAIRS_DEPS)
+TAGSET_SRCS = ../../src/tagset.c ../../src/scan.c ../../src/pairs.c
 PROGS = test_scan test_scan_checked test_stmt test_stmt_checked \
-	test_pairs test_pairs_checked
+	test_pairs test_pairs_checked test_tagset test_tagset_checked
 
 # Functions pairs.c may reference (compilers may emit mem* calls themselves).
 ALLOWED_SYMS = memcpy memmove memset memcmp memchr __stack_chk_fail __stack_chk_guard \
@@ -42,6 +47,13 @@ test_pairs: test_pairs.c $(PAIRS_DEPS)
 test_pairs_checked: test_pairs.c $(PAIRS_DEPS)
 	$(CC) $(CFLAGS_UNIT) -DPSSC_PAIRS_CHECKED -o $@ $< ../../src/pairs.c
 
+test_tagset: test_tagset.c $(TAGSET_DEPS)
+	$(CC) $(CFLAGS_UNIT) -I. -DPSSC_STANDALONE -o $@ $< $(TAGSET_SRCS)
+
+test_tagset_checked: test_tagset.c $(TAGSET_DEPS)
+	$(CC) $(CFLAGS_UNIT) -I. -DPSSC_STANDALONE -DPSSC_SCAN_CHECKED \
+		-DPSSC_PAIRS_CHECKED -o $@ $< $(TAGSET_SRCS)
+
 test_%: test_%.c $(DEPS)
 	$(CC) $(CFLAGS_UNIT) -o $@ $< ../../src/scan.c
 
@@ -55,6 +67,8 @@ check: $(PROGS) check-alloc
 	./test_stmt_checked
 	./test_pairs
 	./test_pairs_checked
+	./test_tagset
+	./test_tagset_checked
 
 check-alloc: $(PAIRS_DEPS)
 	$(CC) -std=c99 -O2 -Wall -Werror -c -o pairs_alloc_check.o ../../src/pairs.c
@@ -66,8 +80,9 @@ check-alloc: $(PAIRS_DEPS)
 	if [ -n "$$bad" ]; then echo "pairs.c references disallowed symbols:$$bad"; exit 1; fi; \
 	echo "ok: pairs.c references only:" $$syms
 
-corpus: test_scan test_stmt test_pairs
+corpus: test_scan test_stmt test_pairs test_tagset
 	mkdir -p corpus
+	./test_tagset --emit-corpus corpus
 	./test_scan --emit-corpus corpus
 	./test_stmt --emit-corpus corpus
 	./test_pairs --emit-corpus corpus

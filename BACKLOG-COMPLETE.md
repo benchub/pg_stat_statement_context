@@ -210,6 +210,44 @@ When `position` is omitted, the parser fills in the per-extractor default: `appe
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-9: Tag-set canonicalization pipeline and extractor chain
+
+**Description:** In `src/extract.c`, turn `(sourceText, stmt range, config blob, database encoding, standard_conforming_strings)` into a canonical tag set (§3.1 item 2, §4.2, §6.11):
+
+1. For each extractor, scan with its `position` (task 20261005-091225-5) and parse its comments (task 20261005-091225-6, or task 20261005-091225-10 for `regex`).
+2. Run every pair through the §6.11 order:
+   1. decode
+   2. reject values that contain NUL or fail `pg_verify_mbstr`
+   3. apply the per-extractor `keys`, matching the **original** key names
+   4. apply `rename`
+   5. apply the global allowlist, or the denylist when `tags = '*'`
+   6. drop keys longer than 63 bytes
+   7. truncate values to `max_tag_value_len` with `pg_mbcliplen`
+3. Combine extractors: the first one that produces at least one tag wins, unless `merge=on`.
+4. Sort the tags by key and serialize them as `k\0v\0...` within `max_tagset_bytes`. Tags that don't fit are dropped in allowlist order. Compute `tags_hash`.
+5. Apply the trailing-footer fallback (§6.5) when the statement's own range produced no tags.
+
+Count invalid tags, dropped tags, and heuristic scans in a backend-local stats struct, which the recording path flushes later. No input may raise an error. All work happens before any lock, in a short-lived memory context.
+
+*Design notes* (propose and document; non-blocking):
+- With `merge=on`, the earlier extractor wins on a duplicate key.
+- When `tags='*'`, overflow tags are dropped in reverse sorted-key order.
+- With `position=any`, every comment is parsed, and the first occurrence of a key wins.
+
+**Acceptance criteria:**
+- The same tags in a different order produce byte-identical output and hash.
+- The serialized size never exceeds `max_tagset_bytes`.
+- Malformed input never raises an error.
+- A per-extractor `keys` list naming an original key keeps it even when `rename` changes its name, and naming only the renamed key does not keep it.
+- Each §6.11 step is covered by the regression suite in task 20261005-091225-11.
+
+**Decisions:**
+- 2026-10-05: A per-extractor `keys` allowlist matches the **original** key names and is applied before `rename`. The global allowlist still applies after `rename`.
+
+**Depends on:** 20261005-091225-5, 20261005-091225-6, 20261005-091225-8
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

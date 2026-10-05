@@ -1,0 +1,5 @@
+# TEST-ONLY: drives src/extract.h; not part of pg_stat_statement_context.
+comment = 'test-only driver for the pg_stat_statement_context tag-set pipeline'
+default_version = '1.0'
+module_pathname = '$libdir/pssc_extract_test'
+relocatable = true
