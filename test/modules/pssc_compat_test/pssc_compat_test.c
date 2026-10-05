@@ -1,6 +1,7 @@
 /*
  * pssc_compat_test.c
- *		TEST-ONLY module that exercises every shim in src/compat.h.
+ *		TEST-ONLY module that exercises every shim in src/compat.h (and the
+ *		version-sensitive ms conversions of src/counters.h).
  *
  * This is not part of pg_stat_statement_context and is never installed by
  * the top-level "make install". It exists so test/t/002_compat.pl can check,
@@ -33,6 +34,7 @@
 #include "utils/tuplestore.h"
 
 #include "compat.h"
+#include "counters.h"
 
 PG_MODULE_MAGIC;
 
@@ -545,6 +547,51 @@ pssc_compat_test_usage_delta(PG_FUNCTION_ARGS)
 	values[0] = Int64GetDatum(buf_delta.shared_blks_hit + buf_delta.shared_blks_read +
 							  buf_delta.shared_blks_dirtied + buf_delta.shared_blks_written);
 	values[1] = Int64GetDatum(wal_delta.wal_records);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * src/counters.h backend conversions (not compat.h shims, but
+ * version-sensitive: instr_time changed representation in PG16). Times a
+ * sleep the way the executor and pgss do and returns, in ms:
+ *	pre_total	Instrumentation.total before InstrEndLoop (0: the loop's time
+ *				is still in the counter, so the helper must end the loop)
+ *	exec_ms		pssc_exec_ms_from_totaltime()
+ *	exec_again	the same, called again (a later hook ending the loop again)
+ *	exec_pgss	pgss_ExecutorEnd's expression, totaltime->total * 1000.0
+ *	util_ms		pssc_ms_from_instr_time() of a measured duration
+ *	util_pgss	pgss_ProcessUtility's INSTR_TIME_GET_MILLISEC(duration)
+ */
+PG_FUNCTION_INFO_V1(pssc_compat_test_counters_ms);
+Datum
+pssc_compat_test_counters_ms(PG_FUNCTION_ARGS)
+{
+	int32		sleep_ms = PG_GETARG_INT32(0);
+	Instrumentation *instr = InstrAlloc(1, INSTRUMENT_TIMER, false);
+	instr_time	start,
+				duration;
+	TupleDesc	tupdesc;
+	Datum		values[6];
+	bool		nulls[6] = {false, false, false, false, false, false};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	InstrStartNode(instr);
+	pg_usleep(sleep_ms * 1000L);
+	InstrStopNode(instr, 1);
+	values[0] = Float8GetDatum(instr->total * 1000.0);
+	values[1] = Float8GetDatum(pssc_exec_ms_from_totaltime(instr));
+	values[2] = Float8GetDatum(pssc_exec_ms_from_totaltime(instr));
+	values[3] = Float8GetDatum(instr->total * 1000.0);
+
+	INSTR_TIME_SET_CURRENT(start);
+	pg_usleep(sleep_ms * 1000L);
+	INSTR_TIME_SET_CURRENT(duration);
+	INSTR_TIME_SUBTRACT(duration, start);
+	values[4] = Float8GetDatum(pssc_ms_from_instr_time(duration));
+	values[5] = Float8GetDatum(INSTR_TIME_GET_MILLISEC(duration));
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

@@ -404,6 +404,16 @@ typedef struct ctxEntry {
 } ctxEntry;
 ```
 
+`ctxSlot` is implemented as `PsscSlot` in `src/counters.[ch]` (item -12).
+
+- An unwritten slot has `bucket_id = PSSC_BUCKET_NONE` (`INT64_MIN`), which is
+  older than any real bucket and is skipped by merges.
+- Bucket ids are signed `int64`, so "older" is a plain `<`.
+- Usage follows pgss: it starts at 1.0, each call adds 1.0, and each eviction
+  pass multiplies it by 0.99.
+- There are no "sticky" entries, because an entry is only created when a call
+  is recorded.
+
 The **full canonical tag set is part of the key**, so distinct tag sets can
 never be merged and no collision probing is needed. Like pgss, dynahash chains
 entries and compares the actual keys. The table uses custom `HASH_FUNCTION` and

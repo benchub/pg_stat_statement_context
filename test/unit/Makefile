@@ -5,9 +5,12 @@
 #   test_pairs.c  SQLCommenter / marginalia pair parsers, pssc_comment_body
 #   test_tagset.c tag-set pipeline and extractor chain (src/tagset.c, built
 #                 with -DPSSC_STANDALONE and the c.h shim pssc_standalone.h)
+#   test_counters.c per-bucket counter slot and pgss-style usage
+#                 (src/counters.c, built with -DPSSC_STANDALONE)
 #   make -C test/unit          build and run (top-level: make unittest)
 #   make -C test/unit corpus   write the case inputs to corpus/ (fuzz seeds)
-# Each runs as two builds under AddressSanitizer + UBSan: test_X uses the
+# test_counters is a single ASan/UBSan build. The others each run as two
+# builds under AddressSanitizer + UBSan: test_X uses the
 # production source; test_X_checked compiles it with -DPSSC_SCAN_CHECKED /
 # -DPSSC_PAIRS_CHECKED, which asserts every byte read is inside the input
 # and counts reads so the driver can check the work is linear.
@@ -31,8 +34,10 @@ PAIRS_DEPS = ../../src/pairs.c ../../src/pairs.h
 TAGSET_DEPS = ../../src/tagset.c ../../src/tagset.h ../../src/guc.h \
 	pssc_standalone.h $(DEPS) $(PAIRS_DEPS)
 TAGSET_SRCS = ../../src/tagset.c ../../src/scan.c ../../src/pairs.c
+COUNTERS_DEPS = ../../src/counters.c ../../src/counters.h pssc_standalone.h
 PROGS = test_scan test_scan_checked test_stmt test_stmt_checked \
-	test_pairs test_pairs_checked test_tagset test_tagset_checked
+	test_pairs test_pairs_checked test_tagset test_tagset_checked \
+	test_counters
 
 # Functions pairs.c may reference (compilers may emit mem* calls themselves).
 ALLOWED_SYMS = memcpy memmove memset memcmp memchr __stack_chk_fail __stack_chk_guard \
@@ -54,6 +59,9 @@ test_tagset_checked: test_tagset.c $(TAGSET_DEPS)
 	$(CC) $(CFLAGS_UNIT) -I. -DPSSC_STANDALONE -DPSSC_SCAN_CHECKED \
 		-DPSSC_PAIRS_CHECKED -o $@ $< $(TAGSET_SRCS)
 
+test_counters: test_counters.c $(COUNTERS_DEPS)
+	$(CC) $(CFLAGS_UNIT) -I. -DPSSC_STANDALONE -o $@ $< ../../src/counters.c
+
 test_%: test_%.c $(DEPS)
 	$(CC) $(CFLAGS_UNIT) -o $@ $< ../../src/scan.c
 
@@ -69,6 +77,7 @@ check: $(PROGS) check-alloc
 	./test_pairs_checked
 	./test_tagset
 	./test_tagset_checked
+	./test_counters
 
 check-alloc: $(PAIRS_DEPS)
 	$(CC) -std=c99 -O2 -Wall -Werror -c -o pairs_alloc_check.o ../../src/pairs.c

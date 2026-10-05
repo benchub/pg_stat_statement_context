@@ -16,6 +16,7 @@ OBJS = \
 	src/extract.o \
 	src/regex_runtime.o \
 	src/context.o \
+	src/counters.o \
 	src/store.o
 PGFILEDESC = "pg_stat_statement_context - per-tag statement statistics from SQL comments"
 
@@ -35,6 +36,7 @@ EXTRA_CLEAN = test/unit/test_scan test/unit/test_scan_checked \
 	test/unit/test_stmt test/unit/test_stmt_checked \
 	test/unit/test_pairs test/unit/test_pairs_checked \
 	test/unit/test_tagset test/unit/test_tagset_checked \
+	test/unit/test_counters \
 	test/unit/pairs_alloc_check.o \
 	test/unit/corpus test/unit/*.dSYM \
 	fuzz/fuzz_sqlcommenter fuzz/fuzz_marginalia \
@@ -70,8 +72,9 @@ check-version-guards:
 	scripts/check-version-guards.sh
 
 # Standalone unit tests for src/scan.c (lexer, statement ranges, positional
-# scans), src/pairs.c (SQLCommenter/marginalia parsers) and src/tagset.c
-# (tag-set pipeline and extractor chain) under ASan/UBSan,
+# scans), src/pairs.c (SQLCommenter/marginalia parsers), src/tagset.c
+# (tag-set pipeline and extractor chain) and src/counters.c (per-bucket
+# counter slot) under ASan/UBSan,
 # then the parser fuzz targets through their standalone driver; no server
 # needed. Also runnable without pg_config: make -C test/unit; make -C fuzz
 # (libFuzzer builds: make -C fuzz fuzz, needs clang with -fsanitize=fuzzer).

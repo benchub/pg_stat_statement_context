@@ -53,3 +53,13 @@ CREATE FUNCTION pssc_compat_test_usage_delta(query text,
                                              OUT shared_blks bigint,
                                              OUT wal_records bigint)
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- src/counters.h backend conversions to ms (executor totaltime, utility instr_time).
+CREATE FUNCTION pssc_compat_test_counters_ms(sleep_ms int,
+                                             OUT pre_total float8,
+                                             OUT exec_ms float8,
+                                             OUT exec_again float8,
+                                             OUT exec_pgss float8,
+                                             OUT util_ms float8,
+                                             OUT util_pgss float8)
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

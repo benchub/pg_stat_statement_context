@@ -53,8 +53,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | ready |
-| 20261005-091225-12 | Counters (`calls`, `total_exec_time`): accumulation and bucket merge | 20261005-091225-2 | no | ready |
-| 20261005-091225-13 | Shared store core (shmem, HTAB, key, locking) | 20261005-091225-2, 20261005-091225-7, 20261005-091225-12 | no | blocked-on-deps |
+| 20261005-091225-13 | Shared store core (shmem, HTAB, key, locking) | 20261005-091225-2, 20261005-091225-7, 20261005-091225-12 | no | ready |
 | 20261005-091225-14 | Time buckets and lazy per-entry ring rollover | 20261005-091225-13 | no | blocked-on-deps |
 | 20261005-091225-15 | Eviction under pressure (dead entries first, then pgss-style) | 20261005-091225-14 | no | blocked-on-deps |
 | 20261005-091225-16 | Execution frames and active-frame tracking | 20261005-091225-9 | no | ready |
@@ -230,27 +229,6 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-12: Counters (`calls`, `total_exec_time`): accumulation and bucket merge
-
-**Description:** Define the per-bucket counter slot from §5.1 (`ctxSlot`: `bucket_id`, `calls`, `total_exec_time`) and the pure functions that work on it. The extension is a pg_stat_statements companion, so no other counters are stored (§5.1, §7).
-- Initialize a slot, and reset/relabel it for a new `bucket_id` (used by the per-entry ring rollover in task 20261005-091225-14).
-- Accumulate one call plus elapsed milliseconds: from `queryDesc->totaltime` for the executor, and from a measured duration for utilities.
-- Merge slots for `merge_buckets` (§7): sum `calls` and `total_exec_time`, and keep the oldest contributing `bucket_id` for `bucket_start`.
-- Provide the pgss-style `usage` update used for eviction ordering (task 20261005-091225-15). `usage` is internal and not exposed.
-
-**Acceptance criteria:**
-- The code compiles warning-free on PG14–18 and uses no version-specific counter fields.
-- Unit tests (or a test hook) show that accumulation and merge produce exact sums, that merge picks the oldest `bucket_id`, and that relabeling a slot zeroes its counters.
-- Executor `total_exec_time` uses the same source and units (ms) as pgss, verified end to end by task 20261005-091225-22.
-
-**Decisions:**
-- 2026-10-05: The extension is a companion to pg_stat_statements, not a replacement. Per (queryid × context) entry it stores **only** `calls` and `total_exec_time`. Rows, blocks, WAL, I/O timing, JIT, min/max/mean/stddev, and so on are left to pgss, and users join on `(userid, dbid, queryid, toplevel)`. Rationale: `calls` alone can't apportion load across contexts when per-context cost differs, and `total_exec_time` is the minimum needed for attribution.
-- 2026-10-05: The question of how to expose counters missing on older versions is moot (both stored counters exist on PG14–18). General policy, following pgss: version-unavailable columns are omitted rather than exposed as `NULL`.
-
-**Depends on:** 20261005-091225-2
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-13: Shared store core (shmem, HTAB, key, locking)
 
 **Description:** Implement `src/store.c` (§3.1 item 4, §5.1, §5.4). The layout is one entry per (query × context) holding a per-bucket counter ring; `bucket_id` is **not** part of the key.
@@ -290,7 +268,7 @@ Support code:
 
 **Depends on:** 20261005-091225-2, 20261005-091225-7, 20261005-091225-12
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-14: Time buckets and lazy per-entry ring rollover
 

@@ -148,6 +148,15 @@ my $blk_time_expected =
 is($node->safe_psql('postgres', 'SELECT * FROM pssc_compat_test_blk_time_accessors()'),
 	$blk_time_expected, 'I/O time accessors read the right BufferUsage fields');
 
+# ---- src/counters.h: executor/utility time in ms, exactly as pgss ----
+# The helper must end the instrumentation loop itself (total is 0 before),
+# be idempotent, and equal pgss's expressions bit for bit.
+is( $node->safe_psql('postgres', q{
+	SELECT pre_total = 0, exec_ms >= 20, exec_ms < 20000, exec_again = exec_ms,
+	       exec_pgss = exec_ms, util_ms >= 20, util_ms < 20000, util_pgss = util_ms
+	FROM pssc_compat_test_counters_ms(20)}),
+	't|t|t|t|t|t|t|t', 'counters: ms conversions match pgss (InstrEndLoop, * 1000.0, GET_MILLISEC)');
+
 # ---- GUC prefix reservation: MarkGUCPrefixReserved (PG15+) / EmitWarningsOnPlaceholders (PG14) ----
 my $log = slurp_file($node->logfile);
 if ($vnum >= 150000)
