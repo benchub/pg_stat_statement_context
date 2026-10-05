@@ -267,6 +267,25 @@ Use server logging (`log_min_duration_statement = 0`, which logs Parse/Bind/Exec
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-10: Regex extractor runtime
+
+**Description:** Implement the runtime half of the `regex` extractor (§4.2):
+- Each backend compiles patterns lazily, on first use after a config-generation change, into a private memory context that it owns, and frees the old ones with `pg_regfree`.
+- Patterns use `REG_ADVANCED` and `C_COLLATION_OID`, and are applied **only to comment text**, honoring `position`.
+- Comment bytes are converted to `pg_wchar` before matching, and capture offsets are mapped back to byte offsets. Capture group *n* maps to key *n*.
+- Raw pairs go into the pipeline from task 20261005-091225-9.
+- If lazy compilation fails (for example, out of memory), the extractor is disabled for that backend and the failure is counted. The statement never fails.
+
+**Acceptance criteria:**
+- The `svc=(\w+)\s+op=(\w+)` example from §4.2 extracts `service` and `operation`.
+- Captures in multibyte comments map to the correct bytes.
+- A config reload recompiles the patterns and frees the old ones, with no leak under Valgrind.
+- An injected compile failure disables only that extractor, increments a counter, and lets the statement succeed.
+
+**Depends on:** 20261005-091225-8, 20261005-091225-9
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

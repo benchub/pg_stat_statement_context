@@ -23,7 +23,8 @@ CREATE FUNCTION pssc_extract_test(query bytea,
                                   OUT oom bool,
                                   OUT invalid_tags bigint,
                                   OUT dropped_tags bigint,
-                                  OUT heuristic_scans bigint)
+                                  OUT heuristic_scans bigint,
+                                  OUT regex_compile_failures bigint)
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
 CREATE FUNCTION pssc_extract_test(query text,
@@ -39,15 +40,48 @@ CREATE FUNCTION pssc_extract_test(query text,
                                   OUT oom bool,
                                   OUT invalid_tags bigint,
                                   OUT dropped_tags bigint,
-                                  OUT heuristic_scans bigint)
+                                  OUT heuristic_scans bigint,
+                                  OUT regex_compile_failures bigint)
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
 -- pssc_tagset_hash() of raw bytes.
 CREATE FUNCTION pssc_extract_test_hash(data bytea) RETURNS bigint
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
--- Install (true) or remove (false) a fake regex extractor hook in this
--- backend: capture group i (key i of the extractor) is the i-th
--- whitespace-separated word of the comment body; missing words give no pair.
+-- Install (true) a fake regex extractor hook in this backend, or restore
+-- (false) the real regex runtime (pssc_regex_extract): with the fake,
+-- capture group i (key i of the extractor) is the i-th whitespace-separated
+-- word of the comment body; missing words give no pair.
 CREATE FUNCTION pssc_extract_test_fake_regex(enable bool) RETURNS void
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Remove the regex hook in this backend: regex extractors produce nothing.
+CREATE FUNCTION pssc_extract_test_no_regex() RETURNS void
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Fault injection into the regex runtime of this backend
+-- (pssc_regex_test_hook): before creating the memory context of a pattern
+-- to compile (phase 'context'), before each pg_regcomp ('compile') or
+-- pg_regexec ('exec') of extractor idx (-1: any), the next count times
+-- (-1: always): 'espace' / 'etoobig' (as if the engine returned that code),
+-- 'oom' (throw out of memory), 'error' (elog ERROR), 'cancel' (throw query
+-- canceled), 'regcancel' (as the PG14/15 engine on a pending cancel: set
+-- QueryCancelPending, return REG_CANCEL), 'sleep' (wait up to 60 s in a
+-- CHECK_FOR_INTERRUPTS loop, for a real statement_timeout), 'none' (off).
+CREATE FUNCTION pssc_extract_test_regex_inject(phase text, idx int, action text,
+                                               count int DEFAULT 1) RETURNS void
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- How many times the injection fired since it was set.
+CREATE FUNCTION pssc_extract_test_regex_injected() RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Backend-local regex runtime bookkeeping (pssc_regex_debug_stats).
+CREATE FUNCTION pssc_extract_test_regex_stats(OUT compiles bigint, OUT frees bigint,
+                                              OUT live int, OUT failed int)
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- This backend's malloc'd bytes in use (NULL without glibc >= 2.33) and
+-- bytes allocated by all its memory contexts.
+CREATE FUNCTION pssc_extract_test_mem(OUT malloc_used bigint, OUT context_bytes bigint)
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

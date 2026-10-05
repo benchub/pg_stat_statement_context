@@ -14,6 +14,7 @@ OBJS = \
 	src/pairs.o \
 	src/tagset.o \
 	src/extract.o \
+	src/regex_runtime.o \
 	src/context.o \
 	src/store.o
 PGFILEDESC = "pg_stat_statement_context - per-tag statement statistics from SQL comments"
@@ -47,7 +48,8 @@ include $(PGXS)
 # TEST-ONLY modules: pssc_compat_test exercises the src/compat.h shims
 # (test/t/002_compat.pl); pssc_guc_test inspects the parsed GUC state of
 # src/guc.h (test/t/003_guc.pl); pssc_extract_test runs the tag-set pipeline
-# of src/extract.h on given text (test/t/005_extract.pl).
+# of src/extract.h on given text and injects faults into the regex runtime
+# (test/t/005_extract.pl, test/t/006_regex.pl).
 TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test \
 	test/modules/pssc_extract_test
 

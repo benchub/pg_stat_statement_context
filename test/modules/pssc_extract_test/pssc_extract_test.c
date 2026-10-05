@@ -15,12 +15,24 @@
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "parser/parser.h"
+#include "miscadmin.h"
+#include "regex/regex.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 
 #include "extract.h"
 #include "guc.h"
+#include "regex_runtime.h"
 #include "scan.h"
+
+/* mallinfo2() arrived in glibc 2.33; features.h came in via postgres.h. */
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2, 33)
+#define PSSC_HAVE_MALLINFO2 1
+#include <malloc.h>
+#endif
+#endif
 
 PG_MODULE_MAGIC;
 
@@ -63,7 +75,7 @@ pssc_extract_test(PG_FUNCTION_ARGS)
 	char	   *buf;
 	PsscStmtRange r;
 	PsscExtractResult res;
-	PsscTagsetStats st = {0, 0, 0};
+	PsscTagsetStats st = {0};
 	extract_fn extract = (extract_fn) main_sym("pssc_extract_tags");
 	hash_fn hash = (hash_fn) main_sym("pssc_tagset_hash");
 	take_fn take = (take_fn) main_sym("pssc_extract_take_stats");
@@ -72,8 +84,8 @@ pssc_extract_test(PG_FUNCTION_ARGS)
 	int			max_value = *(int *) main_sym("pssc_max_tag_value_len");
 	int			scan_window = *(int *) main_sym("pssc_scan_window");
 	TupleDesc	tupdesc;
-	Datum		values[10];
-	bool		nulls[10] = {0};
+	Datum		values[11];
+	bool		nulls[11] = {0};
 	Datum	   *elems;
 	size_t		off;
 	int			n;
@@ -172,6 +184,7 @@ pssc_extract_test(PG_FUNCTION_ARGS)
 	values[7] = Int64GetDatum((int64) st.invalid_tags);
 	values[8] = Int64GetDatum((int64) st.dropped_tags);
 	values[9] = Int64GetDatum((int64) st.heuristic_scans);
+	values[10] = Int64GetDatum((int64) st.regex_compile_failures);
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
@@ -235,6 +248,180 @@ pssc_extract_test_fake_regex(PG_FUNCTION_ARGS)
 	if (PG_GETARG_BOOL(0))
 		set(fake_regex, &fake_regex_calls);
 	else
-		set(NULL, NULL);
+		set((PsscRegexExtractFn) main_sym("pssc_regex_extract"), NULL);
 	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(pssc_extract_test_no_regex);
+Datum
+pssc_extract_test_no_regex(PG_FUNCTION_ARGS)
+{
+	set_regex_fn set = (set_regex_fn) main_sym("pssc_extract_set_regex_hook");
+
+	set(NULL, NULL);
+	PG_RETURN_VOID();
+}
+
+/* --- regex runtime fault injection (src/regex_runtime.h) --- */
+
+typedef enum InjectAction
+{
+	INJ_NONE,
+	INJ_ESPACE,					/* return REG_ESPACE (engine out of memory) */
+	INJ_ETOOBIG,				/* return REG_ETOOBIG */
+	INJ_OOM,					/* throw ERRCODE_OUT_OF_MEMORY */
+	INJ_ERROR,					/* elog(ERROR) (internal error) */
+	INJ_CANCEL,					/* throw ERRCODE_QUERY_CANCELED */
+	INJ_REGCANCEL,				/* PG14/15 engine: cancel pending, REG_CANCEL */
+	INJ_SLEEP					/* CHECK_FOR_INTERRUPTS loop: real timeout */
+} InjectAction;
+
+static int	inj_phase = -1;
+static int	inj_index = -1;
+static InjectAction inj_action = INJ_NONE;
+static int	inj_remaining = 0;	/* -1: unlimited */
+static int	inj_fired = 0;
+
+/* REG_CANCEL of the PG14/15 engine (21); PG16+ throws instead. */
+#define PSSC_TEST_REG_CANCEL 21
+
+static int
+inject_hook(int phase, int index)
+{
+	if (phase != inj_phase || (inj_index >= 0 && index != inj_index) ||
+		inj_remaining == 0)
+		return REG_OKAY;
+	if (inj_remaining > 0)
+		inj_remaining--;
+	inj_fired++;
+	switch (inj_action)
+	{
+		case INJ_NONE:
+			return REG_OKAY;
+		case INJ_ESPACE:
+			return REG_ESPACE;
+		case INJ_ETOOBIG:
+			return REG_ETOOBIG;
+		case INJ_OOM:
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("out of memory"),
+					 errdetail("pssc_extract_test injected failure.")));
+			break;
+		case INJ_ERROR:
+			elog(ERROR, "pssc_extract_test injected internal error");
+			break;
+		case INJ_CANCEL:
+			ereport(ERROR,
+					(errcode(ERRCODE_QUERY_CANCELED),
+					 errmsg("canceling statement due to user request")));
+			break;
+		case INJ_REGCANCEL:
+			QueryCancelPending = true;
+			InterruptPending = true;
+			return PSSC_TEST_REG_CANCEL;
+		case INJ_SLEEP:
+			for (int i = 0; i < 6000; i++)
+			{
+				CHECK_FOR_INTERRUPTS();
+				pg_usleep(10000L);
+			}
+			return REG_OKAY;
+	}
+	return REG_OKAY;
+}
+
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_inject);
+Datum
+pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
+{
+	char	   *phase = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	int			index = PG_GETARG_INT32(1);
+	char	   *action = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	int			count = PG_GETARG_INT32(3);
+	PsscRegexTestHook *hook = (PsscRegexTestHook *) main_sym("pssc_regex_test_hook");
+	static const char *const names[] = {
+		[INJ_NONE] = "none", [INJ_ESPACE] = "espace", [INJ_ETOOBIG] = "etoobig",
+		[INJ_OOM] = "oom", [INJ_ERROR] = "error", [INJ_CANCEL] = "cancel",
+		[INJ_REGCANCEL] = "regcancel", [INJ_SLEEP] = "sleep"
+	};
+	int			a = -1;
+
+	for (int i = 0; i < (int) lengthof(names); i++)
+		if (strcmp(action, names[i]) == 0)
+			a = i;
+	if (a < 0)
+		elog(ERROR, "unknown action \"%s\"", action);
+	if (strcmp(phase, "compile") == 0)
+		inj_phase = PSSC_REGEX_TEST_COMPILE;
+	else if (strcmp(phase, "exec") == 0)
+		inj_phase = PSSC_REGEX_TEST_EXEC;
+	else if (strcmp(phase, "context") == 0)
+		inj_phase = PSSC_REGEX_TEST_CONTEXT;
+	else
+		elog(ERROR, "unknown phase \"%s\"", phase);
+	inj_index = index;
+	inj_action = (InjectAction) a;
+	inj_remaining = count;
+	inj_fired = 0;
+	*hook = a == INJ_NONE ? NULL : inject_hook;
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_injected);
+Datum
+pssc_extract_test_regex_injected(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(inj_fired);
+}
+
+typedef void (*debug_fn) (PsscRegexDebugStats *);
+
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_stats);
+Datum
+pssc_extract_test_regex_stats(PG_FUNCTION_ARGS)
+{
+	debug_fn	get = (debug_fn) main_sym("pssc_regex_debug_stats");
+	PsscRegexDebugStats st;
+	TupleDesc	tupdesc;
+	Datum		values[4];
+	bool		nulls[4] = {0};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	memset(&st, 0, sizeof(st));
+	get(&st);
+	values[0] = Int64GetDatum((int64) st.compiles);
+	values[1] = Int64GetDatum((int64) st.frees);
+	values[2] = Int32GetDatum(st.live);
+	values[3] = Int32GetDatum(st.failed);
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * Memory held by this backend: malloc'd bytes in use (glibc >= 2.33, NULL
+ * elsewhere; the regex engine mallocs on PG14/15) and bytes allocated by
+ * all memory contexts (it pallocs on PG16+).
+ */
+PG_FUNCTION_INFO_V1(pssc_extract_test_mem);
+Datum
+pssc_extract_test_mem(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {0};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+#ifdef PSSC_HAVE_MALLINFO2
+	{
+		struct mallinfo2 mi = mallinfo2();
+
+		values[0] = Int64GetDatum((int64) (mi.uordblks + mi.hblkhd));
+	}
+#else
+	nulls[0] = true;
+#endif
+	values[1] = Int64GetDatum((int64) MemoryContextMemAllocated(TopMemoryContext, true));
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

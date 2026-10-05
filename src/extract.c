@@ -19,6 +19,7 @@
 
 #include "extract.h"
 #include "guc.h"
+#include "regex_runtime.h"
 
 static MemoryContext extract_cxt = NULL;
 static PsscTagsetStats pending_stats;
@@ -75,6 +76,8 @@ pssc_extract_tags(const char *s, size_t start, size_t end, char *buf,
 		return;
 	}
 
+	pssc_regex_release_stale();
+
 	env.arg = NULL;
 	env.alloc = env_alloc;
 	env.verify = env_verify;
@@ -122,7 +125,14 @@ pssc_extract_take_stats(PsscTagsetStats *stats)
 	stats->invalid_tags += pending_stats.invalid_tags;
 	stats->dropped_tags += pending_stats.dropped_tags;
 	stats->heuristic_scans += pending_stats.heuristic_scans;
+	stats->regex_compile_failures += pending_stats.regex_compile_failures;
 	memset(&pending_stats, 0, sizeof(pending_stats));
+}
+
+void
+pssc_extract_note_regex_compile_failure(void)
+{
+	pending_stats.regex_compile_failures++;
 }
 
 void

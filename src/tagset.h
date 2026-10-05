@@ -143,6 +143,14 @@ typedef struct PsscTagsetStats
 
 	/* Scans that used the inexact tail path (scan.h "heuristic"). */
 	uint64_t	heuristic_scans;
+
+	/*
+	 * Regex extractors whose lazy per-backend compilation failed (each is
+	 * then disabled until the next config generation). Never touched by
+	 * pssc_tagset_build(); the regex runtime (src/regex_runtime.c) counts
+	 * them in the backend-local copy.
+	 */
+	uint64_t	regex_compile_failures;
 } PsscTagsetStats;
 
 typedef struct PsscTagsetOut

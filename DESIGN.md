@@ -270,6 +270,25 @@ Format-specific parameters:
   capture offsets are mapped back to bytes. v1 limits: pattern ≤ 1 kB, captures
   ≤ `max_tags`, and patterns with back-references are rejected
   (`re_info & REG_UBACKREF`).
+
+  Matching rules (decided 2026-10-05, item -10):
+  - Every non-overlapping match in the comment body is used, as with
+    `regexp_matches(..., 'g')`. After an empty match the search moves on one
+    character, and `^` anchors only at the start of the body.
+  - An unmatched optional group produces no pair.
+  - The first occurrence of a key wins, and matching stops once every key has
+    a value.
+  - A comment with invalid encoding or a NUL byte produces no pairs.
+  - A pattern that is invalid in the database's encoding counts as a compile
+    failure.
+
+  Engine errors:
+  - Engine calls run in `PG_TRY` without a subtransaction, because the engine
+    holds only memory.
+  - Cancel, timeout, shutdown, deadlock and serialization errors are re-thrown.
+  - Other errors (e.g. OOM) disable the extractor for the backend: a compile
+    error until the next config change, counted in `regex_compile_failures`.
+    A match error simply yields no further pairs and is not counted.
 - **appname** (roadmap, §8): `appname(format=sqlcommenter|marginalia|regex)`
   parses `application_name` instead of comment text, using the named format's
   rules (and `pattern`/`keys` for `regex`). Tags from comments win over

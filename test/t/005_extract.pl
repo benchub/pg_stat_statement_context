@@ -63,7 +63,7 @@ sub config
 # Run the pipeline. $q is a SQL expression (text or bytea); extra args are
 # appended (stmt_location, stmt_len, bufsize). $pre is SQL run first in the
 # same backend. Returns a hash of the result columns.
-my @COLS = qw(tags serialized nbytes hash ntags footer oom invalid dropped heuristic);
+my @COLS = qw(tags serialized nbytes hash ntags footer oom invalid dropped heuristic regex_fail);
 sub ex
 {
 	my ($q, %o) = @_;
@@ -73,7 +73,7 @@ sub ex
 	my $out = $node->safe_psql($db,
 		"$pre SELECT concat_ws(E'\\t', array_to_string(tags, ','), "
 		  . "encode(serialized, 'hex'), nbytes, hash, ntags, footer, oom, "
-		  . "invalid_tags, dropped_tags, heuristic_scans) "
+		  . "invalid_tags, dropped_tags, heuristic_scans, regex_compile_failures) "
 		  . "FROM pssc_extract_test($q$args)");
 	my @l = split /\n/, $out;
 	my @v = split /\t/, $l[-1], -1;
@@ -215,14 +215,16 @@ is(tq(q{SELECT 1 /*a='1',a='2'*/ /*a='3',b='4'*/}), 'a=1,b=4',
 
 config(extractors => q{regex(pattern='(\w+) (\w+)', keys=k1|k2), sqlcommenter(position=any, merge=on)},
 	tags => '*');
-is(tq(q{SELECT 1 /*w1 w2*/ /*k1='s'*/}), 'k1=s',
-	'without a regex runtime regex extractors produce nothing');
-is(tq(q{SELECT 1 /*w1 w2*/ /*k1='s'*/},
+is(tq(q{SELECT 1 /*w1 w2*/ /*k1='s'*/}, pre => 'SELECT pssc_extract_test_no_regex();'),
+	'k1=s', 'without a regex runtime regex extractors produce nothing');
+is(tq(q{SELECT 1 /*w1+w2*/ /*k1='s'*/},
 		pre => 'SELECT pssc_extract_test_fake_regex(true);'),
-	'k1=w1,k2=w2', 'the installed regex hook supplies pairs; it wins the chain');
-is(tq(q{SELECT 1 /*w1 w2*/ /*k1='s'*/},
-		pre => 'SELECT pssc_extract_test_fake_regex(true); SELECT pssc_extract_test_fake_regex(false);'),
+	'k1=w1+w2', 'the installed regex hook supplies pairs; it wins the chain');
+is(tq(q{SELECT 1 /*w1+w2*/ /*k1='s'*/},
+		pre => 'SELECT pssc_extract_test_fake_regex(true); SELECT pssc_extract_test_no_regex();'),
 	'k1=s', 'and can be removed');
+is(tq(q{SELECT 1 /*w1 w2*/ /*k1='s'*/}), 'k1=w1,k2=w2',
+	'the real regex runtime is installed by default (test/t/006_regex.pl)');
 
 # --- footer fallback and statement ownership (§6.5) ---
 
@@ -309,7 +311,8 @@ config(tags => '*', exclude_tags => '',
 	is($out, '0|f', '200000 pairs in one comment (beyond scan_window: no tags)');
 	$out = $node->safe_psql('u8', q{
 		SELECT ntags, oom FROM pssc_extract_test('/*' || repeat('a=''b'',', 150) || '*/ SELECT 1 /*' || repeat('a=''b'',', 200000) || '*/')});
-	is($out, '1|f', 'and a leading comment of the same statement still counts');
+	# a (sqlcommenter) and rk (the regex extractor's first word)
+	is($out, '2|f', 'and a leading comment of the same statement still counts');
 	$out = $node->safe_psql('u8', q{
 		SELECT ntags FROM pssc_extract_test('SELECT 1 /*' || repeat('/*', 100000) || 'a=''b''' || repeat('*/', 100000) || '*/')});
 	like($out, qr/^\d+$/, 'deeply nested comment');

@@ -55,8 +55,15 @@ extern PGDLLEXPORT uint32 pssc_tagset_hash(const char *buf, size_t len);
 extern PGDLLEXPORT void pssc_extract_take_stats(PsscTagsetStats *stats);
 
 /*
- * Installs the regex extractor (backlog item 20261005-091225-10; NULL
- * uninstalls it, and regex extractors then produce no tags). arg is passed
+ * Counts a regex compile failure (PsscTagsetStats.regex_compile_failures);
+ * called by the regex runtime.
+ */
+extern void pssc_extract_note_regex_compile_failure(void);
+
+/*
+ * Installs the regex extractor hook. _PG_init installs the regex runtime
+ * (src/regex_runtime.h); NULL uninstalls it, and regex extractors then
+ * produce no tags. arg is passed
  * to fn as its first argument. See PsscRegexExtractFn for the contract.
  */
 extern PGDLLEXPORT void pssc_extract_set_regex_hook(PsscRegexExtractFn fn,

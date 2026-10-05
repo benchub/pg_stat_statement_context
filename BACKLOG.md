@@ -52,8 +52,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-10 | Regex extractor runtime | 20261005-091225-8, 20261005-091225-9 | no | ready |
-| 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | blocked-on-deps |
+| 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | ready |
 | 20261005-091225-12 | Counters (`calls`, `total_exec_time`): accumulation and bucket merge | 20261005-091225-2 | no | ready |
 | 20261005-091225-13 | Shared store core (shmem, HTAB, key, locking) | 20261005-091225-2, 20261005-091225-7, 20261005-091225-12 | no | blocked-on-deps |
 | 20261005-091225-14 | Time buckets and lazy per-entry ring rollover | 20261005-091225-13 | no | blocked-on-deps |
@@ -79,7 +78,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | blocked-on-deps |
 | 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
-| 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | no | blocked-on-deps |
+| 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | no | ready |
 | 20261005-091225-42 | Roadmap: exporter recipes and Grafana dashboard | 20261005-091225-28 | no | blocked-on-deps |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
@@ -206,25 +205,6 @@ dependencies and is not shown.
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-10: Regex extractor runtime
-
-**Description:** Implement the runtime half of the `regex` extractor (§4.2):
-- Each backend compiles patterns lazily, on first use after a config-generation change, into a private memory context that it owns, and frees the old ones with `pg_regfree`.
-- Patterns use `REG_ADVANCED` and `C_COLLATION_OID`, and are applied **only to comment text**, honoring `position`.
-- Comment bytes are converted to `pg_wchar` before matching, and capture offsets are mapped back to byte offsets. Capture group *n* maps to key *n*.
-- Raw pairs go into the pipeline from task 20261005-091225-9.
-- If lazy compilation fails (for example, out of memory), the extractor is disabled for that backend and the failure is counted. The statement never fails.
-
-**Acceptance criteria:**
-- The `svc=(\w+)\s+op=(\w+)` example from §4.2 extracts `service` and `operation`.
-- Captures in multibyte comments map to the correct bytes.
-- A config reload recompiles the patterns and frees the old ones, with no leak under Valgrind.
-- An injected compile failure disables only that extractor, increments a counter, and lets the statement succeed.
-
-**Depends on:** 20261005-091225-8, 20261005-091225-9
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-11: Debug extract function and scanner/extractor regression suite
 
 **Description:** Add a debug SQL function such as `pg_stat_statement_context_extract(query text, stmt_location int DEFAULT -1, stmt_len int DEFAULT 0) RETURNS jsonb` (§9). It runs the full extraction pipeline with the current GUC config and reports whether the heuristic path was used.
@@ -248,7 +228,7 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 
 **Depends on:** 20261005-091225-9, 20261005-091225-10
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-12: Counters (`calls`, `total_exec_time`): accumulation and bucket merge
 
@@ -882,7 +862,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Depends on:** 20261005-091225-9, 20261005-091225-10
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-42: Roadmap: exporter recipes and Grafana dashboard
 
