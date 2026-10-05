@@ -34,6 +34,7 @@ tar -C /src --exclude=./.git --exclude=./tmp \
 	--exclude='*.dSYM' --exclude=./results --exclude=./tmp_check \
 	--exclude=./log --exclude=./regression.diffs --exclude=./regression.out \
 	--exclude=./test/unit/test_scan --exclude=./test/unit/test_scan_checked \
+	--exclude=./test/unit/test_stmt --exclude=./test/unit/test_stmt_checked \
 	--exclude=./test/unit/corpus \
 	-cf - . | tar -C "$BUILD" -xf -
 chown -R postgres:postgres "$BUILD"
@@ -45,7 +46,7 @@ step "version-guard check"
 scripts/check-version-guards.sh --self-test >/dev/null || fail "version-guard self-test"
 scripts/check-version-guards.sh || fail "version-guard check"
 
-step "unit tests (src/scan.c, ASan/UBSan)"
+step "unit tests (src/scan.c lexer + statement scans, ASan/UBSan)"
 as_pg make unittest || fail "unit tests"
 
 step "make"

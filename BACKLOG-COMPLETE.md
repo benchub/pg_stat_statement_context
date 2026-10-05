@@ -68,6 +68,36 @@ Output goes to a caller-provided fixed array of `(offset, len)` spans, capped at
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-5: Statement ranges and positional (windowed) scanning
+
+**Description:** Build the statement-level scanning API on top of the lexer (§6.2, §6.5).
+
+Resolve the statement range from `stmt_location`/`stmt_len`:
+- A location of `-1` means the whole string, as in `CleanQuerytext`.
+- A length of `0` means to the end of the string. This is the only case that needs `strlen`.
+
+Choose the scan mode:
+- If the range fits within `scan_window`, lex it exactly from the front.
+- If it is longer:
+  - `prepend` lexes only the first `scan_window` bytes.
+  - `append` trims whitespace and `;` within the tail window only, requires a closing `*/`, and walks backwards to the matching `/*` while tracking nesting depth. A trailing `--` comment, or a comment that crosses the window start, yields nothing. Results from this path are flagged *heuristic*, which feeds `_info().heuristic_scans`.
+  - `any` does a full forward scan.
+
+Provide the trailing-footer fallback separately. It returns comment spans after the statement's range only when the rest of the string contains nothing except `;`, whitespace, and comments. The caller uses these spans only if the statement's own range produced no tags. The API never returns half a comment.
+
+**Acceptance criteria:**
+- Unit tests cover:
+  - `SELECT 1 /*a*/; SELECT 2 /*b*/`: each statement gets only its own comment.
+  - `SELECT 1; SELECT 2; /*controller:x*/`: only the last statement gets the footer.
+  - statements longer than `scan_window` in `append`, `prepend`, and `any` modes
+  - a string literal that ends in `*/` on the tail path, which must be flagged heuristic
+  - a comment that crosses the window start, which yields nothing
+  - `stmt_len = 0` and `stmt_location = -1`
+
+**Depends on:** 20261005-091225-4
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

@@ -52,7 +52,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-5 | Statement ranges and positional (windowed) scanning | 20261005-091225-4 | no | ready |
 | 20261005-091225-6 | SQLCommenter and marginalia pair parsers | none | no | ready |
 | 20261005-091225-7 | Core GUCs | 20261005-091225-1, 20261005-091225-2 | no | ready |
 | 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | no | blocked-on-deps |
@@ -209,36 +208,6 @@ dependencies and is not shown.
 - A failed download (e.g. a bad URL or a simulated mid-stream failure) or a checksum mismatch fails the build.
 
 **Depends on:** none
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-5: Statement ranges and positional (windowed) scanning
-
-**Description:** Build the statement-level scanning API on top of the lexer (§6.2, §6.5).
-
-Resolve the statement range from `stmt_location`/`stmt_len`:
-- A location of `-1` means the whole string, as in `CleanQuerytext`.
-- A length of `0` means to the end of the string. This is the only case that needs `strlen`.
-
-Choose the scan mode:
-- If the range fits within `scan_window`, lex it exactly from the front.
-- If it is longer:
-  - `prepend` lexes only the first `scan_window` bytes.
-  - `append` trims whitespace and `;` within the tail window only, requires a closing `*/`, and walks backwards to the matching `/*` while tracking nesting depth. A trailing `--` comment, or a comment that crosses the window start, yields nothing. Results from this path are flagged *heuristic*, which feeds `_info().heuristic_scans`.
-  - `any` does a full forward scan.
-
-Provide the trailing-footer fallback separately. It returns comment spans after the statement's range only when the rest of the string contains nothing except `;`, whitespace, and comments. The caller uses these spans only if the statement's own range produced no tags. The API never returns half a comment.
-
-**Acceptance criteria:**
-- Unit tests cover:
-  - `SELECT 1 /*a*/; SELECT 2 /*b*/`: each statement gets only its own comment.
-  - `SELECT 1; SELECT 2; /*controller:x*/`: only the last statement gets the footer.
-  - statements longer than `scan_window` in `append`, `prepend`, and `any` modes
-  - a string literal that ends in `*/` on the tail path, which must be flagged heuristic
-  - a comment that crosses the window start, which yields nothing
-  - `stmt_len = 0` and `stmt_location = -1`
-
-**Depends on:** 20261005-091225-4
 **Open questions:** none
 **Status:** ready
 
@@ -579,6 +548,8 @@ A statement planned without an active frame gets only its own tags.
 - To record, take one call plus the elapsed time from `queryDesc->totaltime` (task 20261005-091225-12) and call `store_record()` with the current bucket. No other counters (rows, buffers, WAL, JIT) are collected; pgss covers them.
 - Flush the backend-local extraction stats into the header counters.
 - Then chain.
+
+*Design note (from -5):* on PG18, `stmt_location` points at the first token, so leading comments fall before the range. Call `pssc_stmt_owned_start()` to extend the range. To keep strings with many statements O(n), cache the previous statement's end (per query string) and pass it as `from`. Starting from 0 with a gap longer than `max_bytes` silently loses PG18 leading comments.
 
 **Acceptance criteria:**
 - A commented simple-protocol `SELECT` is recorded with its tags, and its `queryid` equals the one in pgss.

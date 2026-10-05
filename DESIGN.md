@@ -237,7 +237,7 @@ Common parameters:
 
 | Param | Values | Meaning |
 |-------|--------|---------|
-| `position` | `append` / `prepend` / `any` | Where the comment is expected. `append` = last comment before optional trailing `;`/whitespace. Default when omitted: `append` for `sqlcommenter` and `marginalia`, `any` for `regex` (decided 2026-10-05). |
+| `position` | `append` / `prepend` / `any` | Where the comment is expected. `append` = the trailing run of comments (the last comment plus any immediately preceding comments separated only by whitespace) before optional trailing `;`/whitespace; `prepend` = the leading run of comments before the first token. A run, not a single comment, so that marginalia's `with_annotation` comment after the context comment doesn't hide it (decided 2026-10-05). The extractor chain decides which comments in the run to parse. Default when omitted: `append` for `sqlcommenter` and `marginalia`, `any` for `regex` (decided 2026-10-05). |
 | `keys` | `a\|b\|c` | Per-extractor allowlist. It matches the **original** key names as they appear in the comment, and is applied before `rename` (decided 2026-10-05, §6.11). |
 | `rename` | `old:new\|...` | Normalize key names across formats (`controller` vs `route`). |
 | `merge` | `on` / `off` | Union tags with earlier extractors instead of stopping. |
@@ -529,7 +529,12 @@ double-counts. Per-application cost totals should filter on `toplevel` (§7).
 ### 6.5 Multi-statement query strings
 `SELECT 1 /*a*/; SELECT 2 /*b*/` arrives as a single `sourceText`. Each
 statement's range comes from `stmt_location`/`stmt_len`. The first statement
-starts at byte 0, and each later one starts just after the preceding `;`. A
+starts at byte 0, and each later one starts just after the preceding `;`
+(PG14–17). **PG18** instead sets `stmt_location` to the statement's first
+token, so leading comments fall *before* the range. The scanner therefore
+extends a statement's owned range backwards over leading trivia, back to the
+previous `;` token boundary or the string start, found lexically, never by a
+naive search for `;`. A
 `stmt_len` of 0 means "to the end of the string", and a location of -1 means
 unknown, in which case the whole string is used, as in `CleanQuerytext`. A
 comment after the final `;` lies outside every range. A hook only knows its

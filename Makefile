@@ -28,6 +28,7 @@ PROVE_TESTS = test/t/*.pl
 
 # Standalone scanner unit tests (test/unit, built by "make unittest").
 EXTRA_CLEAN = test/unit/test_scan test/unit/test_scan_checked \
+	test/unit/test_stmt test/unit/test_stmt_checked \
 	test/unit/corpus test/unit/*.dSYM
 
 PG_CONFIG ?= pg_config
@@ -53,7 +54,8 @@ check-version-guards:
 	scripts/check-version-guards.sh --self-test
 	scripts/check-version-guards.sh
 
-# Standalone unit tests for src/scan.c under ASan/UBSan; no server needed.
+# Standalone unit tests for src/scan.c (lexer, statement ranges, positional
+# scans) under ASan/UBSan; no server needed.
 # Also runnable without pg_config: make -C test/unit
 unittest:
 	$(MAKE) -C test/unit
