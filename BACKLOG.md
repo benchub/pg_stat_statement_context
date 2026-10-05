@@ -41,12 +41,12 @@ frozen 1.0 script.
 
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
-| 20261005-091225-2 | `compat.h` PG14–18 version shims | 20261005-091225-1 | no | ready |
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
+| 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-091225-4 | Comment scanner: forward lexer | none | no | ready |
 | 20261005-091225-5 | Statement ranges and positional (windowed) scanning | 20261005-091225-4 | no | blocked-on-deps |
 | 20261005-091225-6 | SQLCommenter and marginalia pair parsers | none | no | ready |
-| 20261005-091225-7 | Core GUCs | 20261005-091225-1, 20261005-091225-2 | no | blocked-on-deps |
+| 20261005-091225-7 | Core GUCs | 20261005-091225-1, 20261005-091225-2 | no | ready |
 | 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | yes | blocked-on-questions |
 | 20261005-091225-9 | Tag-set canonicalization pipeline and extractor chain | 20261005-091225-5, 20261005-091225-6, 20261005-091225-8 | yes | blocked-on-questions |
 | 20261005-091225-10 | Regex extractor runtime | 20261005-091225-8, 20261005-091225-9 | no | blocked-on-deps |
@@ -170,30 +170,6 @@ lower-numbered task, so the graph is acyclic.
 
 ## v1 tasks
 
-### 20261005-091225-2: `compat.h` PG14–18 version shims
-
-**Description:** Collect the version differences from §6.10 in `src/compat.h`:
-- the `ExecutorRun` signature (`execute_once` was removed in PG18)
-- the `ProcessUtility` signature
-- shared-memory requests: `RequestAddinShmemSpace`/`RequestNamedLWLockTranche` in `_PG_init` on PG14, `shmem_request_hook` on PG15+
-- a helper that allocates GUC `extra` with `malloc` on PG14/15 (freed with `free()`) and `guc_malloc` on PG16+ (§4.2)
-- regex allocation context handling (PG14/15 `malloc`, PG16+ `palloc`)
-- the rows source: `es_processed` on PG14/15, `es_total_processed` on PG16+
-- availability macros for buffer, WAL, I/O-timing, and JIT fields
-- `MarkGUCPrefixReserved` (PG15+) vs `EmitWarningsOnPlaceholders` (PG14)
-- `InitMaterializedSRF` (PG15+) vs a hand-rolled materialize mode on PG14
-
-Other files should put version-dependent code behind these macros or helpers rather than scattering `PG_VERSION_NUM` checks.
-
-**Acceptance criteria:**
-- The header compiles warning-free with `-Wall` on PG14, 15, 16, 17, and 18.
-- Each shim has a one-line comment naming the versions it covers.
-- No `PG_VERSION_NUM` checks appear outside `compat.h` unless a comment justifies them.
-
-**Depends on:** 20261005-091225-1
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-3: CI matrix (PG14–18 × Linux/macOS, assert, Valgrind)
 
 **Description:** Add a GitHub Actions workflow (§9 CI matrix):
@@ -210,6 +186,20 @@ Other files should put version-dependent code behind these macros or helpers rat
 - The Valgrind job reports no errors.
 
 **Depends on:** 20261005-091225-1
+**Open questions:** none
+**Status:** ready
+
+### 20261005-101154-1: Harden exact-release source-build harness
+
+**Description:** These problems were split off from 20261005-091225-2 after its second review round. They are in the `scripts/docker-test.sh <major>.<minor>` path, which builds an exact PostgreSQL release from source using `docker/Dockerfile.source`.
+- **Missing build tools:** the source image doesn't install Bison or Flex, which PG17+ needs even when building from release tarballs. `scripts/docker-test.sh 17.0` fails with `configure: error: bison not found`.
+- **Download not verified:** the `curl … | tar` pipeline runs under `/bin/sh` without `pipefail`, so a failed or truncated download can still let the build continue. The tarball also isn't checked against a SHA-256 checksum. Fix: download to a file, verify the checksum against the official `.sha256` for that release, and only then extract.
+
+**Acceptance criteria:**
+- `scripts/docker-test.sh 17.0` and `scripts/docker-test.sh 18.0` build and pass. `scripts/docker-test.sh 15.0` still passes.
+- A failed download (e.g. a bad URL or a simulated mid-stream failure) or a checksum mismatch fails the build.
+
+**Depends on:** none
 **Open questions:** none
 **Status:** ready
 
@@ -308,7 +298,7 @@ Decoded output goes into a caller-provided bounded buffer. Decoded NUL bytes (`%
 
 **Depends on:** 20261005-091225-1, 20261005-091225-2
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-8: Extractor DSL parser and GUC check/assign hooks
 

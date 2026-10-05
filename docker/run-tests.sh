@@ -37,11 +37,20 @@ tar -C /src --exclude=./.git --exclude=./tmp \
 chown -R postgres:postgres "$BUILD"
 cd "$BUILD"
 as_pg make clean >/dev/null
+as_pg make -C test/modules/pssc_compat_test clean >/dev/null
+
+step "version-guard check"
+scripts/check-version-guards.sh --self-test >/dev/null || fail "version-guard self-test"
+scripts/check-version-guards.sh || fail "version-guard check"
 
 step "make"
 as_pg make PG_CFLAGS="-Werror" || fail "make"
 step "make install"
 make install || fail "make install"
+
+step "make install-test-modules (TEST-ONLY compat.h exerciser)"
+as_pg make -C test/modules/pssc_compat_test PG_CFLAGS="-Werror" || fail "make test modules"
+make -C test/modules/pssc_compat_test install || fail "install test modules"
 
 step "initdb"
 rm -rf "$PGDATA_DIR"

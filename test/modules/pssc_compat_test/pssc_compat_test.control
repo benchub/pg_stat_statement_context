@@ -1,0 +1,5 @@
+# TEST-ONLY: exercises src/compat.h shims; not part of pg_stat_statement_context.
+comment = 'test-only exerciser for pg_stat_statement_context compat.h shims'
+default_version = '1.0'
+module_pathname = '$libdir/pssc_compat_test'
+relocatable = true

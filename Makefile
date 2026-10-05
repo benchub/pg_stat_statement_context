@@ -2,7 +2,9 @@
 #   make && make install && make installcheck
 # installcheck needs a running server with
 #   shared_preload_libraries = 'pg_stat_statement_context'
-# (scripts/docker-test.sh <pg-major> sets one up).
+# (scripts/docker-test.sh <pg-major> sets one up). The TAP tests also need the
+# TEST-ONLY module from "make install-test-modules", which is never installed
+# by "make install".
 
 MODULE_big = pg_stat_statement_context
 OBJS = \
@@ -27,3 +29,22 @@ PROVE_TESTS = test/t/*.pl
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+# TEST-ONLY module that exercises the src/compat.h shims (test/t/002_compat.pl).
+TEST_MODULES = test/modules/pssc_compat_test
+
+.PHONY: test-modules install-test-modules clean-test-modules check-version-guards
+
+test-modules:
+	for d in $(TEST_MODULES); do $(MAKE) -C $$d PG_CONFIG=$(PG_CONFIG) || exit 1; done
+
+install-test-modules: test-modules
+	for d in $(TEST_MODULES); do $(MAKE) -C $$d PG_CONFIG=$(PG_CONFIG) install || exit 1; done
+
+clean-test-modules:
+	for d in $(TEST_MODULES); do $(MAKE) -C $$d PG_CONFIG=$(PG_CONFIG) clean || exit 1; done
+
+# PG_VERSION_NUM may only appear outside src/compat.h with a justifying comment.
+check-version-guards:
+	scripts/check-version-guards.sh --self-test
+	scripts/check-version-guards.sh
