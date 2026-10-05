@@ -538,6 +538,21 @@ pgx, JDBC, psycopg, and pgbouncer in transaction mode). If they reuse
 prepared plans across contexts, move the session/transaction override
 (`tags_override`, §8) into v1.
 
+**Result (2026-10-05, item -27, `research/driver-prepared-statements/`):** no
+target driver reuses a prepared statement across different comments. The
+statement cache is keyed by SQL text that includes the comment, and pgbouncer
+shares statements by query text. Tested with pgx 5.11, pgjdbc 42.7.13,
+psycopg 3.3.6, ActiveRecord 7.0–8.1 with pg 1.7 and marginalia 1.11, and
+pgbouncer 1.26. Native Rails `query_log_tags` (Rails 7.1+) disables prepared
+statements. Stale context appears only when the application itself reuses one
+prepared handle across requests. **Decision: `tags_override` stays on the
+roadmap (no-go for v1).** Notes for the user docs:
+- Each distinct comment value creates a separate prepared statement, so
+  high-cardinality values in comments (such as request IDs) defeat statement
+  caching.
+- On Rails 8, marginalia does not annotate some ORM paths (`pick`, `find_by`);
+  prefer `query_log_tags`.
+
 ### 6.4 Nested statements
 PL/pgSQL and trigger bodies have their own `sourceText` (the function body),
 where comments are code comments rather than request context.

@@ -248,6 +248,25 @@ Count invalid tags, dropped tags, and heuristic scans in a backend-local stats s
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-27: Validate prepared-statement behavior of target drivers
+
+**Description:** §6.3 requires this check before v1. Test whether each target driver reuses one prepared statement across different comment contexts, or whether it includes the comment in its statement-cache key or re-Parses each time:
+- Rails with `pg` (marginalia and `query_log_tags`, `prepared_statements` on)
+- `pgx` (default statement cache)
+- JDBC (`prepareThreshold`)
+- psycopg 3 (`prepare_threshold`)
+- pgbouncer in transaction mode, including `max_prepared_statements`
+
+Use server logging (`log_min_duration_statement = 0`, which logs Parse/Bind/Execute separately), so the extension isn't needed. Write up the results with the versions tested and reproduction scripts.
+
+**Acceptance criteria:**
+- Each driver has a finding with the version tested and a reproduction script.
+- An explicit go/no-go decision is recorded on moving `tags_override` (task 20261005-091225-30) into v1.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

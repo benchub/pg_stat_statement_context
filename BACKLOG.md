@@ -69,7 +69,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | blocked-on-deps |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
-| 20261005-091225-27 | Validate prepared-statement behavior of target drivers | none | no | ready |
 | 20261005-091225-28 | User documentation | 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27 | no | blocked-on-deps |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
 | 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | blocked-on-deps |
@@ -648,25 +647,6 @@ Also measure bursts at bucket boundaries (short interval) and sustained eviction
 **Open questions:** none
 **Status:** blocked-on-deps
 
-### 20261005-091225-27: Validate prepared-statement behavior of target drivers
-
-**Description:** §6.3 requires this check before v1. Test whether each target driver reuses one prepared statement across different comment contexts, or whether it includes the comment in its statement-cache key or re-Parses each time:
-- Rails with `pg` (marginalia and `query_log_tags`, `prepared_statements` on)
-- `pgx` (default statement cache)
-- JDBC (`prepareThreshold`)
-- psycopg 3 (`prepare_threshold`)
-- pgbouncer in transaction mode, including `max_prepared_statements`
-
-Use server logging (`log_min_duration_statement = 0`, which logs Parse/Bind/Execute separately), so the extension isn't needed. Write up the results with the versions tested and reproduction scripts.
-
-**Acceptance criteria:**
-- Each driver has a finding with the version tested and a reproduction script.
-- An explicit go/no-go decision is recorded on moving `tags_override` (task 20261005-091225-30) into v1.
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-28: User documentation
 
 **Description:** Write the README (and `docs/` if needed) covering:
@@ -764,6 +744,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 - 2026-10-05: Value syntax is sqlcommenter-style `k='v',k2='v2'` with URL-encoded values.
 - 2026-10-05: Override tags merge with comment tags; the `SET` value wins on key conflicts.
 - 2026-10-05: Override tags go through the same §6.11 pipeline (rename, allowlist/denylist, truncation).
+- 2026-10-05: Item -27 decided **no-go** for v1 (no driver reuses prepared statements across comments; see DESIGN.md §6.3). This stays a roadmap item.
 
 **Depends on:** 20261005-091225-18, 20261005-091225-27
 **Open questions:** none
