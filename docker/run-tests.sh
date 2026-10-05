@@ -35,7 +35,10 @@ tar -C /src --exclude=./.git --exclude=./tmp \
 	--exclude=./log --exclude=./regression.diffs --exclude=./regression.out \
 	--exclude=./test/unit/test_scan --exclude=./test/unit/test_scan_checked \
 	--exclude=./test/unit/test_stmt --exclude=./test/unit/test_stmt_checked \
+	--exclude=./test/unit/test_pairs --exclude=./test/unit/test_pairs_checked \
 	--exclude=./test/unit/corpus \
+	--exclude=./fuzz/fuzz_sqlcommenter --exclude=./fuzz/fuzz_marginalia \
+	--exclude='./fuzz/*_standalone' --exclude=./fuzz/corpus \
 	-cf - . | tar -C "$BUILD" -xf -
 chown -R postgres:postgres "$BUILD"
 cd "$BUILD"
@@ -46,7 +49,7 @@ step "version-guard check"
 scripts/check-version-guards.sh --self-test >/dev/null || fail "version-guard self-test"
 scripts/check-version-guards.sh || fail "version-guard check"
 
-step "unit tests (src/scan.c lexer + statement scans, ASan/UBSan)"
+step "unit tests (src/scan.c lexer + statement scans, src/pairs.c parsers + fuzz entry points, ASan/UBSan)"
 as_pg make unittest || fail "unit tests"
 
 step "make"

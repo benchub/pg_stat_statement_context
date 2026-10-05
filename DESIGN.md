@@ -245,10 +245,23 @@ Common parameters:
 Format-specific parameters:
 
 - **sqlcommenter**: `/*key='value',key2='value2'*/`. Values are URL-decoded
-  and `\'` is unescaped. Parameters: `url_decode=on|off`.
+  and `\'` is unescaped. Parameters: `url_decode=on|off`. With `url_decode=on`,
+  keys and values are both decoded. `%XX` is decoded and a raw `+` becomes a
+  space, so Go and Java emitters (form encoding) and Python and Node emitters
+  (`%20`) give the same value; `%2B` is a literal `+`. An invalid `%` escape is
+  kept literally and flagged. Only `\'` and `\\` are unescaped. Values must
+  be single-quoted, and a `,` inside quotes doesn't split.
 - **marginalia**: `/*application:Foo,controller:users,action:show*/`. Splits
   on the first `kv_sep` only, because values like `line:app/models/u.rb:12`
-  contain colons. Parameters: `kv_sep=':'`, `pair_sep=','`.
+  contain colons. Parameters: `kv_sep=':'`, `pair_sep=','`. Pairs are split
+  first, so `pair_sep` wins when the separators overlap. No decoding is done.
+- **Both parsers:** ASCII whitespace is trimmed around the body, each pair,
+  and each key and value. Empty segments are ignored. A segment without a
+  separator, or a key that contains whitespace, is malformed: it is skipped
+  and counted. That keeps free-text annotations such as marginalia's
+  `with_annotation` from turning into tags. Decoded NUL bytes are flagged and
+  rejected by the pipeline (§6.11). The parsers live in `src/pairs.c`, have
+  no backend dependencies and never allocate (decided 2026-10-05).
 - **regex**: `regex(pattern='...', keys='k1|k2', position=any)`. Uses the core
   regex engine (`pg_regcomp`/`pg_regexec`) with `REG_ADVANCED` and the C
   collation (`C_COLLATION_OID`, which needs no catalog access). Capture group

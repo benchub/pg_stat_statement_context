@@ -16,4 +16,12 @@ tmp/
 /test/unit/test_scan_checked
 /test/unit/test_stmt
 /test/unit/test_stmt_checked
+/test/unit/test_pairs
+/test/unit/test_pairs_checked
+/test/unit/pairs_alloc_check.o
 /test/unit/corpus/
+# fuzz targets (fuzz/)
+/fuzz/fuzz_sqlcommenter
+/fuzz/fuzz_marginalia
+/fuzz/*_standalone
+/fuzz/corpus/

@@ -52,7 +52,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-6 | SQLCommenter and marginalia pair parsers | none | no | ready |
+| 20261005-121022-1 | marginalia: count malformed pairs when `kv_sep` starts with whitespace | none | no | ready |
 | 20261005-091225-7 | Core GUCs | 20261005-091225-1, 20261005-091225-2 | no | ready |
 | 20261005-091225-8 | Extractor DSL parser and GUC check/assign hooks | 20261005-091225-7 | no | blocked-on-deps |
 | 20261005-091225-9 | Tag-set canonicalization pipeline and extractor chain | 20261005-091225-5, 20261005-091225-6, 20261005-091225-8 | no | blocked-on-deps |
@@ -211,27 +211,13 @@ dependencies and is not shown.
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-6: SQLCommenter and marginalia pair parsers
+### 20261005-121022-1: marginalia: count malformed pairs when `kv_sep` starts with whitespace
 
-**Description:** Write pure-C parsers with no backend dependencies (§4.2, §9 fuzzing) that turn one comment body into raw `(key, value)` pairs:
-- **SQLCommenter:** `key='value',key2='value2'`. Values are URL-decoded when `url_decode=on` (the default), and `\'` is unescaped.
-- **marginalia:** pairs are split on `pair_sep` (default `,`), and each pair is split on the **first** `kv_sep` (default `:`), so `line:app/models/u.rb:12` keeps its colons.
-
-Decoded output goes into a caller-provided bounded buffer. Decoded NUL bytes (`%00`) are kept and flagged so the pipeline can reject them (§6.11). Malformed pairs are skipped and counted, and the parsers never fail.
-
-*Design note:* §4.2 doesn't specify whitespace handling. Proposed default: trim ASCII whitespace around the comment body and around each pair, then document it.
+**Description:** Split off from 20261005-091225-6 after its second review round. In `src/pairs.c` (~433–443, 470–475), the `blank` check looks only at the first byte of a matched `kv_sep`. Advancing by `kvlen` then skips its other bytes, so with a separator that starts with whitespace (e.g. `kv_sep=" :"`), a segment such as `" :"` is treated as blank. The result is `npairs=0, nmalformed=0` where it should be `nmalformed=1`. Fix this by counting every consumed separator byte when deciding whether a segment is blank. Also consider having the extractor DSL (-8) reject or trim separators that have leading or trailing whitespace.
 
 **Acceptance criteria:**
-- Unit tests cover:
-  - the examples in §4.2
-  - values that contain colons
-  - escaped quotes
-  - valid and invalid `%` escapes, including `%00`
-  - empty keys and values
-  - custom `kv_sep`/`pair_sep`
-  - `url_decode=off`
-- The parsers allocate nothing beyond the caller buffer.
-- Each parser has an entry point suitable for libFuzzer.
+- `kv_sep=" :"` with body `" :"` gives `nmalformed=1`, and a genuinely whitespace-only segment is still ignored and not counted.
+- The marginalia fuzz differential check covers separators that start with whitespace, including multi-byte ones.
 
 **Depends on:** none
 **Open questions:** none

@@ -11,6 +11,7 @@ OBJS = \
 	src/pg_stat_statement_context.o \
 	src/guc.o \
 	src/scan.o \
+	src/pairs.o \
 	src/extract.o \
 	src/context.o \
 	src/store.o
@@ -26,10 +27,16 @@ REGRESS_OPTS = --inputdir=test \
 TAP_TESTS = 1
 PROVE_TESTS = test/t/*.pl
 
-# Standalone scanner unit tests (test/unit, built by "make unittest").
+# Standalone unit tests (test/unit) and fuzz targets (fuzz/), built by
+# "make unittest".
 EXTRA_CLEAN = test/unit/test_scan test/unit/test_scan_checked \
 	test/unit/test_stmt test/unit/test_stmt_checked \
-	test/unit/corpus test/unit/*.dSYM
+	test/unit/test_pairs test/unit/test_pairs_checked \
+	test/unit/pairs_alloc_check.o \
+	test/unit/corpus test/unit/*.dSYM \
+	fuzz/fuzz_sqlcommenter fuzz/fuzz_marginalia \
+	fuzz/fuzz_sqlcommenter_standalone fuzz/fuzz_marginalia_standalone \
+	fuzz/corpus fuzz/*.dSYM
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -55,7 +62,10 @@ check-version-guards:
 	scripts/check-version-guards.sh
 
 # Standalone unit tests for src/scan.c (lexer, statement ranges, positional
-# scans) under ASan/UBSan; no server needed.
-# Also runnable without pg_config: make -C test/unit
+# scans) and src/pairs.c (SQLCommenter/marginalia parsers) under ASan/UBSan,
+# then the parser fuzz targets through their standalone driver; no server
+# needed. Also runnable without pg_config: make -C test/unit; make -C fuzz
+# (libFuzzer builds: make -C fuzz fuzz, needs clang with -fsanitize=fuzzer).
 unittest:
 	$(MAKE) -C test/unit
+	$(MAKE) -C fuzz check

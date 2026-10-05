@@ -98,6 +98,32 @@ Provide the trailing-footer fallback separately. It returns comment spans after 
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-6: SQLCommenter and marginalia pair parsers
+
+**Description:** Write pure-C parsers with no backend dependencies (§4.2, §9 fuzzing) that turn one comment body into raw `(key, value)` pairs:
+- **SQLCommenter:** `key='value',key2='value2'`. Values are URL-decoded when `url_decode=on` (the default), and `\'` is unescaped.
+- **marginalia:** pairs are split on `pair_sep` (default `,`), and each pair is split on the **first** `kv_sep` (default `:`), so `line:app/models/u.rb:12` keeps its colons.
+
+Decoded output goes into a caller-provided bounded buffer. Decoded NUL bytes (`%00`) are kept and flagged so the pipeline can reject them (§6.11). Malformed pairs are skipped and counted, and the parsers never fail.
+
+*Design note:* §4.2 doesn't specify whitespace handling. Proposed default: trim ASCII whitespace around the comment body and around each pair, then document it.
+
+**Acceptance criteria:**
+- Unit tests cover:
+  - the examples in §4.2
+  - values that contain colons
+  - escaped quotes
+  - valid and invalid `%` escapes, including `%00`
+  - empty keys and values
+  - custom `kv_sep`/`pair_sep`
+  - `url_decode=off`
+- The parsers allocate nothing beyond the caller buffer.
+- Each parser has an entry point suitable for libFuzzer.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
