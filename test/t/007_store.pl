@@ -4,7 +4,8 @@
 # recording (pgbench), max_entries enforcement (eviction itself is
 # test/t/009_eviction.pl), forced hash collisions,
 # header counters and reset. The store is driven through the TEST-ONLY
-# module test/modules/pssc_store_test (make install-test-modules).
+# module test/modules/pssc_store_test (make install-test-modules), with its
+# shared debug clock pinned in bucket 0 after every restart (configure()).
 use strict;
 use warnings;
 
@@ -39,6 +40,15 @@ sub counters
 	return \%c;
 }
 # ALTER SYSTEM the postmaster settings (undef: RESET) and restart.
+#
+# The tests below expect explicit bucket ids (0, 1, 3, 9999, ...) and records
+# from the clock to land where they say, but every write is clamped up to the
+# clock's bucket (DESIGN.md §5.2): once the wall clock crosses a bucket
+# boundary after the restart (bucket 0 ends at the next multiple of 300 s),
+# they would land in bucket 1. So the shared debug clock is pinned in the
+# middle of bucket 0 right after the restart, before anything can advance
+# the current_bucket watermark (it starts at 0, and only store reads and
+# writes move it). The pin lasts until the next restart (resets keep it).
 sub configure
 {
 	my (%g) = @_;
@@ -48,6 +58,12 @@ sub configure
 		else { sql("ALTER SYSTEM RESET $P.$k"); }
 	}
 	$node->restart;
+	is(sql(q{SELECT pssc_store_test_pin_clock(pssc_store_test_bucket_start(0)
+	                  + (interval_us / 2 || ' microseconds')::interval)
+	           FROM pssc_store_test_buckets();
+	         SELECT current_bucket || ' ' || clock_bucket || ' ' || clock_mode
+	           FROM pssc_store_test_buckets()}) =~ s/^\s+//r,
+		'0 0 pinned', 'restart: debug clock pinned in bucket 0, current_bucket 0');
 }
 # Slots of the entries, "queryid:tags:slot:bucket:calls:time" per row.
 sub slots

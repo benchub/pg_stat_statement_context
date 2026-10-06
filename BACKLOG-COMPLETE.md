@@ -980,6 +980,16 @@ The execution-time CPU limits (item -10) don't cover compile. Options (decide an
 **Open questions:** none
 **Status:** done
 
+### 20261006-093831-1: Flaky TAP 007: boundary-value bucket tests depend on the wall clock
+
+**Description:** `test/t/007_store.pl` lines ~162–175 restart with `bucket_count=10000` (default `bucket_interval=300`), record once via the clock (`rec(q{1, ...})`, no explicit bucket), then expect `record_at(..., 0)` to land in slot/bucket 0. If the clock bucket has advanced to 1 by then (a 300 s boundary crossed since the store's epoch, or a slow host), writes clamp to the current watermark and land in bucket 1. Seen once on PG18 during -39's harness: got `2::1:1:1:1 2::9999:9999:1:1`, expected `2::0:0:1:1 2::9999:9999:1:1`; passed on rerun.
+
+**Acceptance criteria:** the test pins the clock (the store has a debug clock offset, `PSSC_DEBUG_CLOCK_MAX_OFFSET`) or otherwise avoids depending on the wall clock; 007 passes reliably; audit other tests in 007/008/018 that use `record_at` after a clock-based record for the same pattern.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

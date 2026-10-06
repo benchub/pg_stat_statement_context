@@ -53,7 +53,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | yes | blocked-on-questions |
 | 20261006-092320-1 | Flaky TAP 004: "every alternating reload replaced the extractors" (28 of 30) | — | no | ready |
-| 20261006-093831-1 | Flaky TAP 007: boundary-value bucket tests depend on the wall clock | — | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | yes | blocked-on-questions |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
@@ -194,16 +193,6 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 - Root cause identified (e.g. by logging the rejection reason in the test, or raising the backend log level for the session) and documented.
 - If it's the compile limit: decide whether a value already accepted by the postmaster should be rejected in a backend because of time alone (e.g. skip the time limit in the SIGHUP re-check, or apply it only in SET/ALTER SYSTEM), fix, and add a test.
 - 004 passes 20 consecutive runs on PG18 under load (e.g. run alongside another harness).
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
-
-### 20261006-093831-1: Flaky TAP 007: boundary-value bucket tests depend on the wall clock
-
-**Description:** `test/t/007_store.pl` lines ~162–175 restart with `bucket_count=10000` (default `bucket_interval=300`), record once via the clock (`rec(q{1, ...})`, no explicit bucket), then expect `record_at(..., 0)` to land in slot/bucket 0. If the clock bucket has advanced to 1 by then (a 300 s boundary crossed since the store's epoch, or a slow host), writes clamp to the current watermark and land in bucket 1. Seen once on PG18 during -39's harness: got `2::1:1:1:1 2::9999:9999:1:1`, expected `2::0:0:1:1 2::9999:9999:1:1`; passed on rerun.
-
-**Acceptance criteria:** the test pins the clock (the store has a debug clock offset, `PSSC_DEBUG_CLOCK_MAX_OFFSET`) or otherwise avoids depending on the wall clock; 007 passes reliably; audit other tests in 007/008/018 that use `record_at` after a clock-based record for the same pattern.
 
 **Depends on:** none
 **Open questions:** none
