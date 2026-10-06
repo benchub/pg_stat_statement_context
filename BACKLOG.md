@@ -54,7 +54,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261006-021334-1 | Bound regex compile cost (pathological patterns stall first tagged query) | 20261005-091225-10 | no | ready |
 | 20261006-043919-1 | Reduce eviction-pass lock hold time (sustained churn triples p99) | 20261005-091225-26 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
-| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | ready |
+| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | yes | blocked-on-questions |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
