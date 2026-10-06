@@ -7,15 +7,17 @@
  * rejects PG_VERSION_NUM anywhere else unless a "version-guard-ok:" comment
  * justifies it. Every shim is exercised on each supported version by the
  * TEST-ONLY module test/modules/pssc_compat_test (test/t/002_compat.pl).
+ *
+ * Only shims that the extension (or a test module) uses belong here. v1
+ * stores only calls and total_exec_time, which exist on every supported
+ * version, so there are no counter-availability shims (DESIGN.md §6.10).
  */
 #ifndef PSSC_COMPAT_H
 #define PSSC_COMPAT_H
 
 #include "executor/executor.h"
-#include "executor/instrument.h"
 #include "fmgr.h"
 #include "funcapi.h"
-#include "jit/jit.h"
 #include "miscadmin.h"
 #include "optimizer/planner.h"
 #include "regex/regex.h"
@@ -158,12 +160,6 @@ pssc_guc_extra_alloc(Size size)
  * on PG14/15 the memory is malloc'd and deleting cxt does not free it.
  */
 /* PG14/15: regex library uses malloc (cxt unused); PG16+: palloc in CurrentMemoryContext. */
-#if PG_VERSION_NUM >= 160000
-#define PSSC_REGEX_USES_PALLOC 1
-#else
-#define PSSC_REGEX_USES_PALLOC 0
-#endif
-
 static inline int
 pssc_regcomp(MemoryContext cxt, regex_t *re, const pg_wchar *pattern,
 			 size_t len, int flags, Oid collation)
@@ -176,57 +172,6 @@ pssc_regcomp(MemoryContext cxt, regex_t *re, const pg_wchar *pattern,
 }
 
 #define pssc_regfree(re) pg_regfree(re)
-
-/* Rows for a finished statement, matching pg_stat_statements. */
-/* PG14/15: es_processed (last ExecutorRun only); PG16+: es_total_processed. */
-#if PG_VERSION_NUM >= 160000
-#define PSSC_QUERYDESC_ROWS(qd) ((qd)->estate->es_total_processed)
-#else
-#define PSSC_QUERYDESC_ROWS(qd) ((qd)->estate->es_processed)
-#endif
-
-/*
- * Buffer, WAL, I/O-timing and JIT counter availability. Fields present on
- * every supported version (shared/local/temp blks_*, wal_records, wal_fpi,
- * wal_bytes, JIT created_functions and *_counter except deform_counter) need
- * no macro. Test the PSSC_HAS_* macros with #if; they are always defined.
- */
-/* PG15+: BufferUsage.temp_blk_read_time/temp_blk_write_time (absent on PG14). */
-#if PG_VERSION_NUM >= 150000
-#define PSSC_HAS_TEMP_BLK_IO_TIME 1
-#else
-#define PSSC_HAS_TEMP_BLK_IO_TIME 0
-#endif
-
-/* PG17+: BufferUsage.local_blk_read_time/local_blk_write_time (absent on PG14-16). */
-#if PG_VERSION_NUM >= 170000
-#define PSSC_HAS_LOCAL_BLK_IO_TIME 1
-#else
-#define PSSC_HAS_LOCAL_BLK_IO_TIME 0
-#endif
-
-/* PG14-16: BufferUsage.blk_read_time/blk_write_time; PG17+: renamed shared_blk_*_time. */
-#if PG_VERSION_NUM >= 170000
-#define PSSC_SHARED_BLK_READ_TIME(bu) ((bu).shared_blk_read_time)
-#define PSSC_SHARED_BLK_WRITE_TIME(bu) ((bu).shared_blk_write_time)
-#else
-#define PSSC_SHARED_BLK_READ_TIME(bu) ((bu).blk_read_time)
-#define PSSC_SHARED_BLK_WRITE_TIME(bu) ((bu).blk_write_time)
-#endif
-
-/* PG18+: WalUsage.wal_buffers_full (absent on PG14-17). */
-#if PG_VERSION_NUM >= 180000
-#define PSSC_HAS_WAL_BUFFERS_FULL 1
-#else
-#define PSSC_HAS_WAL_BUFFERS_FULL 0
-#endif
-
-/* PG17+: JitInstrumentation.deform_counter (absent on PG14-16). */
-#if PG_VERSION_NUM >= 170000
-#define PSSC_HAS_JIT_DEFORM_COUNTER 1
-#else
-#define PSSC_HAS_JIT_DEFORM_COUNTER 0
-#endif
 
 /*
  * Reserve the GUC prefix after defining custom GUCs, so misspelled
@@ -242,6 +187,9 @@ pssc_regcomp(MemoryContext cxt, regex_t *re, const pg_wchar *pattern,
 /*
  * Set up a materialize-mode SRF: after the call, fill
  * ((ReturnSetInfo *) fcinfo->resultinfo)->setResult using ->setDesc.
+ * The PSSC_MAT_SRF_* flags are part of this shim's interface even though
+ * current callers pass 0: they keep the PG14 fallback equivalent to core's
+ * InitMaterializedSRF, so a caller can start using them on every version.
  */
 /* PG15.1+: core InitMaterializedSRF; PG15.0: same function named SetSingleFuncCall; PG14: hand-rolled below. */
 #if PG_VERSION_NUM >= 150001

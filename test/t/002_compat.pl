@@ -13,7 +13,6 @@ my $node = PostgreSQL::Test::Cluster->new('compat');
 $node->init;
 $node->append_conf('postgresql.conf', q{
 shared_preload_libraries = 'pssc_compat_test'
-track_io_timing = on
 # Placeholder under the reserved prefix, present before the module loads.
 pssc_compat_test.bogus = 'x'
 });
@@ -33,9 +32,8 @@ is($node->safe_psql('postgres', 'SELECT pssc_compat_test_shmem_bump()'),
 is($node->safe_psql('postgres', 'SELECT pssc_compat_test_shmem_bump()'),
 	'2', 'shmem: counter is shared across backends');
 
-# ---- ExecutorRun signature, rows source, ProcessUtility signature ----
-# FETCH 2 then FETCH 3 runs the executor twice. pgss reports es_processed
-# (last run only) on PG14/15 and es_total_processed on PG16+.
+# ---- ExecutorRun and ProcessUtility signatures ----
+# FETCH 2 then FETCH 3 runs the executor twice.
 my $out = $node->safe_psql('postgres', q{
 BEGIN;
 SELECT pssc_compat_test_reset();
@@ -43,12 +41,10 @@ DECLARE c CURSOR FOR SELECT g FROM generate_series(1, 10) g;
 FETCH 2 FROM c;
 FETCH 3 FROM c;
 CLOSE c;
-SELECT executor_runs, last_rows, utility_calls FROM pssc_compat_test_stats();
+SELECT executor_runs, utility_calls FROM pssc_compat_test_stats();
 COMMIT;
 });
-my $expected_rows = $vnum >= 160000 ? 5 : 3;
-is($out, "\n1\n2\n3\n4\n5\n3|$expected_rows|4",
-	"ExecutorRun/ProcessUtility pass-through; rows source gives $expected_rows");
+is($out, "\n1\n2\n3\n4\n5\n3|4", 'ExecutorRun/ProcessUtility pass-through');
 
 # ---- GUC extra allocator: malloc on PG14/15, guc_malloc on PG16+ ----
 is( $node->safe_psql('postgres',
@@ -124,29 +120,6 @@ is($node->safe_psql('postgres', 'SELECT * FROM pssc_compat_test_srf_scalar(2, bl
 like($stderr,
 	qr/set-valued function called in context that cannot accept a set/,
 	'SRF: rejects a call without ReturnSetInfo');
-
-# ---- buffer / WAL / I-O timing / JIT availability macros ----
-my @fields;
-push @fields, 'temp_blk_read_time', 'temp_blk_write_time' if $vnum >= 150000;
-push @fields, 'local_blk_read_time', 'local_blk_write_time' if $vnum >= 170000;
-push @fields, 'wal_buffers_full' if $vnum >= 180000;
-push @fields, 'jit_deform_counter' if $vnum >= 170000;
-is($node->safe_psql('postgres', 'SELECT pssc_compat_test_counter_fields()'),
-	'{' . join(',', @fields) . '}', 'counter availability macros match version');
-$node->safe_psql('postgres', 'CREATE TABLE usage_t (a int)');
-is( $node->safe_psql('postgres', q{
-SELECT shared_blks > 0, wal_records > 0
-  FROM pssc_compat_test_usage_delta('INSERT INTO usage_t SELECT generate_series(1, 1000)')}),
-	't|t', 'buffer/WAL usage deltas are recorded');
-
-# BufferUsage instr_time slots: shared r/w, [local r/w (PG17+)], [temp r/w (PG15+)].
-# Fixture slot k holds k+1 units, so each accessor must return its exact slot.
-my $blk_time_expected =
-	  $vnum >= 170000 ? '6|1|2|3|4|5|6'
-	: $vnum >= 150000 ? '4|1|2|||3|4'
-	:                   '2|1|2||||';
-is($node->safe_psql('postgres', 'SELECT * FROM pssc_compat_test_blk_time_accessors()'),
-	$blk_time_expected, 'I/O time accessors read the right BufferUsage fields');
 
 # ---- src/counters.h: executor/utility time in ms, exactly as pgss ----
 # The helper must end the instrumentation loop itself (total is 0 before),

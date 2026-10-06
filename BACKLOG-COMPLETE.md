@@ -750,6 +750,24 @@ It must also list the limitations:
 **Open questions:** none
 **Status:** done
 
+### 20261005-103941-1: Trim unused counter-availability shims from `compat.h`
+
+**Description:** Task 20261005-091225-2 landed counter-availability shims in `src/compat.h` for the larger counter set that was dropped on 2026-10-05 (the extension now stores only `calls` and `total_exec_time`, §5.1, §6.10). Once tasks 20261005-091225-12 and 20261005-091225-17 have settled which shims are actually used, remove or trim the unused ones:
+- `PSSC_QUERYDESC_ROWS` (`es_processed` vs `es_total_processed`)
+- `PSSC_HAS_TEMP_BLK_IO_TIME`, `PSSC_HAS_LOCAL_BLK_IO_TIME`, `PSSC_SHARED_BLK_READ_TIME`/`PSSC_SHARED_BLK_WRITE_TIME`
+- `PSSC_HAS_WAL_BUFFERS_FULL`, `PSSC_HAS_JIT_DEFORM_COUNTER`
+
+Remove the matching cases from the compat test module (`test/modules/pssc_compat_test`) and `test/t/002_compat.pl`. Keep every shim that some source file uses.
+
+**Acceptance criteria:**
+- No shim remains in `compat.h` that nothing outside the compat test module uses, except where a comment justifies keeping it.
+- The compat test module and TAP test no longer reference removed shims, and the full suite passes on PG14–18.
+- The header still compiles warning-free with `-Wall` on PG14–18.
+
+**Depends on:** 20261005-091225-17
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

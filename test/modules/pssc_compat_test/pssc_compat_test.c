@@ -7,8 +7,8 @@
  * the top-level "make install". It exists so test/t/002_compat.pl can check,
  * on each supported PostgreSQL major version, that each compat.h shim
  * compiles warning-free *and* behaves as the version requires (for example,
- * that the GUC extra allocator matches how guc.c frees it, or that the rows
- * source matches pg_stat_statements). It must be preloaded via
+ * that the GUC extra allocator matches how guc.c frees it, or that the regex
+ * shim compiles into the caller's context where it can). It must be preloaded via
  * shared_preload_libraries.
  *
  * It deliberately contains no version checks: all version knowledge
@@ -17,11 +17,8 @@
  */
 #include "postgres.h"
 
-#include <math.h>
-
 #include "catalog/pg_collation.h"
 #include "executor/executor.h"
-#include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -59,11 +56,9 @@ static TestShared *test_shared = NULL;
 static pssc_shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
-static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
 static int64 executor_runs = 0;
-static int64 last_rows = -1;
 static int64 utility_calls = 0;
 
 static char *guc_extra_value = NULL;
@@ -99,7 +94,7 @@ test_shmem_startup(void)
 	LWLockRelease(AddinShmemInitLock);
 }
 
-/* ---- ExecutorRun / ExecutorEnd (rows) / ProcessUtility shims ---- */
+/* ---- ExecutorRun / ProcessUtility shims ---- */
 
 static void
 test_ExecutorRun(PSSC_EXECUTOR_RUN_PARAMS)
@@ -109,17 +104,6 @@ test_ExecutorRun(PSSC_EXECUTOR_RUN_PARAMS)
 		prev_ExecutorRun(PSSC_EXECUTOR_RUN_ARGS);
 	else
 		standard_ExecutorRun(PSSC_EXECUTOR_RUN_ARGS);
-}
-
-static void
-test_ExecutorEnd(QueryDesc *queryDesc)
-{
-	if (queryDesc->estate)
-		last_rows = (int64) PSSC_QUERYDESC_ROWS(queryDesc);
-	if (prev_ExecutorEnd)
-		prev_ExecutorEnd(queryDesc);
-	else
-		standard_ExecutorEnd(queryDesc);
 }
 
 static void
@@ -198,8 +182,6 @@ _PG_init(void)
 
 	prev_ExecutorRun = ExecutorRun_hook;
 	ExecutorRun_hook = test_ExecutorRun;
-	prev_ExecutorEnd = ExecutorEnd_hook;
-	ExecutorEnd_hook = test_ExecutorEnd;
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = test_ProcessUtility;
 }
@@ -228,7 +210,6 @@ Datum
 pssc_compat_test_reset(PG_FUNCTION_ARGS)
 {
 	executor_runs = 0;
-	last_rows = -1;
 	utility_calls = 0;
 	PG_RETURN_VOID();
 }
@@ -238,15 +219,14 @@ Datum
 pssc_compat_test_stats(PG_FUNCTION_ARGS)
 {
 	TupleDesc	tupdesc;
-	Datum		values[3];
-	bool		nulls[3] = {false, false, false};
+	Datum		values[2];
+	bool		nulls[2] = {false, false};
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
 
 	values[0] = Int64GetDatum(executor_runs);
-	values[1] = Int64GetDatum(last_rows);
-	values[2] = Int64GetDatum(utility_calls);
+	values[1] = Int64GetDatum(utility_calls);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
@@ -403,152 +383,6 @@ pssc_compat_test_srf_direct(PG_FUNCTION_ARGS)
 {
 	DirectFunctionCall2(pssc_compat_test_srf, Int32GetDatum(1), BoolGetDatum(false));
 	PG_RETURN_VOID();
-}
-
-/* Names of the version-dependent counter fields compiled in. */
-PG_FUNCTION_INFO_V1(pssc_compat_test_counter_fields);
-Datum
-pssc_compat_test_counter_fields(PG_FUNCTION_ARGS)
-{
-	Datum		names[8];
-	int			n = 0;
-
-#if PSSC_HAS_TEMP_BLK_IO_TIME
-	names[n++] = CStringGetTextDatum("temp_blk_read_time");
-	names[n++] = CStringGetTextDatum("temp_blk_write_time");
-#endif
-#if PSSC_HAS_LOCAL_BLK_IO_TIME
-	names[n++] = CStringGetTextDatum("local_blk_read_time");
-	names[n++] = CStringGetTextDatum("local_blk_write_time");
-#endif
-#if PSSC_HAS_WAL_BUFFERS_FULL
-	names[n++] = CStringGetTextDatum("wal_buffers_full");
-#endif
-#if PSSC_HAS_JIT_DEFORM_COUNTER
-	names[n++] = CStringGetTextDatum("jit_deform_counter");
-#endif
-
-	PG_RETURN_ARRAYTYPE_P(construct_array(names, n, TEXTOID, -1, false, TYPALIGN_INT));
-}
-
-/*
- * Shared-block I/O time accessors. Fills every instr_time field of a
- * BufferUsage fixture positionally with distinct values: slot k holds
- * (k + 1) * unit. On every supported version these fields are contiguous
- * after temp_blks_written, in the order shared read, shared write, [local
- * read, local write,] [temp read, temp write]; the TAP test checks the slot
- * count per version, which guards that assumption. Each accessor result is
- * returned as a multiple of unit, so reading the wrong field (or nothing)
- * gives a wrong number.
- */
-PG_FUNCTION_INFO_V1(pssc_compat_test_blk_time_accessors);
-Datum
-pssc_compat_test_blk_time_accessors(PG_FUNCTION_ARGS)
-{
-	BufferUsage bu;
-	instr_time	start,
-				unit,
-				acc;
-	instr_time *slots;
-	int			nslots;
-	int			k;
-	double		unit_s;
-	TupleDesc	tupdesc;
-	Datum		values[7];
-	bool		nulls[7] = {false, false, false, true, true, true, true};
-
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
-
-	/* A small, nonzero time unit (instr_time has no portable setter). */
-	INSTR_TIME_SET_CURRENT(start);
-	pg_usleep(2000);
-	INSTR_TIME_SET_CURRENT(unit);
-	INSTR_TIME_SUBTRACT(unit, start);
-	unit_s = INSTR_TIME_GET_DOUBLE(unit);
-	if (unit_s <= 0)
-		elog(ERROR, "clock did not advance");
-
-	memset(&bu, 0, sizeof(bu));
-	slots = (instr_time *) ((char *) &bu + offsetof(BufferUsage, temp_blks_written) +
-							sizeof(bu.temp_blks_written));
-	nslots = (int) (((char *) &bu + sizeof(bu) - (char *) slots) / sizeof(instr_time));
-	INSTR_TIME_SET_ZERO(acc);
-	for (k = 0; k < nslots; k++)
-	{
-		INSTR_TIME_ADD(acc, unit);
-		slots[k] = acc;
-	}
-
-#define UNITS(t) Int32GetDatum((int32) rint(INSTR_TIME_GET_DOUBLE(t) / unit_s))
-	values[0] = Int32GetDatum(nslots);
-	values[1] = UNITS(PSSC_SHARED_BLK_READ_TIME(bu));
-	values[2] = UNITS(PSSC_SHARED_BLK_WRITE_TIME(bu));
-#if PSSC_HAS_LOCAL_BLK_IO_TIME
-	values[3] = UNITS(bu.local_blk_read_time);
-	values[4] = UNITS(bu.local_blk_write_time);
-	nulls[3] = nulls[4] = false;
-#endif
-#if PSSC_HAS_TEMP_BLK_IO_TIME
-	values[5] = UNITS(bu.temp_blk_read_time);
-	values[6] = UNITS(bu.temp_blk_write_time);
-	nulls[5] = nulls[6] = false;
-#endif
-#undef UNITS
-
-	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
-}
-
-/*
- * Runs a query via SPI and reports buffer and WAL deltas; also compiles
- * against the version-dependent WAL and JIT fields.
- */
-PG_FUNCTION_INFO_V1(pssc_compat_test_usage_delta);
-Datum
-pssc_compat_test_usage_delta(PG_FUNCTION_ARGS)
-{
-	char	   *query = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	BufferUsage buf_before = pgBufferUsage;
-	WalUsage	wal_before = pgWalUsage;
-	BufferUsage buf_delta;
-	WalUsage	wal_delta;
-	JitInstrumentation jit;
-	TupleDesc	tupdesc;
-	Datum		values[2];
-	bool		nulls[2] = {false, false};
-
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
-
-	SPI_connect();
-	if (SPI_execute(query, false, 0) < 0)
-		elog(ERROR, "SPI_execute failed: %s", query);
-	SPI_finish();
-
-	memset(&buf_delta, 0, sizeof(buf_delta));
-	memset(&wal_delta, 0, sizeof(wal_delta));
-	BufferUsageAccumDiff(&buf_delta, &pgBufferUsage, &buf_before);
-	WalUsageAccumDiff(&wal_delta, &pgWalUsage, &wal_before);
-
-#if PSSC_HAS_WAL_BUFFERS_FULL
-	if (wal_delta.wal_buffers_full < 0)
-		elog(ERROR, "negative wal_buffers_full delta");
-#endif
-
-	/* JIT fields are only compiled against here; no JIT runs in the test. */
-	memset(&jit, 0, sizeof(jit));
-	if (INSTR_TIME_GET_DOUBLE(jit.generation_counter) != 0)
-		elog(ERROR, "unexpected JIT generation time");
-#if PSSC_HAS_JIT_DEFORM_COUNTER
-	if (INSTR_TIME_GET_DOUBLE(jit.deform_counter) != 0)
-		elog(ERROR, "unexpected JIT deform time");
-#endif
-
-	values[0] = Int64GetDatum(buf_delta.shared_blks_hit + buf_delta.shared_blks_read +
-							  buf_delta.shared_blks_dirtied + buf_delta.shared_blks_written);
-	values[1] = Int64GetDatum(wal_delta.wal_records);
-
-	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
 /*

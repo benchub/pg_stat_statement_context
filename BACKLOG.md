@@ -56,7 +56,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
-| 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | ready |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
@@ -260,24 +259,6 @@ Also measure bursts at bucket boundaries (short interval) and sustained eviction
 **Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28
 **Open questions:** none
 **Status:** blocked-on-deps
-
-### 20261005-103941-1: Trim unused counter-availability shims from `compat.h`
-
-**Description:** Task 20261005-091225-2 landed counter-availability shims in `src/compat.h` for the larger counter set that was dropped on 2026-10-05 (the extension now stores only `calls` and `total_exec_time`, §5.1, §6.10). Once tasks 20261005-091225-12 and 20261005-091225-17 have settled which shims are actually used, remove or trim the unused ones:
-- `PSSC_QUERYDESC_ROWS` (`es_processed` vs `es_total_processed`)
-- `PSSC_HAS_TEMP_BLK_IO_TIME`, `PSSC_HAS_LOCAL_BLK_IO_TIME`, `PSSC_SHARED_BLK_READ_TIME`/`PSSC_SHARED_BLK_WRITE_TIME`
-- `PSSC_HAS_WAL_BUFFERS_FULL`, `PSSC_HAS_JIT_DEFORM_COUNTER`
-
-Remove the matching cases from the compat test module (`test/modules/pssc_compat_test`) and `test/t/002_compat.pl`. Keep every shim that some source file uses.
-
-**Acceptance criteria:**
-- No shim remains in `compat.h` that nothing outside the compat test module uses, except where a comment justifies keeping it.
-- The compat test module and TAP test no longer reference removed shims, and the full suite passes on PG14–18.
-- The header still compiles warning-free with `-Wall` on PG14–18.
-
-**Depends on:** 20261005-091225-17
-**Open questions:** none
-**Status:** ready
 
 ---
 

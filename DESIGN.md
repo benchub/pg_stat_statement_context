@@ -777,7 +777,10 @@ rejected (decided 2026-10-05): they are out of scope for a pgss companion, so
 builds and runs regression tests against every supported major version.
 
 **Counter availability.** The stored counters, `calls` and `total_exec_time`,
-exist on every supported version, so v1 needs no per-version counter shims.
+exist on every supported version, so v1 needs no per-version counter shims, and
+`compat.h` contains none (item 103941-1 removed the speculative ones). A future
+column that needs a shim adds it in the same change, with a case in
+`002_compat.pl`.
 Row counts, buffer/WAL/I/O-timing and JIT fields, whose availability varies by
 version (for example `shared_blk_read_time` in PG17), are not stored at all
 (§5.1). General policy, following pgss: if a future column is unavailable on
