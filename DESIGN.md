@@ -1165,10 +1165,21 @@ matches this extension's minimum supported version.
   `scripts/check-version-guards.sh`. TAP tests use the PG15+
   `PostgreSQL::Test::*` names; PG14 installs them as aliases only from 14.6, so
   14.0–14.5 cannot run the TAP suite and the harness says so explicitly.
-- **Benchmarks**: `pgbench -S` with and without the extension, with and
-  without comments, and with large `IN` lists. Report p99 and maximum latency at
-  bucket boundaries and under sustained eviction, not just average throughput.
-  Publish overhead numbers relative to `pg_stat_statements` alone.
+- **Benchmarks** (`bench/run.sh [--major N] [--quick]`, item -26): pgbench runs
+  inside one Docker container and compares against pgss alone in these setups:
+  - no comment;
+  - appended and prepended comments;
+  - 10,000-element `IN` lists (heuristic and exact scans, `stmt_len` > 0 and
+    = 0);
+  - 1 s buckets (latency within ±5 ms of a boundary);
+  - sustained eviction.
+
+  Rounds are paired in ABBA order. The run fails if a setup recorded nothing,
+  evicted nothing or never rolled a bucket. Results are in
+  `docs/benchmarks.md`. Steady-state overhead is within the noise of a Docker
+  VM, and bucket boundaries add no latency. Under sustained churn at
+  `max_entries=10000`, eviction raises p99 by 2.5–5× because each pass sorts
+  every entry under the exclusive lock; 20261006-043919-1 tracks the fix.
 - **Fuzzing** (`fuzz/`, item -25): libFuzzer targets for the code that needs no
   server:
   - the comment scanner in every position mode (`fuzz_scan`);

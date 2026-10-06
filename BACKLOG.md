@@ -52,9 +52,9 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
 | 20261006-021334-1 | Bound regex compile cost (pathological patterns stall first tagged query) | 20261005-091225-10 | no | ready |
+| 20261006-043919-1 | Reduce eviction-pass lock hold time (sustained churn triples p99) | 20261005-091225-26 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
-| 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
-| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
+| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | ready |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
@@ -192,6 +192,27 @@ The execution-time CPU limits (item -10) don't cover compile. Options (decide an
 **Open questions:** none
 **Status:** ready
 
+### 20261006-043919-1: Reduce eviction-pass lock hold time (sustained churn triples p99)
+
+**Description:** Found by the benchmarks (item -26, docs/benchmarks.md). Under sustained eviction with high-cardinality tags at `max_entries=10000`, p99 latency rose from 0.477 ms (pgss alone) to 1.200 ms on PG 18.6 (+158%), and 5× on PG 14. TPS fell 12.5%. That was about 90 passes per second, each removing 500 entries. `store_evict()` in `src/store.c` (§5.3) holds the store's exclusive lock while it scans the whole table, copies every live entry, and sorts them all with `pssc_evict_sort()`. Every backend recording during a pass waits.
+
+Options, in order of preference:
+1. Choose the victims by partial selection instead of a full sort (quickselect or a bounded heap of size `nvictims`, O(n)). Eviction order stays the same: last_bucket, then usage.
+2. Reuse the candidate buffer instead of allocating it each pass.
+3. Make the batch bigger when passes come close together, so fewer passes run. This changes semantics: document it, and keep the §5.3 order.
+4. Do the scan and sort under the shared lock with a generation check, and take the exclusive lock only to remove the victims. This is more complex; justify it with measurements first.
+
+Measure each step with `bench/run.sh --only evict` and keep the semantics in §5.3 (victim order and `evicted_entries` accounting) intact; the existing TAP tests 008/018 must still pass.
+
+**Acceptance criteria:**
+- The eviction benchmark's p99 at `max_entries=10000` is no more than about 1.5× pgss alone on PG 18 (or the remaining gap is explained), with numbers updated in docs/benchmarks.md.
+- Victim selection matches the old full sort exactly; a unit test compares them on random inputs, including ties.
+- Full harness passes on PG 14–18.
+
+**Depends on:** 20261005-091225-26
+**Open questions:** none
+**Status:** ready
+
 ### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
 
 **Description:** Found while documenting (item -28). `evicted_entries` counts both expired entries reclaimed by an eviction pass and live entries evicted, and `dealloc` counts passes. `dropped_records` (calls lost because a pass freed nothing) is not exposed. So `_info()` alone cannot tell an operator that `max_entries` is too small, contrary to DESIGN §5.3 step 3. The docs currently give a workaround: compare the row count of `pg_stat_statement_context_totals` with `max_entries`.
@@ -208,26 +229,6 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 **Open questions:**
 - Q1: OK to change the `_info()` column set (§7, approved earlier) by renaming or splitting `evicted_entries` and adding `dropped_records`? Proposed names: `reclaimed_entries`, `evicted_entries` (live only), `dropped_records`.
 **Status:** blocked-on-questions
-
-### 20261005-091225-26: Overhead and latency benchmarks
-
-**Description:** Add reproducible `pgbench` scripts and a results write-up (§9 Benchmarks). Run `pgbench -S` in these configurations:
-- with no extension
-- with pgss only
-- with pgss plus this extension
-- with and without comments
-- with large `IN` lists in `append`/`any` modes, including the `stmt_len = 0` `strlen` case
-
-Also measure bursts at bucket boundaries (short interval) and sustained eviction (small `max_entries` with high-cardinality tags). Report TPS, average latency, p99 latency, and maximum latency, relative to pgss alone.
-
-**Acceptance criteria:**
-- The scripts run from one command.
-- The results table is published in the repository docs.
-- p99 and maximum latency at bucket boundaries and under eviction are reported explicitly.
-
-**Depends on:** 20261005-091225-15, 20261005-091225-18, 20261005-091225-20
-**Open questions:** none
-**Status:** ready
 
 ### 20261005-091225-29: v1 release readiness
 
@@ -246,7 +247,7 @@ Also measure bursts at bucket boundaries (short interval) and sustained eviction
 
 **Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ---
 

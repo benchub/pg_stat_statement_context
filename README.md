@@ -152,6 +152,7 @@ SELECT pg_stat_statement_context_extract(
 | [docs/sql-interface.md](docs/sql-interface.md) | The views, `pg_stat_statement_context()`, `_info()`, `_reset()`, `_extract()`, the join to `pg_stat_statements`, nested statements and `toplevel`, visibility, encodings. |
 | [docs/limitations.md](docs/limitations.md) | Prepared statements, scanner caveats, PG14/15 utility query IDs, failed statements, PII, managed providers. |
 | [docs/integrations/](docs/integrations/README.md) | Recipes for postgres_exporter, sql_exporter and the OpenTelemetry Collector, a Grafana dashboard, a monitoring role, and the metric semantics (gauges, `toplevel`, cardinality). |
+| [docs/benchmarks.md](docs/benchmarks.md) | pgbench overhead and latency measurements against pg_stat_statements alone: the method, results for PG 18 and PG 14, findings (bucket boundaries, IN lists, eviction), and how to re-run them. |
 
 ## Testing
 
@@ -165,6 +166,7 @@ make unittest                    # standalone scanner/parser unit tests and fuzz
 fuzz/run-libfuzzer.sh -t 600     # libFuzzer (clang, ASan+UBSan) targets in Docker, 10 min each
 fuzz/sql/run.sh -- --duration 600     # regex extractor SQL fuzzer, assert build in Docker
 scripts/test-integrations.sh 17  # exporter recipes + Grafana dashboard, end to end in Docker
+bench/run.sh --major 18 [--quick]    # pgbench overhead benchmarks in Docker (docs/benchmarks.md)
 ```
 
 [fuzz/README.md](fuzz/README.md) describes the fuzz targets, their invariants

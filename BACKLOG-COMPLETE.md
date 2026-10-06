@@ -877,6 +877,26 @@ Fix: capture the check hook's own error message and SQLSTATE right after `ALTER 
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-26: Overhead and latency benchmarks
+
+**Description:** Add reproducible `pgbench` scripts and a results write-up (§9 Benchmarks). Run `pgbench -S` in these configurations:
+- with no extension
+- with pgss only
+- with pgss plus this extension
+- with and without comments
+- with large `IN` lists in `append`/`any` modes, including the `stmt_len = 0` `strlen` case
+
+Also measure bursts at bucket boundaries (short interval) and sustained eviction (small `max_entries` with high-cardinality tags). Report TPS, average latency, p99 latency, and maximum latency, relative to pgss alone.
+
+**Acceptance criteria:**
+- The scripts run from one command.
+- The results table is published in the repository docs.
+- p99 and maximum latency at bucket boundaries and under eviction are reported explicitly.
+
+**Depends on:** 20261005-091225-15, 20261005-091225-18, 20261005-091225-20
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
