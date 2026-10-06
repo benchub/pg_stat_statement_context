@@ -565,6 +565,47 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-20: Stats SRF and views
+
+**Description:** Implement the C set-returning function `pg_stat_statement_context(showtags, merge_buckets)` and its two views (§7). The SRF uses materialize mode.
+
+Reading:
+- Under the shared lock, copy the entries out. Each entry yields one row per live ring slot, hiding expired slots based on the clock (§5.2). Dead entries yield nothing.
+- Compute `bucket_start = epoch + bucket_id × interval`.
+- Output columns are exactly those in §7: `bucket_start`, `userid`, `dbid`, `queryid`, `toplevel`, `tags`, `calls`, `total_exec_time`.
+
+Visibility (§6.11):
+- For another role's rows, `queryid` and `tags` are `NULL` unless the caller has the privileges of `pg_read_all_stats`.
+- The check runs inside the C function, so `showtags = false` can't bypass it.
+
+Tag output:
+- Convert tags from each entry's encoding with `pg_any_to_server`.
+- For a `SQL_ASCII` origin, escape non-ASCII bytes instead of converting them.
+- Output the tags as `jsonb`.
+
+Merging:
+- With `merge_buckets`, each entry yields one row: the task 20261005-091225-12 merge of its live slots (sums of `calls` and `total_exec_time`). `bucket_start` is the oldest live slot.
+
+SQL script:
+- Add the `pg_stat_statement_context` and `pg_stat_statement_context_totals` views and grants to the 1.0 script.
+
+*Design note:* choose and document the escape format for `SQL_ASCII` output, for example `\xNN`.
+
+**Acceptance criteria:**
+- Both views return the expected rows and exactly the §7 columns.
+- Merged sums match a hand computation.
+- An unprivileged role sees `NULL` `queryid`/`tags` for other roles' rows, including with `showtags = false`.
+- Tags from a non-UTF8 database are converted correctly, and `SQL_ASCII` bytes are escaped.
+- Expired slots are hidden without any writes.
+
+**Decisions:**
+- 2026-10-05 (§11 Q2): `tags` is `jsonb`.
+- 2026-10-05: Only `calls` and `total_exec_time` are exposed; other statistics come from pgss (see task 20261005-091225-12).
+
+**Depends on:** 20261005-091225-12, 20261005-091225-14
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

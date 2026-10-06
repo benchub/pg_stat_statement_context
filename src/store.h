@@ -177,6 +177,9 @@ extern PGDLLEXPORT Size pssc_store_shmem_size_for(int max_entries,
 												  int bucket_count);
 extern PGDLLEXPORT Size pssc_store_shmem_size(void);
 
+/* Whether the shared store is set up (the library was preloaded). */
+extern PGDLLEXPORT bool pssc_store_available(void);
+
 /* keysize in effect (0 if the store is not set up). */
 extern PGDLLEXPORT Size pssc_store_keysize(void);
 

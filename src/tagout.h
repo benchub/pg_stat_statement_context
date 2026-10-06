@@ -1,7 +1,7 @@
 /*
  * tagout.h
  *		Output of stored tag sets as jsonb (DESIGN.md §6.11): shared by
- *		pg_stat_statement_context_extract() and the views.
+ *		pg_stat_statement_context_extract() and the views (stats_fn.c).
  */
 #ifndef PSSC_TAGOUT_H
 #define PSSC_TAGOUT_H
@@ -20,5 +20,19 @@
  */
 extern void pssc_tags_push_jsonb(JsonbParseState **st, const char *tags,
 								 size_t len, int encoding);
+
+/*
+ * The tag set as a standalone jsonb object, like pssc_tags_push_jsonb(), but
+ * never raising an error for tags that cannot be converted: if any key or
+ * value of a tag set from a non-SQL_ASCII database is not representable in
+ * the server encoding (or no conversion exists), the whole set is output
+ * escaped as for SQL_ASCII (pssc_tag_escape(): \xHH for bytes >= 0x80,
+ * \\ for '\'), and *escaped_fallback (if not NULL) is set. The conversion
+ * runs in the conversion functions' noError mode, so no error is caught;
+ * other errors (out of memory) still propagate. Used by the stats views, so
+ * that one unconvertible entry does not fail the whole read.
+ */
+extern Jsonb *pssc_tags_jsonb_noerror(const char *tags, size_t len,
+									  int encoding, bool *escaped_fallback);
 
 #endif							/* PSSC_TAGOUT_H */

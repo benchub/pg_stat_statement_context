@@ -169,6 +169,12 @@ pssc_store_shmem_size(void)
 									 pssc_bucket_count);
 }
 
+bool
+pssc_store_available(void)
+{
+	return store_state != NULL && store_htab != NULL;
+}
+
 Size
 pssc_store_keysize(void)
 {

@@ -826,14 +826,19 @@ some server version, it is omitted on that version rather than exposed as
   converted: each byte ≥ 0x80 becomes `\xHH` (lowercase hex) and `\` becomes
   `\\`, in both keys and values, so the escaping is reversible and distinct
   keys stay distinct (decided 2026-10-05, item -11). All tag output goes through
-  the shared helper `pssc_tags_push_jsonb()` (`src/tagout.c`); a conversion
-  failure for a non-`SQL_ASCII` origin raises an error there, and the views
-  (-19/-20) decide how to handle it.
+  the shared helper `pssc_tags_push_jsonb()` (`src/tagout.c`); a tag set from
+  a non-`SQL_ASCII` origin that can't be converted falls back to the same
+  `\xHH` escaping for that whole entry, using the conversion's no-error mode
+  (no `PG_TRY`), so the SRF never fails on one bad entry (decided 2026-10-05,
+  item -20). In a `SQL_ASCII` server, tags from other encodings are validated
+  and passed through unconverted, as `pg_any_to_server` does.
 - Tags may contain PII, for example user emails in a route. Visibility is
   **at least as strict as pgss**. For rows owned by another role, both `queryid`
   and `tags` are `NULL` unless the caller has the privileges of
   `pg_read_all_stats`. The check runs inside the C SRF, so `showtags = false`
-  doesn't bypass it. Future activity and exemplar views use the same rule.
+  doesn't bypass it. The check is `has_privs_of_role(GetUserId(), pg_read_all_stats)`
+  on every version, which on PG14 is slightly stricter than pgss there
+  (`is_member_of_role` also admitted NOINHERIT members). Future activity and exemplar views use the same rule.
 - Regex patterns are superuser-only (GUC context). An input bound alone is not
   a CPU bound. v1 therefore also rejects back-references, caps the pattern
   length and capture count (§4.2), and caps the number of comments examined per
@@ -917,6 +922,14 @@ cardinality caps, §8).
 `max_tagset_bytes`, §4.1), and `regex_compile_failures` (lazy-compile failures,
 §4.2). Regex failures happen per backend, so they are flushed into a shared
 counter in the header.
+
+SRF implementation (item -20): materialize mode, `STRICT VOLATILE PARALLEL
+SAFE`, C symbol `pg_stat_statement_context_1_0`. Under the shared lock only raw
+bytes are copied (key fields, encoding, live slots, and tags only when shown);
+encoding conversion, jsonb building and merging happen after the lock is
+released. Reading changes no entry data: it may only advance the
+`current_bucket` watermark (§5.2). Expired slots keep their contents until a
+writer rolls them over. Non-merged rows of an entry come out in bucket order.
 
 Bucket merging (`merge_buckets = true`) sums `calls` and `total_exec_time`
 across an entry's live slots (§5.2). Because the key has no bucket, each entry

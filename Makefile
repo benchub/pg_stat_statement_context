@@ -16,6 +16,7 @@ OBJS = \
 	src/extract.o \
 	src/extract_fn.o \
 	src/tagout.o \
+	src/stats_fn.o \
 	src/regex_runtime.o \
 	src/context.o \
 	src/executor.o \
@@ -63,7 +64,8 @@ include $(PGXS)
 # 009_eviction.pl, and reads recorded entries in 011_executor.pl and
 # 012_utility.pl and 014_load_order.pl, and the shared counters in
 # 013_extract_fn.pl, which also
-# injects a regex compile failure through pssc_extract_test).
+# injects a regex compile failure through pssc_extract_test), and seeds the
+# entries read by the stats views in 015_stats.pl.
 # pssc_context_test exposes the execution frames of src/context.h (frame
 # registry, active frame, frames seen at ExecutorEnd) to SQL
 # (test/t/010_context.pl, 012_utility.pl, which also reads recorded entries

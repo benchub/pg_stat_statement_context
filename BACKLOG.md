@@ -52,23 +52,22 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | no | ready |
-| 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | no | blocked-on-deps |
-| 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
+| 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | no | ready |
+| 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
-| 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
+| 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-28 | User documentation | 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27 | no | blocked-on-deps |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
 | 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | ready |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
-| 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | blocked-on-deps |
+| 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | ready |
-| 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
+| 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | no | ready |
 | 20261005-091225-42 | Roadmap: exporter recipes and Grafana dashboard | 20261005-091225-28 | no | blocked-on-deps |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
@@ -196,47 +195,6 @@ dependencies and is not shown.
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-20: Stats SRF and views
-
-**Description:** Implement the C set-returning function `pg_stat_statement_context(showtags, merge_buckets)` and its two views (§7). The SRF uses materialize mode.
-
-Reading:
-- Under the shared lock, copy the entries out. Each entry yields one row per live ring slot, hiding expired slots based on the clock (§5.2). Dead entries yield nothing.
-- Compute `bucket_start = epoch + bucket_id × interval`.
-- Output columns are exactly those in §7: `bucket_start`, `userid`, `dbid`, `queryid`, `toplevel`, `tags`, `calls`, `total_exec_time`.
-
-Visibility (§6.11):
-- For another role's rows, `queryid` and `tags` are `NULL` unless the caller has the privileges of `pg_read_all_stats`.
-- The check runs inside the C function, so `showtags = false` can't bypass it.
-
-Tag output:
-- Convert tags from each entry's encoding with `pg_any_to_server`.
-- For a `SQL_ASCII` origin, escape non-ASCII bytes instead of converting them.
-- Output the tags as `jsonb`.
-
-Merging:
-- With `merge_buckets`, each entry yields one row: the task 20261005-091225-12 merge of its live slots (sums of `calls` and `total_exec_time`). `bucket_start` is the oldest live slot.
-
-SQL script:
-- Add the `pg_stat_statement_context` and `pg_stat_statement_context_totals` views and grants to the 1.0 script.
-
-*Design note:* choose and document the escape format for `SQL_ASCII` output, for example `\xNN`.
-
-**Acceptance criteria:**
-- Both views return the expected rows and exactly the §7 columns.
-- Merged sums match a hand computation.
-- An unprivileged role sees `NULL` `queryid`/`tags` for other roles' rows, including with `showtags = false`.
-- Tags from a non-UTF8 database are converted correctly, and `SQL_ASCII` bytes are escaped.
-- Expired slots are hidden without any writes.
-
-**Decisions:**
-- 2026-10-05 (§11 Q2): `tags` is `jsonb`.
-- 2026-10-05: Only `calls` and `total_exec_time` are exposed; other statistics come from pgss (see task 20261005-091225-12).
-
-**Depends on:** 20261005-091225-12, 20261005-091225-14
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-21: `_info()` and `_reset()` functions
 
 **Description:** Implement `pg_stat_statement_context_info()` (§7), which returns:
@@ -264,7 +222,7 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 
 **Depends on:** 20261005-091225-15, 20261005-091225-20
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-22: TAP tests: execution lifecycle and pgss parity
 
@@ -285,7 +243,7 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 
 **Depends on:** 20261005-091225-18, 20261005-091225-20
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-23: TAP tests: store, buckets, eviction, and reconfiguration
 
@@ -355,7 +313,7 @@ Also measure bursts at bucket boundaries (short interval) and sustained eviction
 
 **Depends on:** 20261005-091225-15, 20261005-091225-18, 20261005-091225-20
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-28: User documentation
 
@@ -506,7 +464,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Open questions:** none
 
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-34: Roadmap: background worker reclaiming dead entries
 
@@ -572,7 +530,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Depends on:** 20261005-091225-18, 20261005-091225-20
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-41: Roadmap: tag value normalization rules
 
