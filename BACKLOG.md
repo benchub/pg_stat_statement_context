@@ -53,7 +53,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | ready |
-| 20261005-204419-1 | Fix flaky `008_buckets.pl` ring-wrap check | 20261005-091225-14 | no | ready |
 | 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
@@ -213,18 +212,6 @@ dependencies and is not shown.
 - The documented divergence (pgss on PG14–16 with `track_utility=off`, §6.7) is asserted explicitly.
 
 **Depends on:** 20261005-091225-18, 20261005-091225-20
-**Open questions:** none
-**Status:** ready
-
-### 20261005-204419-1: Fix flaky `008_buckets.pl` ring-wrap check
-
-**Description:** Found during 20261005-091225-21. `test/t/008_buckets.pl` check "the ring wrapped during phase B" (`current_bucket > $b0 + 64`, around line 384) failed once on PG15 and passed on rerun. It depends on random clock jumps driven by pgbench; the builder's simulation estimates a ~1% failure rate. Make the check deterministic (e.g. drive the clock with fixed steps, or loop until the wrap condition holds with a bounded number of iterations) without weakening what it verifies. Failing log was in `tmp/harness-15-flake.log` (scratch, may be gone).
-
-**Acceptance criteria:**
-- The check cannot fail by chance: either it's deterministic, or the probability argument is documented and below 1e-6.
-- The test still fails if ring wrap-around handling is broken (show this by temporarily breaking it).
-
-**Depends on:** 20261005-091225-14
 **Open questions:** none
 **Status:** ready
 

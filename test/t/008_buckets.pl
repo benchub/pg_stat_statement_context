@@ -82,7 +82,7 @@ sub wait_for
 }
 sub pgbench
 {
-	my ($script, $clients, $txns) = @_;
+	my ($script, $clients, $txns, @opts) = @_;
 	my $file = $node->basedir . '/pgbench_buckets.sql';
 	open my $fh, '>', $file or die "open $file: $!";
 	print $fh $script;
@@ -91,7 +91,7 @@ sub pgbench
 	local $ENV{PGHOST} = $node->host;
 	local $ENV{PGPORT} = $node->port;
 	IPC::Run::run([ 'pgbench', '-n', '-c', $clients, '-j', $clients,
-			'-t', $txns, '-f', $file, 'postgres' ],
+			'-t', $txns, @opts, '-f', $file, 'postgres' ],
 		'>', \$out, '2>', \$err)
 	  or die "pgbench failed: $err";
 	my $n = $clients * $txns;
@@ -359,10 +359,29 @@ SELECT pssc_store_test_record(:q, ARRAY['k', (:q % 3)::text], NULL, 0.5);
 
 	# Phase B: small steps, jumps past the ring, backward steps, and
 	# concurrent invariant checks (which also check that current_bucket
-	# never goes backwards as seen by each client).
+	# never goes backwards as seen by each client). The random jumps alone
+	# leave the ring unwrapped in ~1% of runs (backward steps cancel them)
+	# and need not reuse a slot (70 = 6 mod 64), so client 0 also wraps its
+	# entry's ring onto an occupied slot at its transactions 50, 150, ...,
+	# 450 (:i counts them; pgbench variables persist across transactions):
+	# it records :q, reads that entry's last_bucket b, then pins the clock
+	# to b + 64 and records with that caller-computed id in one statement.
+	# b's slot is b + 64's slot, so the write rolls it over (relabel, zero)
+	# unless current_bucket has already passed b + 64 (then the id is
+	# clamped up to it); either way record_at advances current_bucket
+	# to >= b + 64 whatever the others do to the clock, so each wrap raises
+	# current_bucket by >= 64 and the five together by >= 320,
+	# deterministically, while the other clients keep racing.
 	sql('SELECT pssc_store_test_reset()');
 	$n = pgbench(q{\set q random(1, 20)
 \set r random(1, 1000)
+\set i :i + 1
+\if :client_id = 0 and :i % 100 = 50
+SELECT pssc_store_test_record(:q, ARRAY['k', (:q % 3)::text], NULL, 0.5);
+SELECT pssc_store_test_pin_clock(pssc_store_test_bucket_start(b + 64)),
+       pssc_store_test_record(:q, ARRAY['k', (:q % 3)::text], b + 64, 0.5)
+  FROM (SELECT max(last_bucket) AS b FROM pssc_store_test_entries() WHERE queryid = :q) s;
+\endif
 \if :r <= 20
 SELECT pssc_store_test_advance_clock(250000);
 \elif :r <= 23
@@ -373,15 +392,21 @@ SELECT pssc_store_test_advance_clock(-30000000);
 SELECT pssc_store_test_check_invariants();
 \endif
 SELECT pssc_store_test_record(:q, ARRAY['k', (:q % 3)::text], NULL, 0.5);
-}, 8, 500);
+}, 8, 500, '-D', 'i=0');
+	$n += 10;	# client 0's extra records (two per wrap)
 	$b = buckets();
 	is(sql('SELECT pssc_store_test_check_invariants()'), 20, 'invariants hold after phase B');
 	ok(sql('SELECT sum(calls) FROM pssc_store_test_entries()') <= $n, 'no call counted twice');
+	# Client 0's 50 records up to its first wrap (from b) are in buckets
+	# <= b, which the wrap to b + 64 took out of every ring's live window.
+	ok(sql('SELECT coalesce(sum(calls), 0) FROM pssc_store_test_entries() WHERE live') <= $n - 50,
+		'calls recorded before the wrap are no longer live');
 	is(sql("SELECT max(bucket_id) FROM pssc_store_test_entries()"), $b->{current_bucket},
 		'the newest slot is current_bucket');
 	is(sql("SELECT count(*) FROM pssc_store_test_entries() WHERE bucket_id > $b->{current_bucket}"),
 		0, 'no slot is newer than current_bucket');
-	ok($b->{current_bucket} > $b0 + 64, 'the ring wrapped during phase B');
+	ok($b->{current_bucket} >= $b0 + 5 * 64,
+		"the ring wrapped during phase B (current_bucket = b0 + @{[$b->{current_bucket} - $b0]})");
 }
 
 $node->stop;

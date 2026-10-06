@@ -635,6 +635,18 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 **Open questions:** none
 **Status:** done
 
+### 20261005-204419-1: Fix flaky `008_buckets.pl` ring-wrap check
+
+**Description:** Found during 20261005-091225-21. `test/t/008_buckets.pl` check "the ring wrapped during phase B" (`current_bucket > $b0 + 64`, around line 384) failed once on PG15 and passed on rerun. It depends on random clock jumps driven by pgbench; the builder's simulation estimates a ~1% failure rate. Make the check deterministic (e.g. drive the clock with fixed steps, or loop until the wrap condition holds with a bounded number of iterations) without weakening what it verifies. Failing log was in `tmp/harness-15-flake.log` (scratch, may be gone).
+
+**Acceptance criteria:**
+- The check cannot fail by chance: either it's deterministic, or the probability argument is documented and below 1e-6.
+- The test still fails if ring wrap-around handling is broken (show this by temporarily breaking it).
+
+**Depends on:** 20261005-091225-14
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
