@@ -136,10 +136,13 @@ typedef struct XSpec
 	const char *rename;			/* "a:b|c:d" or NULL */
 	const char *kv_sep;			/* marginalia; NULL = ":" */
 	const char *pair_sep;		/* marginalia; NULL = "," */
+	bool		appname;		/* appname(format=kind): parses application_name */
 } XSpec;
 
 #define SC(pos)		{PSSC_EXTRACTOR_SQLCOMMENTER, pos}
 #define MG(pos)		{PSSC_EXTRACTOR_MARGINALIA, pos}
+/* appname(format=kind) */
+#define AN(kind)	{kind, PSSC_POS_ANY, false, false, NULL, NULL, NULL, NULL, true}
 
 typedef struct Blob
 {
@@ -214,7 +217,8 @@ mkex(int n, const XSpec *specs)
 
 		memset(&tmp, 0, sizeof(tmp));
 		tmp.kind = (uint8) x->kind;
-		tmp.position = (uint8) x->position;
+		tmp.position = (uint8) (x->appname ? PSSC_POS_ANY : x->position);
+		tmp.source = (uint8) (x->appname ? PSSC_SOURCE_APPNAME : PSSC_SOURCE_COMMENT);
 		tmp.merge = x->merge;
 		tmp.url_decode = (x->kind == PSSC_EXTRACTOR_SQLCOMMENTER && !x->no_url_decode);
 		if (x->keys)
@@ -513,6 +517,8 @@ typedef struct Run
 	bool		with_regex;
 	bool		with_normalize;
 	long		fail_at;		/* alloc failure injection; 0 = none, n = fail nth (1-based) */
+	const char *appname;		/* application_name; NULL = no appname pass */
+	bool		appname_twice;	/* pass the appname result twice (cache replay) */
 } Run;
 
 typedef struct Res
@@ -525,6 +531,8 @@ typedef struct Res
 	PsscTagsetStats st;
 	char		text[65536];	/* human-readable "k=v|k=v" */
 	long		allocs;
+	size_t		appname_ntags;
+	bool		appname_oom;
 } Res;
 
 static const char *
@@ -633,6 +641,7 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	PsscTagsetLimits lim;
 	PsscTagsetEnv env;
 	PsscTagsetOut out;
+	PsscAppnameTags at;
 	char	   *buf;
 
 	apply_defaults(&cfg);
@@ -655,8 +664,31 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	buf = malloc(cfg.max_bytes ? cfg.max_bytes : 1);
 	memset(&out, 0x5a, sizeof(out));
 	out.buf = buf;
+	if (cfg.appname)
+	{
+		memset(&at, 0x5a, sizeof(at));
+		pssc_appname_tags_build(cfg.appname, strlen(cfg.appname),
+								cfg.ex ? cfg.ex : default_ex, tags, excl,
+								&lim, &env, &at);
+		r.appname_ntags = at.ntags;
+		r.appname_oom = at.oom;
+	}
 	pssc_tagset_build(s, start, end, cfg.ex ? cfg.ex : default_ex, tags, excl,
-					  &lim, &env, &out, &r.st);
+					  &lim, &env, cfg.appname ? &at : NULL, &out, &r.st);
+	if (cfg.appname && cfg.appname_twice)
+	{
+		/* the same appname result again: same tags, its counters again */
+		PsscTagsetOut out2;
+		char	   *buf2 = malloc(cfg.max_bytes ? cfg.max_bytes : 1);
+
+		memset(&out2, 0, sizeof(out2));
+		out2.buf = buf2;
+		pssc_tagset_build(s, start, end, cfg.ex ? cfg.ex : default_ex, tags,
+						  excl, &lim, &env, &at, &out2, &r.st);
+		CHECK(out2.len == out.len && memcmp(buf2, buf, out.len) == 0,
+			  "%s: reused appname result gives other tags", name);
+		free(buf2);
+	}
 	r.len = out.len;
 	r.ntags = out.ntags;
 	r.footer = out.footer;
@@ -1799,6 +1831,233 @@ test_escape(void)
 	}
 }
 
+/* appname(format=...): tags from application_name (item 20261005-091225-38) */
+static void
+test_appname(void)
+{
+	XSpec		an_sc = AN(PSSC_EXTRACTOR_SQLCOMMENTER);
+	XSpec		an_mg = AN(PSSC_EXTRACTOR_MARGINALIA);
+	Run			c = {0};
+	Res		   *r;
+
+	/* each format, from application_name alone (no comment at all) */
+	c.ex = mkex(1, &an_sc);
+	c.appname = "controller='users',action='sh%20ow'";
+	EXPECT("appname sqlcommenter", c, "SELECT 1", "action=sh ow|controller=users");
+	c.ex = mkex(1, &an_mg);
+	c.appname = "controller:users,action:show";
+	EXPECT("appname marginalia", c, "SELECT 1", "action=show|controller=users");
+	{
+		XSpec		x = an_mg;
+
+		x.kv_sep = "=";
+		x.pair_sep = ";";
+		c.ex = mkex(1, &x);
+		c.appname = "svc=billing;job=nightly";
+		EXPECT("appname marginalia seps", c, "SELECT 1", "job=nightly|svc=billing");
+	}
+	{
+		XSpec		x = AN(PSSC_EXTRACTOR_REGEX);
+		XSpec		xs[2] = {SC(PSSC_POS_APPEND)};
+
+		x.keys = "app|ver";
+		xs[1] = x;
+		c.ex = mkex(2, xs);
+		c.with_regex = true;
+		c.appname = "myapp 1.2";
+		regex_calls = 0;
+		EXPECT("appname regex", c, "SELECT 1", "app=myapp|ver=1.2");
+		CHECK(regex_calls == 1 && regex_last_index == 1,
+			  "appname regex: calls %d index %d", regex_calls, regex_last_index);
+		/* the comment chain does not run the appname regex on comments */
+		regex_calls = 0;
+		EXPECT("appname regex not on comments", c, "SELECT 1 /*w1 w2*/", "app=myapp|ver=1.2");
+		CHECK(regex_calls == 1, "appname regex not on comments: calls %d", regex_calls);
+		c.with_regex = false;
+	}
+
+	/* no appname extractor: application_name is ignored */
+	c.ex = NULL;
+	c.appname = "controller:users";
+	EXPECT("appname not configured", c, "SELECT 1", "");
+	/* and the appname extractor never reads comments */
+	c.ex = mkex(1, &an_mg);
+	c.appname = "";
+	EXPECT("appname empty", c, "SELECT 1 /*a:1*/", "");
+	c.appname = NULL;
+	EXPECT("appname none", c, "SELECT 1 /*a:1*/", "");
+
+	/* union with the comment tags; the comment wins a conflict, in any order */
+	{
+		XSpec		xs[3] = {SC(PSSC_POS_APPEND), MG(PSSC_POS_APPEND), AN(PSSC_EXTRACTOR_MARGINALIA)};
+		XSpec		rv[3] = {AN(PSSC_EXTRACTOR_MARGINALIA), SC(PSSC_POS_APPEND), MG(PSSC_POS_APPEND)};
+
+		c.appname = "controller:fromapp,job:j1";
+		c.ex = mkex(3, xs);
+		EXPECT("appname conflict last", c, "SELECT 1 /*controller='c',action='a'*/",
+			   "action=a|controller=c|job=j1");
+		c.ex = mkex(3, rv);
+		EXPECT("appname conflict first", c, "SELECT 1 /*controller='c',action='a'*/",
+			   "action=a|controller=c|job=j1");
+		/* an appname extractor that produced does not stop the comment chain */
+		EXPECT("appname does not stop chain", c, "SELECT 1 /*action:a*/",
+			   "action=a|controller=fromapp|job=j1");
+		/* a comment pair dropped by the pipeline does not block the appname value */
+		r = run("appname conflict invalid comment", c, "SELECT 1 /*controller:\xff,action:a*/");
+		CHECK(strcmp(r->text, "action=a|controller=fromapp|job=j1") == 0 &&
+			  r->st.invalid_tags == 1,
+			  "appname conflict invalid comment: %s inv %llu", r->text,
+			  (unsigned long long) r->st.invalid_tags);
+		/* the comment's value wins even when truncated */
+		c.max_value = 3;
+		EXPECT("appname conflict truncated", c, "SELECT 1 /*job:longer*/",
+			   "controller=fro|job=lon");
+		c.max_value = 0;
+		/* footer fallback: appname tags do not count as the statement's own */
+		r = run_range("appname footer", c, "SELECT 1; /*controller:f*/", 0, 8);
+		CHECK(strcmp(r->text, "controller=f|job=j1") == 0 && r->footer,
+			  "appname footer: %s footer %d", r->text, r->footer);
+		/* footer not used: appname tags alone */
+		r = run_range("appname no footer", c, "SELECT 1; SELECT 2", 0, 8);
+		CHECK(strcmp(r->text, "controller=fromapp|job=j1") == 0 && !r->footer,
+			  "appname no footer: %s", r->text);
+	}
+
+	/* the appname extractors form their own chain: first producer wins */
+	{
+		XSpec		xs[2] = {AN(PSSC_EXTRACTOR_MARGINALIA), AN(PSSC_EXTRACTOR_MARGINALIA)};
+
+		xs[1].kv_sep = "=";
+		c.ex = mkex(2, xs);
+		c.appname = "a:1,b=2";
+		r = run("appname chain", c, "SELECT 1");
+		CHECK(strcmp(r->text, "a=1") == 0 && r->st.invalid_tags == 1,
+			  "appname chain: %s inv %llu", r->text,
+			  (unsigned long long) r->st.invalid_tags);
+		c.appname = "b=2";
+		EXPECT("appname chain second", c, "SELECT 1", "b=2");
+		xs[1].merge = true;
+		c.ex = mkex(2, xs);
+		c.appname = "a:1,b=2";
+		r = run("appname chain merge", c, "SELECT 1");
+		CHECK(strcmp(r->text, "a=1|b=2") == 0 && r->st.invalid_tags == 2,
+			  "appname chain merge: %s inv %llu", r->text,
+			  (unsigned long long) r->st.invalid_tags);
+		/* first occurrence within the appname chain */
+		c.appname = "a:1,a:2,a=3";
+		EXPECT("appname first occurrence", c, "SELECT 1", "a=1");
+	}
+
+	/* malformed / invalid values: dropped and counted */
+	c.ex = mkex(1, &an_mg);
+	c.appname = "controller:x,junk";
+	r = run("appname malformed", c, "SELECT 1");
+	CHECK(strcmp(r->text, "controller=x") == 0 && r->st.invalid_tags == 1,
+		  "appname malformed: %s inv %llu", r->text,
+		  (unsigned long long) r->st.invalid_tags);
+	/* a plain name (psql, a driver default) is not counted */
+	c.appname = "psql";
+	r = run("appname plain", c, "SELECT 1");
+	CHECK(r->ntags == 0 && r->st.invalid_tags == 0 && r->appname_ntags == 0,
+		  "appname plain: %s inv %llu", r->text,
+		  (unsigned long long) r->st.invalid_tags);
+	c.ex = mkex(1, &an_sc);
+	c.appname = "a='%00',b='ok',c='%C3%28'";
+	r = run("appname invalid", c, "SELECT 1");
+	CHECK(strcmp(r->text, "b=ok") == 0 && r->st.invalid_tags == 2,
+		  "appname invalid: %s inv %llu", r->text,
+		  (unsigned long long) r->st.invalid_tags);
+	/* a reused (cached) result counts again, like a fresh one */
+	c.appname_twice = true;
+	r = run("appname replay", c, "SELECT 1");
+	CHECK(strcmp(r->text, "b=ok") == 0 && r->st.invalid_tags == 4,
+		  "appname replay: %s inv %llu", r->text,
+		  (unsigned long long) r->st.invalid_tags);
+	c.appname_twice = false;
+
+	/* keys, rename, allowlist, denylist, normalize */
+	{
+		XSpec		x = an_mg;
+
+		x.keys = "controller|route|other";
+		x.rename = "controller:ctl";
+		c.ex = mkex(1, &x);
+		c.with_normalize = true;
+		c.appname = "controller:c,route:/u/1,other:o,skip:s";
+		c.exclude = "other";
+		r = run("appname pipeline", c, "SELECT 1");
+		CHECK(strcmp(r->text, "ctl=c|route=/u/:id") == 0 && r->st.normalized_tags == 1,
+			  "appname pipeline: %s norm %llu", r->text,
+			  (unsigned long long) r->st.normalized_tags);
+		c.exclude = NULL;
+		c.tags = "route";
+		EXPECT("appname allowlist", c, "SELECT 1", "route=/u/:id");
+		c.tags = NULL;
+		{
+			XSpec		xs[2] = {MG(PSSC_POS_APPEND)};
+
+			xs[1] = x;
+			c.ex = mkex(2, xs);
+		}
+		/* a failure in one pass does not drop the key in the other */
+		c.appname = "route:FAIL";
+		r = run("appname normalize failure", c, "SELECT 1 /*route:/c/2*/");
+		CHECK(strcmp(r->text, "route=/c/:id") == 0 && r->st.normalize_failures == 1,
+			  "appname normalize failure: %s fail %llu", r->text,
+			  (unsigned long long) r->st.normalize_failures);
+		c.appname = "route:/a/3";
+		r = run("appname normalize both", c, "SELECT 1 /*route:FAIL*/");
+		CHECK(strcmp(r->text, "route=/a/:id") == 0 && r->st.normalize_failures == 1,
+			  "appname normalize both: %s fail %llu", r->text,
+			  (unsigned long long) r->st.normalize_failures);
+		c.with_normalize = false;
+	}
+
+	/* step 9 priority is by key, whatever the source */
+	{
+		XSpec		xs[2] = {MG(PSSC_POS_APPEND), AN(PSSC_EXTRACTOR_MARGINALIA)};
+
+		c.ex = mkex(2, xs);
+		c.appname = "b:2";
+		c.max_tags = 1;
+		r = run("appname max_tags sorted", c, "SELECT 1 /*c:1*/");
+		CHECK(strcmp(r->text, "b=2") == 0 && r->st.dropped_tags == 1,
+			  "appname max_tags sorted: %s", r->text);
+		c.tags = "c,b";
+		EXPECT("appname max_tags allowlist", c, "SELECT 1 /*c:1*/", "c=1");
+		c.tags = NULL;
+		c.max_tags = 0;
+	}
+
+	/* out of memory anywhere, appname pass included: empty set */
+	{
+		XSpec		xs[3] = {SC(PSSC_POS_APPEND), MG(PSSC_POS_APPEND), AN(PSSC_EXTRACTOR_SQLCOMMENTER)};
+		long		total;
+		char		want[256];
+
+		c.ex = mkex(3, xs);
+		c.appname = "app='a',x='1'";
+		r = run("appname oom baseline", c, "SELECT 1 /*b:2*/");
+		total = r->allocs;
+		strcpy(want, r->text);
+		CHECK(strcmp(want, "app=a|b=2|x=1") == 0 && total > 0,
+			  "appname oom baseline: %s (%ld)", want, total);
+		for (long k = 1; k <= total; k++)
+		{
+			c.fail_at = k;
+			r = run("appname oom", c, "SELECT 1 /*b:2*/");
+			CHECK(r->oom && r->ntags == 0 && r->len == 0,
+				  "appname oom at %ld: oom %d text %s", k, r->oom, r->text);
+		}
+		/* failing inside the appname pass flags its result too */
+		c.fail_at = 1;
+		r = run("appname oom first", c, "SELECT 1 /*b:2*/");
+		CHECK(r->appname_oom && r->appname_ntags == 0, "appname oom first: %d %zu",
+			  r->appname_oom, r->appname_ntags);
+		c.fail_at = 0;
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1828,6 +2087,7 @@ main(int argc, char **argv)
 	test_random_permutations();
 	test_escape();
 	test_normalize();
+	test_appname();
 
 	if (failures)
 	{

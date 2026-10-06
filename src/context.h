@@ -43,7 +43,10 @@
  * as a constant-folded function) gets its own tags, extracted from its own
  * statement range. A frame created while one is active is nested and
  * follows nested_tags: inherit copies the active frame's tags, scan
- * extracts its own, none gets none.
+ * extracts its own, none gets none. Extraction also runs the appname
+ * extractors on application_name as it is at that moment (a statement
+ * without source text gets only those tags), so an inheriting nested
+ * statement keeps the value its top-level statement started with.
  *
  * Nothing here throws, except that the executor frame is allocated with
  * palloc semantics turned into "no frame" on out-of-memory.

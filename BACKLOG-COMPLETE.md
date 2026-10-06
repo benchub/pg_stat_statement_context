@@ -897,6 +897,24 @@ Also measure bursts at bucket boundaries (short interval) and sustained eviction
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-38: Roadmap: context from `application_name`
+
+**Description:** Add a DSL extractor `appname(format=sqlcommenter|marginalia|regex)` that derives tags from `application_name` instead of comment text (§4.2, §8 v2). It parses with the named format's rules and parameters (`kv_sep`/`pair_sep`, `url_decode`, or `pattern`/`keys` for `regex`), and accepts the common `keys`/`rename` parameters. Its output goes through the §6.11 pipeline. Tags from comments win over `appname`-derived tags on key conflicts.
+
+**Acceptance criteria:**
+- Each `format` produces the expected tags from a matching `application_name`.
+- On a key conflict, the comment's value is stored.
+- Malformed values are dropped and counted.
+- Invalid `appname(...)` parameters are rejected by the DSL `check_hook`.
+
+**Decisions:**
+- 2026-10-05: Parsed via a DSL extractor `appname(format=sqlcommenter|marginalia|regex)`.
+- 2026-10-05: Comment tags win over `appname`-derived tags.
+
+**Depends on:** 20261005-091225-9, 20261005-091225-17
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

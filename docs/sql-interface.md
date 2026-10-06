@@ -269,7 +269,9 @@ pg_stat_statement_context_extract(query text,
 
 A debug function: runs the same extraction as the hooks, with the current
 configuration, on one statement of `query`, and returns what it found. It
-doesn't execute the query and records nothing.
+doesn't execute the query and records nothing. [`appname`](extractors.md#appname)
+extractors read the calling session's current `application_name`; their tags
+appear in `tags` with the others.
 
 ```sql
 SELECT jsonb_pretty(pg_stat_statement_context_extract(

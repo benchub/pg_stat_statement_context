@@ -74,6 +74,15 @@ extern PGDLLEXPORT PsscNormalizeResult pssc_regex_normalize(const struct PsscNor
 															const char **out, size_t *outlen);
 
 /*
+ * Number of regex extractor failures in this backend so far that may not
+ * happen again on the same input: a match that failed (engine error, out of
+ * memory, a swallowed ERROR) and a compile put off because interrupts were
+ * held off. Used to decide whether a result may be cached (src/extract.c).
+ * Normalize failures are visible as PsscTagsetStats.normalize_failures.
+ */
+extern uint64 pssc_regex_transient_failures(void);
+
+/*
  * TEST-ONLY fault injection (test/modules/pssc_extract_test). When set, it
  * is called right before creating the memory context of a pattern to
  * compile (phase PSSC_REGEX_TEST_CONTEXT), before each pg_regcomp

@@ -203,10 +203,67 @@ typedef struct PsscTagsetOut
 } PsscTagsetOut;
 
 /*
+ * One tag after steps 1-7, with its step 9 drop priority (lower is kept
+ * first).
+ */
+typedef struct PsscTagCandidate
+{
+	const char *key;
+	size_t		klen;
+	const char *val;
+	size_t		vlen;
+	size_t		prio;
+} PsscTagCandidate;
+
+/*
+ * Tags derived from application_name by the appname extractors (DESIGN.md
+ * §4.2; backlog item 20261005-091225-38), built by pssc_appname_tags_build()
+ * and passed to pssc_tagset_build(). The appname extractors form a chain of
+ * their own, with the comment chain's rules: in configuration order, the
+ * first one that produces wins and later ones run only with merge=on;
+ * tags are in chain order (first occurrence first), not deduplicated. stats
+ * holds the counters of the pass, which pssc_tagset_build() adds to its
+ * own every time it uses the result, so a cached result counts like a fresh
+ * one. Self-contained values: the backend may copy the tags elsewhere and
+ * reuse them while the configuration and application_name are unchanged.
+ */
+typedef struct PsscAppnameTags
+{
+	size_t		ntags;
+	const PsscTagCandidate *tags;
+	PsscTagsetStats stats;
+	bool		oom;			/* env->alloc failed: no tags */
+} PsscAppnameTags;
+
+/* True if list has at least one appname extractor. */
+extern bool pssc_extractors_have_appname(const struct PsscExtractorList *list);
+
+/*
+ * Runs the appname extractors of extractors on appname[0, len) (the whole
+ * string is the "comment body"; for regex, env->regex is called with it)
+ * through steps 1-7, into *out (zeroed first; tags allocated with
+ * env->alloc, keys and values may point into appname, the blob or scratch).
+ * Never fails.
+ */
+extern void pssc_appname_tags_build(const char *appname, size_t len,
+									const struct PsscExtractorList *extractors,
+									const struct PsscTagList *tags,
+									const struct PsscTagList *exclude_tags,
+									const PsscTagsetLimits *limits,
+									const PsscTagsetEnv *env,
+									PsscAppnameTags *out);
+
+/*
  * Build the canonical tag set of statement s[start, end) (end <= strlen(s);
  * s must be NUL-terminated, the footer fallback reads past end). tags and
  * exclude_tags are the parsed global lists; exclude_tags is only consulted
- * when tags is '*'. Never fails.
+ * when tags is '*'. appname (NULL: none) holds the appname extractors'
+ * tags; they are added after the comment chain's (own range or footer), so
+ * a comment tag wins a key conflict whatever the configuration order, and
+ * they do not count as tags of the statement's range for the footer
+ * fallback. Comment extractors ignore appname extractors entirely (an
+ * appname extractor that produced does not stop a later comment
+ * extractor). Never fails.
  */
 extern void pssc_tagset_build(const char *s, size_t start, size_t end,
 							  const struct PsscExtractorList *extractors,
@@ -214,6 +271,7 @@ extern void pssc_tagset_build(const char *s, size_t start, size_t end,
 							  const struct PsscTagList *exclude_tags,
 							  const PsscTagsetLimits *limits,
 							  const PsscTagsetEnv *env,
+							  const PsscAppnameTags *appname,
 							  PsscTagsetOut *out,
 							  PsscTagsetStats *stats);
 

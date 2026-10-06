@@ -78,7 +78,8 @@ Which tags nested statements get:
   "active" statement, ultimately the top-level one). A query inside a trigger
   is then attributed to the controller whose `UPDATE` fired the trigger.
 - `scan`: tags from the nested statement's own source text (for example a
-  comment inside the function body).
+  comment inside the function body), plus [`appname`](extractors.md#appname)
+  tags from `application_name` as it is when the nested statement starts.
 - `none`: no tags. With `untagged = skip`, nested statements are then not
   recorded at all.
 
@@ -146,7 +147,9 @@ byte units, e.g. `'4kB'`.
 ### `extractors`
 
 The extractor list, which says which comment formats are parsed and where in
-the statement to look. See [the extractor DSL](extractors.md#the-extractor-dsl).
+the statement to look, and whether tags are also derived from
+`application_name` ([`appname`](extractors.md#appname)). See
+[the extractor DSL](extractors.md#the-extractor-dsl).
 A malformed value is rejected when it is set or reloaded, and the previous
 value stays in effect.
 

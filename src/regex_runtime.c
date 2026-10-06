@@ -68,6 +68,9 @@ static MemoryContext regex_cxt = NULL;	/* parent of the per-regex contexts */
 static MemoryContext exec_cxt = NULL;	/* per-call scratch, reset after use */
 static PsscRegexDebugStats debug_stats;
 
+/* See pssc_regex_transient_failures(). */
+static uint64 transient_failures = 0;
+
 static void
 release_slot(Slot *slot)
 {
@@ -229,7 +232,10 @@ compile_slot(Slot *slot, int index, int ctx_phase, int comp_phase,
 		MemoryContextDelete(slot->cxt);
 	slot->cxt = NULL;
 	if (rc != REG_OKAY && interrupt_pending())
+	{
+		transient_failures++;
 		return;					/* held off: retry next time */
+	}
 
 failed:
 	slot->state = SLOT_FAILED;
@@ -273,7 +279,10 @@ match_slot(Slot *slot, int index, const PsscExtractor *e,
 										sizeof(regmatch_t) * (nkeys + 1),
 										MCXT_ALLOC_NO_OOM);
 	if (w == NULL || off == NULL || pmatch == NULL)
+	{
+		transient_failures++;
 		return;
+	}
 
 	wlen = pg_mb2wchar_with_len(body, w, (int) len);
 	for (nchars = 0, pos = 0; pos < len; nchars++)
@@ -305,6 +314,7 @@ match_slot(Slot *slot, int index, const PsscExtractor *e,
 			break;
 		if (rc != REG_OKAY)
 		{
+			transient_failures++;
 			(void) interrupt_pending();
 			break;
 		}
@@ -381,6 +391,7 @@ pssc_regex_extract(void *arg, int index, const PsscExtractorList *list,
 		FlushErrorState();
 		InterruptHoldoffCount = save_holdoff;
 		QueryCancelHoldoffCount = save_cancel_holdoff;
+		transient_failures++;
 		/* keep the pairs reported before the error: they are valid */
 	}
 	PG_END_TRY();
@@ -627,6 +638,12 @@ void
 pssc_regex_debug_stats(PsscRegexDebugStats *stats)
 {
 	*stats = debug_stats;
+}
+
+uint64
+pssc_regex_transient_failures(void)
+{
+	return transient_failures;
 }
 
 void

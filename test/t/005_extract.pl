@@ -226,6 +226,34 @@ is(tq(q{SELECT 1 /*w1+w2*/ /*k1='s'*/},
 is(tq(q{SELECT 1 /*w1 w2*/ /*k1='s'*/}), 'k1=w1,k2=w2',
 	'the real regex runtime is installed by default (test/t/006_regex.pl)');
 
+# The backend caches the appname extractors' result; replacing the regex
+# hook (another function or argument) must not reuse the old hook's result.
+config(extractors => q{appname(format=regex, pattern='^(.*)$', keys=app)}, tags => '*');
+{
+	my $t = q{SELECT array_to_string(tags, ',') FROM pssc_extract_test('SELECT 1');};
+	my $out = $node->safe_psql('u8', qq{
+		SET application_name = 'billing 1.2';
+		$t
+		SELECT pssc_extract_test_fake_regex(true);
+		$t
+		SELECT pssc_extract_test_fake_regex(false);
+		$t
+		SELECT pssc_extract_test_no_regex();
+		$t
+		SELECT pssc_extract_test_fake_regex(false);
+		$t});
+	is(join('|', grep { $_ ne '' } split /\n/, $out),
+		'app=billing 1.2|app=billing|app=billing 1.2|app=billing 1.2',
+		'appname cache: each change of the regex hook is seen by the next statement');
+	# the empty result (no hook) is filtered out above; check it on its own
+	$out = $node->safe_psql('u8', qq{
+		SET application_name = 'billing 1.2';
+		$t
+		SELECT pssc_extract_test_no_regex();
+		SELECT count(*) FROM pssc_extract_test('SELECT 1') WHERE cardinality(tags) = 0;});
+	is((split /\n/, $out)[-1], '1', 'appname cache: removing the regex hook is seen');
+}
+
 # --- footer fallback and statement ownership (§6.5) ---
 
 config(tags => '*', exclude_tags => '');

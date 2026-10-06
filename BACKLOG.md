@@ -60,7 +60,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | ready |
-| 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | ready |
 | 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
@@ -364,24 +363,6 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 - 2026-10-05: Follow pg_stat_statements: discard on format/version mismatch; if `max_entries` shrank, load what fits and evict the rest; if `bucket_interval` or `bucket_count` changed, discard.
 
 **Depends on:** 20261005-091225-15, 20261005-091225-21
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-38: Roadmap: context from `application_name`
-
-**Description:** Add a DSL extractor `appname(format=sqlcommenter|marginalia|regex)` that derives tags from `application_name` instead of comment text (§4.2, §8 v2). It parses with the named format's rules and parameters (`kv_sep`/`pair_sep`, `url_decode`, or `pattern`/`keys` for `regex`), and accepts the common `keys`/`rename` parameters. Its output goes through the §6.11 pipeline. Tags from comments win over `appname`-derived tags on key conflicts.
-
-**Acceptance criteria:**
-- Each `format` produces the expected tags from a matching `application_name`.
-- On a key conflict, the comment's value is stored.
-- Malformed values are dropped and counted.
-- Invalid `appname(...)` parameters are rejected by the DSL `check_hook`.
-
-**Decisions:**
-- 2026-10-05: Parsed via a DSL extractor `appname(format=sqlcommenter|marginalia|regex)`.
-- 2026-10-05: Comment tags win over `appname`-derived tags.
-
-**Depends on:** 20261005-091225-9, 20261005-091225-17
 **Open questions:** none
 **Status:** ready
 

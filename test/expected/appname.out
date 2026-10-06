@@ -1,0 +1,264 @@
+-- appname(format=...) extractors (DESIGN.md §4.2; backlog item
+-- 20261005-091225-38): tags derived from application_name, seen through the
+-- debug function pg_stat_statement_context_extract(), which reads the
+-- session's current application_name. Each case prints 'ok' or what it got
+-- instead. Requires the library in shared_preload_libraries and a UTF8
+-- database. The sighup GUCs are changed with ALTER SYSTEM + pg_reload_conf()
+-- through test/sql/include/config.sql; everything is reset at the end.
+CREATE EXTENSION pg_stat_statement_context;
+-- The tags plus the diagnostics that are not false or 0.
+CREATE FUNCTION ex(q text)
+RETURNS jsonb LANGUAGE sql AS $$
+  SELECT jsonb_object_agg(key, value)
+    FROM jsonb_each(pg_stat_statement_context_extract(q))
+   WHERE key = 'tags'
+      OR (key IN ('oom', 'footer', 'invalid_tags', 'dropped_tags',
+                  'regex_compile_failures', 'normalized_tags',
+                  'normalize_failures')
+          AND value NOT IN ('false', '0'))
+$$;
+CREATE FUNCTION chk(q text, want jsonb)
+RETURNS text LANGUAGE sql AS $$
+  SELECT CASE WHEN ex(q) = want THEN 'ok' ELSE 'got ' || ex(q)::text END
+$$;
+-- ---- the DSL check_hook rejects invalid appname(...) parameters ----
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'appname';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "appname"
+DETAIL:  Extractor "appname" requires parameter "format".
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'appname(format=json)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "appname(format=json)"
+DETAIL:  Invalid value "json" for parameter "format" of extractor "appname": expected sqlcommenter, marginalia or regex.
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'appname(format=marginalia, position=any)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "appname(format=marginalia, position=any)"
+DETAIL:  Unknown parameter "position" for extractor "appname".
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'appname(format=sqlcommenter, kv_sep=:)';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "appname(format=sqlcommenter, kv_sep=:)"
+DETAIL:  Parameter "kv_sep" of extractor "appname" is not allowed with format=sqlcommenter.
+ALTER SYSTEM SET pg_stat_statement_context.extractors = 'appname(format=regex, pattern=''(a)'')';
+ERROR:  invalid value for parameter "pg_stat_statement_context.extractors": "appname(format=regex, pattern='(a)')"
+DETAIL:  Extractor "appname" requires parameter "keys".
+-- ---- format=sqlcommenter ----
+\set extractors 'sqlcommenter, marginalia, appname(format=sqlcommenter)'
+\set tags '*'
+\set exclude_tags ''
+\set scan_window 2048
+\i test/sql/include/config.sql
+\set ECHO none
+-- The result has the same keys as without appname extractors.
+SELECT string_agg(k, ', ' ORDER BY k) AS result_keys
+  FROM jsonb_object_keys(pg_stat_statement_context_extract('SELECT 1')) k;
+                                                                                    result_keys                                                                                    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ dropped_tags, footer, heuristic, heuristic_scans, invalid_tags, normalize_failures, normalized_tags, ntags, oom, regex_compile_failures, stmt_end, stmt_start, tags, tagset_bytes
+(1 row)
+
+SET application_name = 'controller=''users'',action=''sh%20ow''';
+SHOW application_name;
+          application_name           
+-------------------------------------
+ controller='users',action='sh%20ow'
+(1 row)
+
+-- No comment at all: the tags come from application_name alone.
+SELECT chk('SELECT 1', '{"tags": {"action": "sh ow", "controller": "users"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- Comment and application_name tags are merged; the comment wins a
+-- conflict, whatever the extractor order.
+SELECT chk('SELECT 1 /*controller=''c'',job=''j''*/',
+           '{"tags": {"action": "sh ow", "controller": "c", "job": "j"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+SELECT chk('SELECT 1 /*controller:m*/',
+           '{"tags": {"action": "sh ow", "controller": "m"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- A comment value dropped by the pipeline does not block application_name's.
+SELECT chk('SELECT 1 /*controller=''%FF'',job=''j''*/',
+           '{"tags": {"action": "sh ow", "controller": "users", "job": "j"},
+             "invalid_tags": 1}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- A plain name (a driver's default) yields nothing and counts nothing.
+SET application_name = 'psql';
+SELECT chk('SELECT 1', '{"tags": {}}');
+ chk 
+-----
+ ok
+(1 row)
+
+SET application_name = '';
+SELECT chk('SELECT 1 /*job:j*/', '{"tags": {"job": "j"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- Malformed segments next to a well-formed pair: dropped and counted.
+SET application_name = 'a=''1'',junk';
+SELECT chk('SELECT 1', '{"tags": {"a": "1"}, "invalid_tags": 1}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- Decoded NUL and invalid UTF-8: dropped and counted.
+SET application_name = 'a=''%00'',b=''ok'',c=''%C3%28''';
+SELECT chk('SELECT 1', '{"tags": {"b": "ok"}, "invalid_tags": 2}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- Every statement counts them again (the parsed result is cached).
+SELECT chk('SELECT 2', '{"tags": {"b": "ok"}, "invalid_tags": 2}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- SET LOCAL lasts until the end of the transaction.
+SET application_name = 'a=''outer''';
+BEGIN;
+SET LOCAL application_name = 'a=''inner''';
+SELECT chk('SELECT 1', '{"tags": {"a": "inner"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+COMMIT;
+SELECT chk('SELECT 1', '{"tags": {"a": "outer"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- ---- format=marginalia, with separators, keys and rename ----
+\set extractors 'sqlcommenter, appname(format=marginalia, kv_sep=''='', pair_sep='';'', keys=svc|job, rename=svc:service)'
+\i test/sql/include/config.sql
+\set ECHO none
+SET application_name = 'svc=billing;job=nightly;other=x';
+SELECT chk('SELECT 1', '{"tags": {"job": "nightly", "service": "billing"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+SELECT chk('SELECT 1 /*job=''adhoc''*/',
+           '{"tags": {"job": "adhoc", "service": "billing"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- The allowlist applies to application_name tags too.
+\set tags 'job'
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT chk('SELECT 1', '{"tags": {"job": "nightly"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+\set tags '*'
+-- ---- format=regex ----
+\set extractors 'appname(format=regex, pattern=''^(\\w+)/(\\d+(?:\\.\\d+)*)$'', keys=app|version), sqlcommenter'
+\i test/sql/include/config.sql
+\set ECHO none
+SET application_name = 'billing/1.2.3';
+SELECT chk('SELECT 1', '{"tags": {"app": "billing", "version": "1.2.3"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+SELECT chk('SELECT 1 /*app=''web''*/',
+           '{"tags": {"app": "web", "version": "1.2.3"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+SET application_name = 'billing';
+SELECT chk('SELECT 1', '{"tags": {}}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- ---- several appname extractors: a chain of their own ----
+\set extractors 'sqlcommenter, appname(format=sqlcommenter), appname(format=marginalia)'
+\i test/sql/include/config.sql
+\set ECHO none
+SET application_name = 'a=''1''';
+SELECT chk('SELECT 1', '{"tags": {"a": "1"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+SET application_name = 'a:2';
+SELECT chk('SELECT 1', '{"tags": {"a": "2"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- the comment extractor's success does not stop the appname chain
+SELECT chk('SELECT 1 /*b=''3''*/', '{"tags": {"a": "2", "b": "3"}}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- ---- normalize applies to application_name tags ----
+\set extractors 'appname(format=marginalia)'
+\set normalize 'route: ''\\d+'' => '':id'''
+\i test/sql/include/config.sql
+\set ECHO none
+SET application_name = 'route:/users/42';
+SELECT chk('SELECT 1', '{"tags": {"route": "/users/:id"}, "normalized_tags": 1}');
+ chk 
+-----
+ ok
+(1 row)
+
+-- ---- clean up ----
+RESET application_name;
+DROP FUNCTION chk(text, jsonb);
+DROP FUNCTION ex(text);
+ALTER SYSTEM RESET pg_stat_statement_context.extractors;
+ALTER SYSTEM RESET pg_stat_statement_context.tags;
+ALTER SYSTEM RESET pg_stat_statement_context.exclude_tags;
+ALTER SYSTEM RESET pg_stat_statement_context.scan_window;
+ALTER SYSTEM RESET pg_stat_statement_context.normalize;
+SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+SELECT count(*) AS auto_conf_entries
+  FROM pg_file_settings
+ WHERE name LIKE 'pg\_stat\_statement\_context.%'
+   AND sourcefile LIKE '%postgresql.auto.conf';
+ auto_conf_entries 
+-------------------
+                 0
+(1 row)
+
+DROP EXTENSION pg_stat_statement_context;

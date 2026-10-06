@@ -511,14 +511,14 @@ run_one(const char *s, size_t start, size_t end, size_t ci, Env *env,
 	FUZZ_CHECK(buf && buf2);
 	arena_reset(&env->arena, -1);
 	pssc_tagset_build(s, start, end, pr->ex, pr->tags, pr->exclude,
-					  &c->limits, &te, &out, &st);
+					  &c->limits, &te, NULL, &out, &st);
 	nallocs = env->arena.count;
 	check_output(c, pr, env, &out);
 
 	/* deterministic */
 	arena_reset(&env->arena, -1);
 	pssc_tagset_build(s, start, end, pr->ex, pr->tags, pr->exclude,
-					  &c->limits, &te, &out2, &st2);
+					  &c->limits, &te, NULL, &out2, &st2);
 	FUZZ_CHECK(out2.len == out.len && out2.ntags == out.ntags &&
 			   out2.footer == out.footer && memcmp(buf, buf2, out.len) == 0);
 	FUZZ_CHECK(memcmp(&st, &st2, sizeof(st)) == 0);
@@ -532,7 +532,7 @@ run_one(const char *s, size_t start, size_t end, size_t ci, Env *env,
 		memset(&out2, 0, sizeof(out2));
 		out2.buf = buf2;
 		pssc_tagset_build(s, start, end, pr->ex, pr->tags, pr->exclude,
-						  &c->limits, &te, &out2, &st3);
+						  &c->limits, &te, NULL, &out2, &st3);
 		FUZZ_CHECK(out2.oom && out2.len == 0 && out2.ntags == 0);
 	}
 	arena_reset(&env->arena, -1);

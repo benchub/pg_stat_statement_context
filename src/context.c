@@ -191,12 +191,14 @@ resolve_tags(PsscFrame *frame, char *buf, size_t bufsize, const char *src,
 	}
 	if (src == NULL)
 	{
-		set_no_tags(frame, buf);
-		return;
+		/* no text, so no comment: appname extractors may still tag it */
+		pssc_extract_tags("", 0, 0, buf, bufsize, &res);
 	}
-
-	r = owned_range(src, stmt_location, stmt_len, is_client_stmt(src));
-	pssc_extract_tags(src, r.start, r.end, buf, bufsize, &res);
+	else
+	{
+		r = owned_range(src, stmt_location, stmt_len, is_client_stmt(src));
+		pssc_extract_tags(src, r.start, r.end, buf, bufsize, &res);
+	}
 	frame->tags = buf;
 	frame->tags_len = (uint32) res.len;
 	frame->ntags = res.ntags;

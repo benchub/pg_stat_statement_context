@@ -440,6 +440,12 @@ assign_exclude_tags(const char *newval, void *extra)
  * be or contain whitespace). An unquoted value runs up to whitespace, ',' or
  * ')' and must not contain a quote or '('. Empty values are rejected.
  *
+ * appname(format=F, ...) reads application_name instead of comments: it
+ * takes format F's parameters (sqlcommenter: url_decode; marginalia: kv_sep,
+ * pair_sep; regex: pattern, required keys) plus keys/rename/merge, but no
+ * position, and is serialized as an extractor of kind F with source
+ * PSSC_SOURCE_APPNAME.
+ *
  * The check_hook parses into palloc'd DslExtractors in a private memory
  * context, validates them (test-compiling regexes), then serializes them
  * into one PsscExtractorList blob (guc.h) and deletes the context.
@@ -470,6 +476,7 @@ typedef enum DslParam
 	DSL_KV_SEP,
 	DSL_PAIR_SEP,
 	DSL_PATTERN,
+	DSL_FORMAT,
 	DSL_NPARAMS
 } DslParam;
 
@@ -477,6 +484,12 @@ typedef enum DslParam
 #define ALL_KINDS	(KIND_BIT(PSSC_EXTRACTOR_SQLCOMMENTER) | \
 					 KIND_BIT(PSSC_EXTRACTOR_MARGINALIA) | \
 					 KIND_BIT(PSSC_EXTRACTOR_REGEX))
+/*
+ * appname(format=...): takes every parameter of its format but position,
+ * plus format. Which format-specific parameters apply is only known once
+ * format is, so dsl_finish() checks them (dsl_params[].kinds).
+ */
+#define APPNAME_BIT (1u << 8)
 
 static const struct
 {
@@ -484,13 +497,14 @@ static const struct
 	uint32		kinds;			/* KIND_BITs of the extractors that take it */
 }			dsl_params[DSL_NPARAMS] = {
 	[DSL_POSITION] = {"position", ALL_KINDS},
-	[DSL_KEYS] = {"keys", ALL_KINDS},
-	[DSL_RENAME] = {"rename", ALL_KINDS},
-	[DSL_MERGE] = {"merge", ALL_KINDS},
-	[DSL_URL_DECODE] = {"url_decode", KIND_BIT(PSSC_EXTRACTOR_SQLCOMMENTER)},
-	[DSL_KV_SEP] = {"kv_sep", KIND_BIT(PSSC_EXTRACTOR_MARGINALIA)},
-	[DSL_PAIR_SEP] = {"pair_sep", KIND_BIT(PSSC_EXTRACTOR_MARGINALIA)},
-	[DSL_PATTERN] = {"pattern", KIND_BIT(PSSC_EXTRACTOR_REGEX)},
+	[DSL_KEYS] = {"keys", ALL_KINDS | APPNAME_BIT},
+	[DSL_RENAME] = {"rename", ALL_KINDS | APPNAME_BIT},
+	[DSL_MERGE] = {"merge", ALL_KINDS | APPNAME_BIT},
+	[DSL_URL_DECODE] = {"url_decode", KIND_BIT(PSSC_EXTRACTOR_SQLCOMMENTER) | APPNAME_BIT},
+	[DSL_KV_SEP] = {"kv_sep", KIND_BIT(PSSC_EXTRACTOR_MARGINALIA) | APPNAME_BIT},
+	[DSL_PAIR_SEP] = {"pair_sep", KIND_BIT(PSSC_EXTRACTOR_MARGINALIA) | APPNAME_BIT},
+	[DSL_PATTERN] = {"pattern", KIND_BIT(PSSC_EXTRACTOR_REGEX) | APPNAME_BIT},
+	[DSL_FORMAT] = {"format", APPNAME_BIT},
 };
 
 static const char *const dsl_kind_names[] = {
@@ -501,7 +515,8 @@ static const char *const dsl_kind_names[] = {
 
 typedef struct DslExtractor
 {
-	PsscExtractorKind kind;
+	PsscExtractorKind kind;		/* appname: its format, once given */
+	bool		appname;		/* appname(format=kind) */
 	const char *name;			/* canonical, for messages */
 	uint32		given;			/* bit per DslParam */
 	PsscPosition position;
@@ -750,6 +765,18 @@ dsl_apply(DslExtractor *e, DslParam param, DslStr v)
 		case DSL_PATTERN:
 			e->pattern = v;
 			return true;
+		case DSL_FORMAT:
+			for (int k = 0; k < (int) lengthof(dsl_kind_names); k++)
+			{
+				if (dsl_word_eq(v.s, v.len, dsl_kind_names[k]))
+				{
+					e->kind = (PsscExtractorKind) k;
+					return true;
+				}
+			}
+			GUC_check_errdetail("Invalid value \"%s\" for parameter \"%s\" of extractor \"%s\": expected sqlcommenter, marginalia or regex.",
+								dsl_show(v.s, v.len), dsl_params[param].name, e->name);
+			return false;
 		case DSL_NPARAMS:
 			break;
 	}
@@ -826,6 +853,28 @@ dsl_check_regex(const DslExtractor *e, MemoryContext cxt)
 static bool
 dsl_finish(DslExtractor *e, MemoryContext cxt)
 {
+	if (e->appname)
+	{
+		if (!(e->given & (1u << DSL_FORMAT)))
+		{
+			GUC_check_errdetail("Extractor \"%s\" requires parameter \"format\".", e->name);
+			return false;
+		}
+		for (int p = 0; p < DSL_NPARAMS; p++)
+		{
+			if ((e->given & (1u << p)) && p != DSL_FORMAT &&
+				!(dsl_params[p].kinds & KIND_BIT(e->kind)))
+			{
+				GUC_check_errdetail("Parameter \"%s\" of extractor \"%s\" is not allowed with format=%s.",
+									dsl_params[p].name, e->name, dsl_kind_names[e->kind]);
+				return false;
+			}
+		}
+		/* the format's defaults; no position (stored as any) */
+		if (!(e->given & (1u << DSL_URL_DECODE)))
+			e->url_decode = e->kind == PSSC_EXTRACTOR_SQLCOMMENTER;
+		e->position = PSSC_POS_ANY;
+	}
 	switch (e->kind)
 	{
 		case PSSC_EXTRACTOR_SQLCOMMENTER:
@@ -975,7 +1024,8 @@ dsl_params_list(DslExtractor *e, const char **pp)
 		for (param = 0; param < DSL_NPARAMS; param++)
 			if (dsl_word_eq(id, idlen, dsl_params[param].name))
 				break;
-		if (param == DSL_NPARAMS || !(dsl_params[param].kinds & KIND_BIT(e->kind)))
+		if (param == DSL_NPARAMS ||
+			!(dsl_params[param].kinds & (e->appname ? APPNAME_BIT : KIND_BIT(e->kind))))
 		{
 			GUC_check_errdetail("Unknown parameter \"%.*s\" for extractor \"%s\".",
 								(int) idlen, id, e->name);
@@ -1030,6 +1080,7 @@ dsl_parse(const char *value, DslExtractor *ext, int *n, MemoryContext cxt)
 		const char *id;
 		size_t		idlen;
 		int			kind;
+		bool		appname = false;
 
 		if (*p == ',' || *p == '\0')
 		{
@@ -1047,6 +1098,11 @@ dsl_parse(const char *value, DslExtractor *ext, int *n, MemoryContext cxt)
 		for (kind = 0; kind < (int) lengthof(dsl_kind_names); kind++)
 			if (dsl_word_eq(id, idlen, dsl_kind_names[kind]))
 				break;
+		if (kind == (int) lengthof(dsl_kind_names) && dsl_word_eq(id, idlen, "appname"))
+		{
+			appname = true;
+			kind = PSSC_EXTRACTOR_SQLCOMMENTER; /* until format is given */
+		}
 		if (kind == (int) lengthof(dsl_kind_names))
 		{
 			GUC_check_errdetail("Unknown extractor \"%s\".", dsl_show(id, idlen));
@@ -1061,7 +1117,8 @@ dsl_parse(const char *value, DslExtractor *ext, int *n, MemoryContext cxt)
 		e = &ext[(*n)++];
 		memset(e, 0, sizeof(*e));
 		e->kind = (PsscExtractorKind) kind;
-		e->name = dsl_kind_names[kind];
+		e->appname = appname;
+		e->name = appname ? "appname" : dsl_kind_names[kind];
 		e->position = kind == PSSC_EXTRACTOR_REGEX ? PSSC_POS_ANY : PSSC_POS_APPEND;
 		e->url_decode = kind == PSSC_EXTRACTOR_SQLCOMMENTER;
 
@@ -1156,6 +1213,7 @@ dsl_serialize(const DslExtractor *ext, int n)
 		out->merge = e->merge;
 		out->url_decode = e->url_decode;
 		out->has_keys = (e->given & (1u << DSL_KEYS)) != 0;
+		out->source = (uint8) (e->appname ? PSSC_SOURCE_APPNAME : PSSC_SOURCE_COMMENT);
 		out->nkeys = (uint32) e->nkeys;
 		out->keys_off = (uint32) apos;
 		apos += e->nkeys * sizeof(PsscBlobStr);

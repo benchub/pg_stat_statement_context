@@ -335,10 +335,29 @@ Format-specific parameters:
   - Other errors (e.g. OOM) disable the extractor for the backend: a compile
     error until the next config change, counted in `regex_compile_failures`.
     A match error simply yields no further pairs and is not counted.
-- **appname** (roadmap, §8): `appname(format=sqlcommenter|marginalia|regex)`
+- **appname** (done, item -38): `appname(format=sqlcommenter|marginalia|regex)`
   parses `application_name` instead of comment text, using the named format's
-  rules (and `pattern`/`keys` for `regex`). Tags from comments win over
-  `appname`-derived tags on key conflicts.
+  rules and parameters (`url_decode`; `kv_sep`/`pair_sep`; `pattern`/`keys`
+  for `regex`). `keys`, `rename` and `merge` work as usual; `position` and
+  other formats' parameters are rejected by the check hook.
+  - `appname` extractors form an **independent chain** with the usual
+    first-producer/`merge` rules; the comment chain and the appname chain
+    don't skip each other. Results are combined and the **comment wins** on
+    key conflicts, regardless of list order. A comment pair dropped by the
+    pipeline does not block the appname value for that key.
+  - Step-8 fill priority depends only on the key, not on the source.
+    Appname-only tags make a statement count as tagged.
+  - The value is `application_name` at **execution start** (`EXECUTE` time
+    for prepared statements; `SET application_name` itself uses the previous
+    value). `nested_tags=inherit` keeps the top-level tags; `scan` re-reads.
+  - Each backend caches the parsed result keyed by the exact string, the
+    config generation and limits; the cache is invalidated when the regex
+    hook changes, and results with transient failures (OOM, interrupted
+    compile, match error; `pssc_regex_transient_failures()`) are not cached.
+    Counters are re-added on every statement as if uncached.
+  - PG replaces non-ASCII bytes in `application_name` (`?` on 14–15, `\xHH`
+    on 16+), so derived values are ASCII. `_extract()` uses the caller's
+    current value and has no separate field for appname tags.
 
 Examples:
 
@@ -832,7 +851,7 @@ some server version, it is omitted on that version rather than exposed as
     range yields no tags.
 
   Tags from `tags_override` (roadmap, §8) go through the same steps except
-  step 3, since no extractor is involved. `appname` (roadmap) is an extractor,
+  step 3, since no extractor is involved. `appname` (item -38) is an extractor,
   so its tags follow every step.
   Malformed tags are dropped and counted in `_info().invalid_tags`. This
   includes:
@@ -1044,7 +1063,7 @@ matches this extension's minimum supported version.
   truncation). This works with prepared statements and with drivers that can't
   add comments. It moves into v1 if driver validation (§6.3) shows prepared
   plans being reused across contexts.
-- **Context from `application_name`:** a DSL extractor
+- **Context from `application_name` (done, item -38):** a DSL extractor
   `appname(format=sqlcommenter|marginalia|regex)` (§4.2). Tags from comments
   win over `appname`-derived tags on key conflicts.
 - A `pg_stat_statement_context_activity` view showing the **current** tags of
@@ -1116,7 +1135,7 @@ matches this extension's minimum supported version.
   - small-`max_entries` churn, with dead entries reclaimed before live ones
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset
-- **pg_regress suite** (`make installcheck`: smoke, guc, extract, normalize) runs in a
+- **pg_regress suite** (`make installcheck`: smoke, guc, extract, normalize, appname) runs in a
   UTF8, no-locale database. Server-level GUCs are changed with `ALTER SYSTEM` +
   `pg_reload_conf()` and an include file that waits until the new values are
   visible. TAP 013 checks that `_extract()` leaves the store and counters

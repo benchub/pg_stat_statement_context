@@ -346,22 +346,37 @@ render_extractors(const PsscExtractorList *list)
 
 		if (i > 0)
 			appendStringInfoChar(&buf, '\n');
-		switch (e->kind)
 		{
-			case PSSC_EXTRACTOR_SQLCOMMENTER:
-				appendStringInfoString(&buf, "sqlcommenter(");
-				break;
-			case PSSC_EXTRACTOR_MARGINALIA:
-				appendStringInfoString(&buf, "marginalia(");
-				break;
-			case PSSC_EXTRACTOR_REGEX:
-				appendStringInfoString(&buf, "regex(");
-				break;
-			default:
-				elog(ERROR, "extractor %u: bad kind %d", i, e->kind);
+			const char *kname;
+
+			switch (e->kind)
+			{
+				case PSSC_EXTRACTOR_SQLCOMMENTER:
+					kname = "sqlcommenter";
+					break;
+				case PSSC_EXTRACTOR_MARGINALIA:
+					kname = "marginalia";
+					break;
+				case PSSC_EXTRACTOR_REGEX:
+					kname = "regex";
+					break;
+				default:
+					elog(ERROR, "extractor %u: bad kind %d", i, e->kind);
+			}
+			if (e->source == PSSC_SOURCE_COMMENT)
+				appendStringInfo(&buf, "%s(position=%s, merge=%s", kname,
+								 position_name(e->position), e->merge ? "on" : "off");
+			else if (e->source == PSSC_SOURCE_APPNAME)
+			{
+				/* appname takes no position; the blob holds any */
+				if (e->position != PSSC_POS_ANY)
+					elog(ERROR, "extractor %u: appname with position %d", i, e->position);
+				appendStringInfo(&buf, "appname(format=%s, merge=%s", kname,
+								 e->merge ? "on" : "off");
+			}
+			else
+				elog(ERROR, "extractor %u: bad source %d", i, e->source);
 		}
-		appendStringInfo(&buf, "position=%s, merge=%s", position_name(e->position),
-						 e->merge ? "on" : "off");
 		if (e->kind == PSSC_EXTRACTOR_SQLCOMMENTER)
 			appendStringInfo(&buf, ", url_decode=%s", e->url_decode ? "on" : "off");
 		else if (e->url_decode)

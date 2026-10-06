@@ -13,7 +13,10 @@
  * surviving pair is validated in linear time and looked up linearly in the
  * extractor's keys/rename lists and the global list (bounded by the
  * check_hook). Deduplication and the drop order use two sorts, so the
- * whole pipeline is O(n log n) in the number of pairs.
+ * whole pipeline is O(n log n) in the number of pairs. The appname
+ * extractors run as a separate chain over application_name
+ * (pssc_appname_tags_build()); their tags join the comment chain's with a
+ * later sequence number, so deduplication keeps the comment's value.
  */
 #ifdef PSSC_STANDALONE
 #include "pssc_standalone.h"
@@ -298,6 +301,77 @@ process_pair(Ctx *c, const PsscExtractor *e, const PsscPair *p)
 	return add_tag(c, key, klen, val, vlen, prio);
 }
 
+/* True if extractor e has a kind this code knows (and can run). */
+static bool
+runnable(const Ctx *c, const PsscExtractor *e)
+{
+	if (e->kind != PSSC_EXTRACTOR_SQLCOMMENTER &&
+		e->kind != PSSC_EXTRACTOR_MARGINALIA &&
+		e->kind != PSSC_EXTRACTOR_REGEX)
+		return false;
+	return e->kind != PSSC_EXTRACTOR_REGEX || c->env->regex != NULL;
+}
+
+/*
+ * Parse body[0, blen) (a comment body, or application_name) with extractor
+ * e's format and run its pairs through steps 2-7; returns true if it added
+ * a tag.
+ */
+static bool
+parse_body(Ctx *c, int index, const PsscExtractor *e, const char *body,
+		   size_t blen)
+{
+	PsscPairOut out;
+	PsscPairResult res;
+	bool		produced = false;
+
+	/* pairs.h: blen bytes and (blen + 1) / 2 + 1 pairs always suffice */
+	out.max_pairs = (blen + 1) / 2 + 1;
+	if (e->kind == PSSC_EXTRACTOR_REGEX && out.max_pairs < e->nkeys)
+		out.max_pairs = e->nkeys;
+	out.bufsize = blen;
+	out.pairs = ctx_alloc(c, out.max_pairs * sizeof(PsscPair));
+	out.buf = ctx_alloc(c, blen > 0 ? blen : 1);
+	if (c->oom)
+		return false;
+	memset(&res, 0, sizeof(res));
+	switch (e->kind)
+	{
+		case PSSC_EXTRACTOR_SQLCOMMENTER:
+			pssc_parse_sqlcommenter(body, blen, e->url_decode, &out, &res);
+			break;
+		case PSSC_EXTRACTOR_MARGINALIA:
+			{
+				PsscMarginaliaOpts opts;
+
+				opts.kv_sep = pssc_blob_str(c->ex, e->kv_sep);
+				opts.kv_sep_len = e->kv_sep.len;
+				opts.pair_sep = pssc_blob_str(c->ex, e->pair_sep);
+				opts.pair_sep_len = e->pair_sep.len;
+				pssc_parse_marginalia(body, blen, &opts, &out, &res);
+			}
+			break;
+		default:
+			c->env->regex(c->env->arg, index, c->ex, body, blen, &out, &res);
+			break;
+	}
+	c->stats->dropped_tags += res.ndropped;
+
+	/*
+	 * Malformed segments count as invalid only if this parser found a
+	 * well-formed pair in the same body: the body is then in its format,
+	 * while one without may be another format's (or, for application_name,
+	 * a plain name such as "psql").
+	 */
+	if (res.npairs > 0)
+		c->stats->invalid_tags += res.nmalformed;
+	if (res.npairs > out.max_pairs)
+		res.npairs = out.max_pairs;
+	for (size_t j = 0; j < res.npairs && !c->oom; j++)
+		produced |= process_pair(c, e, &out.pairs[j]);
+	return produced && !c->oom;
+}
+
 /* Parse every comment of extractor e; returns true if it added a tag. */
 static bool
 run_extractor(Ctx *c, int index, const PsscExtractor *e)
@@ -305,12 +379,7 @@ run_extractor(Ctx *c, int index, const PsscExtractor *e)
 	const PsscScanResult *scan;
 	bool		produced = false;
 
-	if (e->position >= NPOSITIONS ||
-		(e->kind != PSSC_EXTRACTOR_SQLCOMMENTER &&
-		 e->kind != PSSC_EXTRACTOR_MARGINALIA &&
-		 e->kind != PSSC_EXTRACTOR_REGEX))
-		return false;
-	if (e->kind == PSSC_EXTRACTOR_REGEX && c->env->regex == NULL)
+	if (e->position >= NPOSITIONS || !runnable(c, e))
 		return false;
 
 	scan = get_scan(c, (PsscPosition) e->position);
@@ -319,61 +388,18 @@ run_extractor(Ctx *c, int index, const PsscExtractor *e)
 		const char *span = c->s + scan->comments[i].offset;
 		size_t		boff,
 					blen;
-		const char *body;
-		PsscPairOut out;
-		PsscPairResult res;
 
 		if (!pssc_comment_body(span, scan->comments[i].len, &boff, &blen))
 			continue;
-		body = span + boff;
-		/* pairs.h: blen bytes and (blen + 1) / 2 + 1 pairs always suffice */
-		out.max_pairs = (blen + 1) / 2 + 1;
-		if (e->kind == PSSC_EXTRACTOR_REGEX && out.max_pairs < e->nkeys)
-			out.max_pairs = e->nkeys;
-		out.bufsize = blen;
-		out.pairs = ctx_alloc(c, out.max_pairs * sizeof(PsscPair));
-		out.buf = ctx_alloc(c, blen > 0 ? blen : 1);
-		if (c->oom)
-			break;
-		memset(&res, 0, sizeof(res));
-		switch (e->kind)
-		{
-			case PSSC_EXTRACTOR_SQLCOMMENTER:
-				pssc_parse_sqlcommenter(body, blen, e->url_decode, &out, &res);
-				break;
-			case PSSC_EXTRACTOR_MARGINALIA:
-				{
-					PsscMarginaliaOpts opts;
-
-					opts.kv_sep = pssc_blob_str(c->ex, e->kv_sep);
-					opts.kv_sep_len = e->kv_sep.len;
-					opts.pair_sep = pssc_blob_str(c->ex, e->pair_sep);
-					opts.pair_sep_len = e->pair_sep.len;
-					pssc_parse_marginalia(body, blen, &opts, &out, &res);
-				}
-				break;
-			default:
-				c->env->regex(c->env->arg, index, c->ex, body, blen, &out, &res);
-				break;
-		}
-		c->stats->dropped_tags += res.ndropped;
-
-		/*
-		 * Malformed segments count as invalid only if this parser found a
-		 * well-formed pair in the same comment: the comment is then in its
-		 * format, while a comment without one may be another format's.
-		 */
-		if (res.npairs > 0)
-			c->stats->invalid_tags += res.nmalformed;
-		if (res.npairs > out.max_pairs)
-			res.npairs = out.max_pairs;
-		for (size_t j = 0; j < res.npairs && !c->oom; j++)
-			produced |= process_pair(c, e, &out.pairs[j]);
+		produced |= parse_body(c, index, e, span + boff, blen);
 	}
 	return produced && !c->oom;
 }
 
-/* The extractor chain over the statement's own comments or its footer. */
+/*
+ * The comment extractor chain over the statement's own comments or its
+ * footer. appname extractors are not part of it.
+ */
 static void
 run_chain(Ctx *c, bool footer)
 {
@@ -386,10 +412,42 @@ run_chain(Ctx *c, bool footer)
 	{
 		const PsscExtractor *e = &c->ex->extractors[i];
 
+		if (e->source != PSSC_SOURCE_COMMENT)
+			continue;
 		if (produced && !e->merge)
 			continue;
 		produced |= run_extractor(c, (int) i, e);
 	}
+}
+
+/* The appname extractor chain over application_name. */
+static void
+run_appname_chain(Ctx *c, const char *appname, size_t len)
+{
+	bool		produced = false;
+
+	c->nnormseen = 0;
+	for (uint32 i = 0; i < c->ex->nextractors && !c->oom; i++)
+	{
+		const PsscExtractor *e = &c->ex->extractors[i];
+
+		if (e->source != PSSC_SOURCE_APPNAME || !runnable(c, e))
+			continue;
+		if (produced && !e->merge)
+			continue;
+		produced |= parse_body(c, (int) i, e, appname, len);
+	}
+}
+
+static void
+stats_add(PsscTagsetStats *dst, const PsscTagsetStats *src)
+{
+	dst->invalid_tags += src->invalid_tags;
+	dst->dropped_tags += src->dropped_tags;
+	dst->heuristic_scans += src->heuristic_scans;
+	dst->regex_compile_failures += src->regex_compile_failures;
+	dst->normalized_tags += src->normalized_tags;
+	dst->normalize_failures += src->normalize_failures;
 }
 
 static int
@@ -427,6 +485,7 @@ pssc_tagset_build(const char *s, size_t start, size_t end,
 				  const struct PsscTagList *exclude_tags,
 				  const PsscTagsetLimits *limits,
 				  const PsscTagsetEnv *env,
+				  const PsscAppnameTags *appname,
 				  PsscTagsetOut *out,
 				  PsscTagsetStats *stats)
 {
@@ -460,6 +519,23 @@ pssc_tagset_build(const char *s, size_t start, size_t end,
 	{
 		run_chain(&c, true);
 		out->footer = c.ntag > 0;
+	}
+
+	/*
+	 * application_name tags after the comment tags (higher seq): the
+	 * deduplication below keeps the comment's value of a key.
+	 */
+	if (appname != NULL)
+	{
+		stats_add(stats, &appname->stats);
+		if (appname->oom)
+			c.oom = true;
+		for (size_t i = 0; i < appname->ntags && !c.oom; i++)
+		{
+			const PsscTagCandidate *t = &appname->tags[i];
+
+			add_tag(&c, t->key, t->klen, t->val, t->vlen, t->prio);
+		}
 	}
 	if (c.ntag == 0 || c.oom)
 		goto done;
@@ -525,6 +601,67 @@ done:
 		out->len = 0;
 		out->ntags = 0;
 		out->footer = false;
+		out->oom = true;
+	}
+}
+
+bool
+pssc_extractors_have_appname(const PsscExtractorList *list)
+{
+	for (uint32 i = 0; i < list->nextractors; i++)
+		if (list->extractors[i].source == PSSC_SOURCE_APPNAME)
+			return true;
+	return false;
+}
+
+void
+pssc_appname_tags_build(const char *appname, size_t len,
+						const PsscExtractorList *extractors,
+						const PsscTagList *tags,
+						const PsscTagList *exclude_tags,
+						const PsscTagsetLimits *limits,
+						const PsscTagsetEnv *env,
+						PsscAppnameTags *out)
+{
+	Ctx			c;
+	PsscTagCandidate *cand;
+
+	memset(out, 0, sizeof(*out));
+	if (len == 0)
+		return;
+
+	memset(&c, 0, sizeof(c));
+	c.s = appname;
+	c.ex = extractors;
+	c.tags = tags;
+	c.exclude = exclude_tags;
+	c.match_all = pssc_tag_list_match_all(tags);
+	c.lim = limits;
+	c.env = env;
+	c.stats = &out->stats;
+
+	run_appname_chain(&c, appname, len);
+	if (c.ntag > 0 && !c.oom)
+	{
+		cand = ctx_alloc(&c, c.ntag * sizeof(PsscTagCandidate));
+		if (cand != NULL)
+		{
+			for (size_t i = 0; i < c.ntag; i++)
+			{
+				cand[i].key = c.tag[i].key;
+				cand[i].klen = c.tag[i].klen;
+				cand[i].val = c.tag[i].val;
+				cand[i].vlen = c.tag[i].vlen;
+				cand[i].prio = c.tag[i].prio;
+			}
+			out->tags = cand;
+			out->ntags = c.ntag;
+		}
+	}
+	if (c.oom)
+	{
+		out->tags = NULL;
+		out->ntags = 0;
 		out->oom = true;
 	}
 }

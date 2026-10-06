@@ -2,7 +2,9 @@
 
 This page describes how the extension finds comments in a statement, how the
 `pg_stat_statement_context.extractors` setting (the *extractor DSL*) turns them
-into tags, and how to keep the number of distinct tag sets under control.
+into tags, and how to keep the number of distinct tag sets under control. The
+[`appname`](#appname) extractor derives tags from `application_name` instead,
+for clients that can't add comments.
 
 Use `pg_stat_statement_context_extract()` (superuser-only by default, see
 [the SQL interface](sql-interface.md#pg_stat_statement_context_extract)) to
@@ -69,7 +71,7 @@ extractors, each with optional parameters:
 
 ```
 extractor := name [ '(' param { ',' param } ')' ]
-name      := sqlcommenter | marginalia | regex
+name      := sqlcommenter | marginalia | regex | appname
 param     := key '=' value
 ```
 
@@ -80,6 +82,16 @@ The default is `'sqlcommenter, marginalia'`.
 has `merge=on`, in which case it still runs and its tags are added. When the
 same key comes from several places, the first occurrence wins: by extractor
 order, then comment order, then pair order.
+
+[`appname`](#appname) extractors form a **separate chain** over
+`application_name`, with the same rules among themselves (the first one that
+produces wins; later ones run only with `merge=on`). The two chains don't
+affect each other: a comment extractor that produced doesn't stop an
+`appname` extractor, and vice versa. Their tags are then combined, and on a
+key conflict **the comment's value wins**, wherever the extractors appear in
+the list. A comment pair that the pipeline drops (an invalid value, a failed
+normalization, a key filtered out) doesn't block the `application_name` value
+for that key.
 
 An extractor *produces* when at least one of its tags is still a candidate
 after [pipeline](#the-tag-pipeline) steps 1–7 (validation, the allowlists and
@@ -117,7 +129,7 @@ for 3 keys, well within 512.) See
 
 | Parameter | Values | Meaning |
 |---|---|---|
-| `position` | `append`, `prepend`, `any` | Where to look (above). Default: `append` for `sqlcommenter` and `marginalia`, `any` for `regex`. |
+| `position` | `append`, `prepend`, `any` | Where to look (above). Default: `append` for `sqlcommenter` and `marginalia`, `any` for `regex`. Not accepted by `appname`. |
 | `keys` | `a\|b\|c` | For `sqlcommenter` and `marginalia`: a per-extractor allowlist. It matches the **original** key names as written in the comment, and is applied **before** `rename`. For `regex`: the names of the capture groups (required). |
 | `rename` | `old:new\|old2:new2` | Renames keys, for example to normalize `route` and `controller` from different formats to one key. |
 | `merge` | `on`, `off` (default) | Add this extractor's tags to those of earlier extractors instead of being skipped once one has produced. |
@@ -200,6 +212,67 @@ memory), that extractor is disabled in that backend until the next
 configuration change, and the failure is counted in
 `_info().regex_compile_failures`. The user's statement never fails.
 
+### `appname`
+
+`appname(format=sqlcommenter|marginalia|regex, ...)` derives tags from the
+session's `application_name` instead of from comments, for drivers and tools
+that can set `application_name` (e.g. `PGAPPNAME`, the `application_name`
+connection parameter) but can't add comments to their queries.
+
+- `format` (required) selects the parser. The whole `application_name` string
+  is parsed as if it were a comment body, with that format's rules and
+  parameters: `url_decode` for `sqlcommenter`; `kv_sep` and `pair_sep` for
+  `marginalia`; `pattern` and `keys` (both required) for `regex`. A parameter
+  of another format is rejected. `keys`, `rename` and `merge` work as for the
+  other extractors; `position` is not accepted.
+- The tags go through the same [pipeline](#the-tag-pipeline) (allowlists,
+  `rename`, `normalize`, truncation, limits) as comment tags, and are combined
+  with them as described in [chain semantics](#the-extractor-dsl): the
+  comment wins a key conflict. A statement without any comment still gets the
+  `application_name` tags, and counts as tagged for `untagged = skip`.
+- Malformed segments are dropped and counted in `_info().invalid_tags` under
+  the usual rule (only when the same value also contained a well-formed pair,
+  so a plain name such as `psql` counts nothing); a value that decodes to a NUL
+  byte or invalid text is always counted.
+- The value used is `application_name` **when the statement starts
+  executing**: a prepared statement uses the value at `EXECUTE` (or protocol Execute)
+  time, not at `PREPARE`; a `SET application_name` statement itself is tagged
+  with the previous value; `SET LOCAL` lasts until the end of the
+  transaction. A nested statement with [`nested_tags`](configuration.md#nested_tags)
+  `= inherit` gets the tags of its top-level statement, even if a function
+  changed `application_name` in between; with `scan` it reads the value
+  current when it starts.
+- PostgreSQL replaces non-ASCII characters in `application_name` (with `?` on
+  PostgreSQL 14 and 15, with `\xHH` escapes on 16 and later), so tag values
+  derived from it are ASCII.
+- Each backend caches the parsed result for the last `application_name` and
+  configuration, so a statement normally costs one string comparison. The
+  counters (`invalid_tags`, `normalized_tags`, ...) are added again for every
+  statement, as if nothing were cached.
+- `pg_stat_statement_context_extract()` uses the calling session's current
+  `application_name`; its result has no separate field for these tags.
+
+```sql
+ALTER SYSTEM SET pg_stat_statement_context.extractors =
+  'sqlcommenter, appname(format=marginalia)';
+ALTER SYSTEM SET pg_stat_statement_context.tags = 'service, job, controller';
+SELECT pg_reload_conf();
+SELECT pg_sleep(0.5);  -- the reload is asynchronous
+
+SET application_name = 'service:billing,job:nightly';
+SELECT pg_stat_statement_context_extract('SELECT 1') -> 'tags';
+-- {"job": "nightly", "service": "billing"}
+SELECT pg_stat_statement_context_extract($$SELECT 1 /*job='adhoc'*/$$) -> 'tags';
+-- {"job": "adhoc", "service": "billing"}
+RESET application_name;
+```
+
+A version string such as `billing/1.2.3`, with a regex:
+
+```ini
+pg_stat_statement_context.extractors = 'sqlcommenter, appname(format=regex, pattern=''^(\\w+)/([0-9.]+)$'', keys=app|version)'
+```
+
 ### Validation
 
 The setting is parsed and validated when it is set or reloaded; a malformed
@@ -214,7 +287,10 @@ value is rejected and the previous one stays in effect. It is rejected for:
   contains `pair_sep`;
 - for `regex`: a missing `pattern` or `keys`, an invalid pattern, a pattern
   over 1 kB, back-references, more capture groups than `max_tags`, or a number
-  of `keys` different from the number of capture groups.
+  of `keys` different from the number of capture groups;
+- for `appname`: a missing or unknown `format`, `position`, or a parameter of
+  another format (e.g. `kv_sep` with `format=sqlcommenter`); the chosen
+  format's own rules then apply (as for `regex` above with `format=regex`).
 
 ### Examples
 
@@ -329,7 +405,9 @@ extractor finds goes through these steps:
    `dropped_tags`) and the next one is tried, so an oversized tag never
    pushes out smaller lower-priority ones. This step runs after the extractor chain
    has chosen its winner (see [chain semantics](#the-extractor-dsl)), so a
-   tag dropped here is not replaced by tags from a skipped extractor.
+   tag dropped here is not replaced by tags from a skipped extractor. The
+   priority depends only on the key, not on whether the tag came from a
+   comment or from `application_name`.
 
 The stored tag set is sorted by key and is part of the entry's key: two
 statements with the same tags in a different order share an entry, and

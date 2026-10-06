@@ -126,7 +126,8 @@ extern PGDLLEXPORT const PsscTagList *pssc_guc_exclude_tags(void);
  * Every field is filled in: omitted parameters get their defaults (position:
  * append for sqlcommenter and marginalia, any for regex; merge off;
  * url_decode on for sqlcommenter; kv_sep ":" and pair_sep "," for
- * marginalia).
+ * marginalia). appname extractors (source APPNAME) have the defaults of
+ * their format, except position, which they do not take (stored as any).
  */
 #define PSSC_MAX_EXTRACTORS			16
 #define PSSC_MAX_REGEX_PATTERN_LEN	1024	/* bytes */
@@ -137,6 +138,18 @@ typedef enum PsscExtractorKind
 	PSSC_EXTRACTOR_MARGINALIA,
 	PSSC_EXTRACTOR_REGEX
 } PsscExtractorKind;
+
+/*
+ * What an extractor parses (backlog item 20261005-091225-38). An
+ * appname(format=F, ...) extractor is stored with kind F and source
+ * APPNAME: it parses application_name with F's rules and parameters instead
+ * of comments, and has no position.
+ */
+typedef enum PsscExtractorSource
+{
+	PSSC_SOURCE_COMMENT = 0,
+	PSSC_SOURCE_APPNAME
+} PsscExtractorSource;
 
 typedef struct PsscBlobStr
 {
@@ -163,6 +176,7 @@ typedef struct PsscExtractor
 	 * keys[i] names capture group i + 1 (one key per group).
 	 */
 	bool		has_keys;
+	uint8		source;			/* PsscExtractorSource */
 	uint32		nkeys;
 	uint32		keys_off;		/* PsscBlobStr[nkeys] */
 	uint32		nrename;
