@@ -1,0 +1,176 @@
+# CI matrix (DESIGN.md §9, backlog 20261005-091225-3).
+#
+# Linux cells run the local Docker harness, so CI and local runs share one code
+# path: reproduce any Linux cell with the command in its "Run tests" step.
+#   linux         scripts/docker-test.sh <major>             PGDG packages
+#   linux-source  scripts/docker-test.sh --assert <major>    --enable-cassert
+#                 scripts/docker-test.sh --valgrind <major>  server under Valgrind
+# Source builds are cached as Docker images (docker save/load), keyed on the
+# image tag, which encodes the release, the flavor and a hash of
+# docker/Dockerfile.source + docker/build-postgres.sh.
+# macOS cells build PostgreSQL with docker/build-postgres.sh (Homebrew's
+# packages lack the TAP modules), cache the install prefix, and run
+# docker/run-tests.sh on the host.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version-guards:
+    name: Version-guard check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Self-test
+        run: scripts/check-version-guards.sh --self-test
+      - name: Check tree
+        run: scripts/check-version-guards.sh
+
+  linux:
+    name: Linux PG${{ matrix.pg }} (PGDG)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: scripts/docker-test.sh ${{ matrix.pg }}
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-pg${{ matrix.pg }}-logs
+          path: tmp/docker-${{ matrix.pg }}/
+          if-no-files-found: ignore
+
+  linux-source:
+    name: Linux PG${{ matrix.pg }} (${{ matrix.flavor }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pg: 14, flavor: assert }
+          - { pg: 15, flavor: assert }
+          - { pg: 16, flavor: assert }
+          - { pg: 17, flavor: assert }
+          - { pg: 18, flavor: assert }
+          - { pg: 18, flavor: valgrind }
+    env:
+      IMAGE_TAR: tmp/ci-cache/pgsrc-image.tar
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve source-build image
+        id: image
+        run: |
+          tag=$(scripts/docker-test.sh --print-image --${{ matrix.flavor }} ${{ matrix.pg }})
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "PostgreSQL source build: $tag"
+      - name: Restore cached PostgreSQL build
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.IMAGE_TAR }}
+          key: pgsrc-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.tag }}
+      - name: Load cached PostgreSQL build
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: docker load -i "$IMAGE_TAR"
+      - name: Run tests
+        run: scripts/docker-test.sh --${{ matrix.flavor }} ${{ matrix.pg }}
+      - name: Export PostgreSQL build for the cache
+        id: export
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        env:
+          TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          docker image inspect "$TAG" > /dev/null
+          mkdir -p "$(dirname "$IMAGE_TAR")"
+          docker save -o "$IMAGE_TAR" "$TAG"
+      - name: Save PostgreSQL build to the cache
+        if: always() && steps.export.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.IMAGE_TAR }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-pg${{ matrix.pg }}-${{ matrix.flavor }}-logs
+          path: tmp/docker-${{ matrix.pg }}-${{ matrix.flavor }}/
+          if-no-files-found: ignore
+
+  macos:
+    name: macOS PG${{ matrix.pg }} (source build)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          echo "PGPREFIX=$HOME/pgsql-${{ matrix.pg }}" >> "$GITHUB_ENV"
+          brew install bison flex cpanminus
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+          # IPC::Run for the TAP tests (configure --enable-tap-tests checks it).
+          cpanm --notest --local-lib "$HOME/perl5" IPC::Run
+          echo "PERL5LIB=$HOME/perl5/lib/perl5" >> "$GITHUB_ENV"
+      - name: Resolve latest ${{ matrix.pg }}.x release
+        id: release
+        run: |
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/versions.json" https://www.postgresql.org/versions.json
+          version=$(jq -er --arg m "${{ matrix.pg }}" \
+            '.[] | select(.major == $m) | "\(.major).\(.latestMinor)"' "$RUNNER_TEMP/versions.json")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "PostgreSQL $version"
+      - name: Restore cached PostgreSQL build
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.PGPREFIX }}
+          key: pgsrc-${{ runner.os }}-${{ runner.arch }}-${{ steps.release.outputs.version }}-release-${{ hashFiles('docker/build-postgres.sh') }}
+      - name: Build PostgreSQL ${{ steps.release.outputs.version }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: docker/build-postgres.sh "${{ steps.release.outputs.version }}" "$PGPREFIX" release
+      # Saved before the tests run, so the cache never holds our extension.
+      - name: Save PostgreSQL build to the cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.PGPREFIX }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Run tests
+        env:
+          PSSC_SRC: ${{ github.workspace }}
+          PSSC_OUT: ${{ github.workspace }}/tmp/macos-${{ matrix.pg }}
+          PSSC_BUILD: ${{ runner.temp }}/pssc-build
+          PSSC_WORK: ${{ runner.temp }}/pssc-work
+          PSSC_TEST_MODE: release
+        run: |
+          export PATH="$PGPREFIX/bin:$PATH"
+          docker/run-tests.sh
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-pg${{ matrix.pg }}-logs
+          path: tmp/macos-${{ matrix.pg }}/
+          if-no-files-found: ignore

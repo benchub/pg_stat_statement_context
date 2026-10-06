@@ -157,8 +157,19 @@ SELECT pg_stat_statement_context_extract(
 ```sh
 make installcheck                # needs a running server with the library preloaded
 scripts/docker-test.sh 17        # build and run the regression and TAP suites in Docker
+scripts/docker-test.sh 15.0      # same, against an exact release built from source
+scripts/docker-test.sh --assert 17    # source build with --enable-cassert
+scripts/docker-test.sh --valgrind 18  # regression suite with the server under Valgrind
 make unittest                    # standalone scanner/parser unit tests and fuzz corpus
 ```
+
+CI (`.github/workflows/ci.yml`) runs the same `scripts/docker-test.sh` commands
+for its Linux cells (PG 14–18 from PGDG, assert builds of 14–18, Valgrind
+on 18) and runs `docker/run-tests.sh` directly on macOS against PostgreSQL
+built by `docker/build-postgres.sh`. The TAP tests use the PG 15+ module names
+(`PostgreSQL::Test::Cluster`/`Utils`). PG 14 ships them as aliases of
+`PostgresNode`/`TestLib` from 14.3 but only installs them from 14.6, so
+14.0–14.5 can't run the TAP suite.
 
 `DESIGN.md` describes the design and its rationale in detail.
 

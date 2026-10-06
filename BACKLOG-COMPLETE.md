@@ -780,6 +780,25 @@ Remove the matching cases from the compat test module (`test/modules/pssc_compat
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-3: CI matrix (PG14–18 × Linux/macOS, assert, Valgrind)
+
+**Description:** Add a GitHub Actions workflow (§9 CI matrix):
+- Build and run `make installcheck` plus the TAP tests for PG14–18 on Linux (PGDG packages) and macOS (Homebrew or source build).
+- Add a Linux job that builds PostgreSQL with `--enable-cassert`/`-DUSE_ASSERT_CHECKING` and `--enable-tap-tests`.
+- Add a Linux job that runs the regression suite under Valgrind, using PostgreSQL's `valgrind.supp`.
+- Cache source builds.
+- Make the TAP harness work on both module namespaces: `PostgresNode`/`TestLib` on PG14 and `PostgreSQL::Test::*` on PG15+. This can be a small compatibility wrapper or a documented PG14 skip policy.
+
+**Acceptance criteria:**
+- The workflow runs on pushes and pull requests.
+- Every cell is green on the skeleton.
+- A deliberately failing test fails its job.
+- The Valgrind job reports no errors.
+
+**Depends on:** 20261005-091225-1
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

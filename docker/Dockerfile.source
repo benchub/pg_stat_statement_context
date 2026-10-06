@@ -1,40 +1,24 @@
 # Build/test image for an exact PostgreSQL release built from the official
 # source tarball (e.g. 15.0, whose API differs from later 15.x minors), with
 # pg_stat_statements for the parity checks of the TAP tests.
-# Usage: scripts/docker-test.sh <major>.<minor>   e.g. scripts/docker-test.sh 15.0
+# PG_FLAVOR selects the build (docker/build-postgres.sh): release (default),
+# assert (--enable-cassert) or valgrind (cassert + -DUSE_VALGRIND, plus the
+# valgrind package and PostgreSQL's src/tools/valgrind.supp).
+# The image holds only PostgreSQL and the toolchain; scripts/docker-test.sh runs
+# docker/run-tests.sh from the mounted repository, so editing the test script
+# never invalidates a (slow, CI-cached) PostgreSQL build.
+# Usage: scripts/docker-test.sh [--assert|--valgrind] <major>[.<minor>]
 ARG PG_MAJOR=15
 FROM postgres:${PG_MAJOR}
 ARG PG_VERSION
+ARG PG_FLAVOR=release
 # bison and flex: PG17+ needs them even when building from a release tarball.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential curl ca-certificates bzip2 bison flex libipc-run-perl \
+      $([ "$PG_FLAVOR" = valgrind ] && echo valgrind) \
  && rm -rf /var/lib/apt/lists/*
-# Download the tarball and its official .sha256 to files (no pipelines, so a
-# failed or truncated download cannot be masked), verify, and only then extract.
-RUN set -eu; \
-    : "${PG_VERSION:?PG_VERSION build-arg is required}"; \
-    base="https://ftp.postgresql.org/pub/source/v${PG_VERSION}"; \
-    tarball="postgresql-${PG_VERSION}.tar.bz2"; \
-    mkdir -p /usr/src/pg-dl; \
-    cd /usr/src/pg-dl; \
-    curl -fSL --retry 5 --retry-delay 3 --retry-connrefused -o "$tarball" "$base/$tarball"; \
-    curl -fSL --retry 5 --retry-delay 3 --retry-connrefused -o "$tarball.sha256" "$base/$tarball.sha256"; \
-    grep -Eqx "[0-9a-f]{64}  $tarball" "$tarball.sha256" \
-      || { echo "malformed checksum file for $tarball:" >&2; cat "$tarball.sha256" >&2; exit 1; }; \
-    sha256sum --check --strict "$tarball.sha256"; \
-    tar -xjf "$tarball" -C /usr/src; \
-    cd "/usr/src/postgresql-${PG_VERSION}"; \
-    rm -rf /usr/src/pg-dl; \
-    ./configure -q --prefix=/usr/local/pgsql --enable-tap-tests \
-      --without-readline --without-zlib --without-icu; \
-    make -s -j"$(nproc)"; \
-    make -s install; \
-    make -s -C src/test/perl install; \
-    make -s -C src/test/regress install; \
-    make -s -C contrib/pg_stat_statements install; \
-    cd /; \
-    rm -rf "/usr/src/postgresql-${PG_VERSION}"
+COPY build-postgres.sh /usr/local/bin/build-postgres.sh
+RUN : "${PG_VERSION:?PG_VERSION build-arg is required}" \
+ && build-postgres.sh "$PG_VERSION" /usr/local/pgsql "$PG_FLAVOR"
 ENV PATH=/usr/local/pgsql/bin:$PATH
-COPY run-tests.sh /usr/local/bin/run-tests.sh
-ENTRYPOINT ["/usr/local/bin/run-tests.sh"]

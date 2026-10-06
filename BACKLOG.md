@@ -50,7 +50,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
-| 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-235708-1 | `extract` regression output differs on old PG14 minors (psql emoji padding) | 20261005-091225-11 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
@@ -156,25 +155,6 @@ dependencies and is not shown.
 ---
 
 ## v1 tasks
-
-### 20261005-091225-3: CI matrix (PG14–18 × Linux/macOS, assert, Valgrind)
-
-**Description:** Add a GitHub Actions workflow (§9 CI matrix):
-- Build and run `make installcheck` plus the TAP tests for PG14–18 on Linux (PGDG packages) and macOS (Homebrew or source build).
-- Add a Linux job that builds PostgreSQL with `--enable-cassert`/`-DUSE_ASSERT_CHECKING` and `--enable-tap-tests`.
-- Add a Linux job that runs the regression suite under Valgrind, using PostgreSQL's `valgrind.supp`.
-- Cache source builds.
-- Make the TAP harness work on both module namespaces: `PostgresNode`/`TestLib` on PG14 and `PostgreSQL::Test::*` on PG15+. This can be a small compatibility wrapper or a documented PG14 skip policy.
-
-**Acceptance criteria:**
-- The workflow runs on pushes and pull requests.
-- Every cell is green on the skeleton.
-- A deliberately failing test fails its job.
-- The Valgrind job reports no errors.
-
-**Depends on:** 20261005-091225-1
-**Open questions:** none
-**Status:** ready
 
 ### 20261005-235708-1: `extract` regression output differs on old PG14 minors (psql emoji padding)
 
