@@ -50,11 +50,9 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
-| 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | no | ready |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
 | 20261006-143225-1 | Close the deadline-postponement race in the test module's sleep injection | 20261006-113156-1 | no | ready |
-| 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
-| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | blocked-on-deps |
+| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | ready |
@@ -150,29 +148,6 @@ dependencies and is not shown.
 
 ## v1 tasks
 
-### 20261006-010149-1: Exporter-friendly SQL surface: monotonic counters and bucket metadata
-
-**Description:** Found while writing the exporter recipes (item -42). None of the views has a counter that only grows: `_totals` is a sliding window and bucket rows expire. So Prometheus `rate()` can't be used, and the recipes export gauges over the last closed bucket instead. They also hard-code the bucket length GUC and the hidden 2000-01-01 starting point for buckets. Proposed additions:
-1. Bucket metadata in `_info()`: `bucket_seconds`, `current_bucket_start`, `last_closed_bucket_start`.
-2. Optionally a `pg_stat_statement_context_last_bucket` view, which gives the last closed bucket per entry.
-3. Optionally counters per entry that only grow (`calls_total`, `exec_time_total` plus `stats_since`) and survive bucket expiry until the entry is evicted. This costs extra shared-memory bytes per entry.
-4. An epoch-number form of `stats_reset`, or let the recipes keep converting it.
-
-Once this lands, simplify the recipes in `docs/integrations/` and update `scripts/test-integrations.sh`.
-
-**Acceptance criteria:**
-- The chosen columns or views exist, are documented in §7 and `docs/sql-interface.md`, and are tested in TAP or 019.
-- The recipes no longer depend on the epoch or bucket-length GUC.
-
-**Decisions:**
-- 2026-10-06: Build additions 1 (bucket metadata in `_info()`: `bucket_seconds`, `current_bucket_start`, `last_closed_bucket_start`), 2 (`pg_stat_statement_context_last_bucket` view) and 4 (epoch-number form of `stats_reset`). Addition 3 was initially deferred; see the next decision.
-- 2026-10-06: Do it together with 20261005-213120-1 in one builder run, before `--1.0.sql` is frozen.
-- 2026-10-06 (later): The owner wants addition 3 in v1 as well: pgss-style monotonic per-entry counters (`calls_total`, `exec_time_total`, `stats_since`) that only reset on eviction or `_reset()`, so exporters can use `rate()`. Expect about 16–24 bytes more shared memory per entry; update the §5 sizing numbers.
-
-**Depends on:** 20261005-091225-42
-**Open questions:** none
-**Status:** ready
-
 ### 20261006-075124-1: Fewer eviction passes under sustained churn (adaptive batch or compact scan)
 
 **Description:** Follow-up to 20261006-043919-1. Partial selection made a pass ~40% faster, but under the `evict` benchmark at `max_entries=10000` p99 is still ~2.15× pgss alone (target ~1.5×). The remaining cost is the single scan of ~10,000 entries (~870 B each, ~8.7 MB) under the exclusive lock. Options:
@@ -202,25 +177,6 @@ Fix options: block SIGALRM around the snapshot and postponement, or expose deadl
 **Open questions:** none
 **Status:** ready
 
-### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
-
-**Description:** Found while documenting (item -28). `evicted_entries` counts both expired entries reclaimed by an eviction pass and live entries evicted, and `dealloc` counts passes. `dropped_records` (calls lost because a pass freed nothing) is not exposed. So `_info()` alone cannot tell an operator that `max_entries` is too small, contrary to DESIGN §5.3 step 3. The docs currently give a workaround: compare the row count of `pg_stat_statement_context_totals` with `max_entries`.
-
-Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless) and `evicted_entries` (live, history lost), and expose `dropped_records`. Update §5.3, §7, the docs and tests.
-
-**Acceptance criteria:**
-- Expired-only reclamation moves `reclaimed_entries`, not `evicted_entries`.
-- Undersized churn moves `evicted_entries`.
-- A full table with nothing to free moves `dropped_records`.
-- The docs' undersizing guidance uses the new counters.
-
-**Decisions:**
-- 2026-10-06: Approved: split into `reclaimed_entries` (expired/dead), `evicted_entries` (live only) and add `dropped_records`. Do it in the same builder run as 20261006-010149-1 (one `_info()` change), before `--1.0.sql` is frozen (no upgrade script).
-
-**Depends on:** 20261005-091225-21
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-29: v1 release readiness
 
 **Description:** Prepare and cut the v1.0 release:
@@ -242,7 +198,7 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 
 **Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ---
 
