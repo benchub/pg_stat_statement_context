@@ -1018,6 +1018,20 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 **Open questions:** none
 **Status:** done
 
+### 20261006-101139-1: Confirm `tags_override` rename rule and nested `scan` behavior
+
+**Description:** Item -30 landed `tags_override` with two builder decisions that need the user's confirmation (DESIGN.md §6.11 and §8). If either is rejected, change the code, tests (test/t/023_tags_override.pl, test/sql/tags_override.sql) and docs (docs/configuration.md `tags_override`, docs/extractors.md pipeline) accordingly.
+
+**Acceptance criteria:** the user's answers are recorded as decisions; code, tests and docs match them.
+
+**Decisions:**
+- 2026-10-06: Q1 confirmed: override keys use the comment `sqlcommenter` extractors' `rename` lists.
+- 2026-10-06: Q2 confirmed: with `nested_tags = scan`, a function's `SET tags_override` applies to its nested statements.
+
+**Depends on:** 20261005-091225-30
+**Open questions:** none (answered 2026-10-06)
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

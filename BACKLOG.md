@@ -50,12 +50,11 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
-| 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
-| 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | yes | blocked-on-questions |
+| 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | no | ready |
+| 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
 | 20261006-092320-1 | Flaky TAP 004: "every alternating reload replaced the extractors" (28 of 30) | — | no | ready |
-| 20261006-101139-1 | Confirm `tags_override` rename rule and nested `scan` behavior | 20261005-091225-30 | yes | blocked-on-questions |
-| 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
-| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | yes | blocked-on-questions |
+| 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
+| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | blocked-on-deps |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
@@ -166,11 +165,13 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 - The chosen columns or views exist, are documented in §7 and `docs/sql-interface.md`, and are tested in TAP or 019.
 - The recipes no longer depend on the epoch or bucket-length GUC.
 
+**Decisions:**
+- 2026-10-06: Build additions 1 (bucket metadata in `_info()`: `bucket_seconds`, `current_bucket_start`, `last_closed_bucket_start`), 2 (`pg_stat_statement_context_last_bucket` view) and 4 (epoch-number form of `stats_reset`). Addition 3 (monotonic per-entry counters) is **not** in scope for now; the owner may revisit it.
+- 2026-10-06: Do it together with 20261005-213120-1 in one builder run, before `--1.0.sql` is frozen.
+
 **Depends on:** 20261005-091225-42
-**Open questions:**
-- Q1: Which of 1–4 should be done? Item 3 changes the shared-memory entry size and the meaning of "evicted".
-- Q2: Should this be combined with 20261005-213120-1, since both change the `_info()` columns?
-**Status:** blocked-on-questions
+**Open questions:** none
+**Status:** ready
 
 ### 20261006-075124-1: Fewer eviction passes under sustained churn (adaptive batch or compact scan)
 
@@ -180,10 +181,12 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 
 **Acceptance criteria:** eviction-benchmark p99 at `max_entries=10000` ≤ ~1.5× pgss alone on PG 18 (or gap explained); §5.3 updated if semantics change; TAP 008/009/018 pass; numbers in docs/benchmarks.md.
 
+**Decisions:**
+- 2026-10-06: Do option 2 (compact per-entry array, keeps §5.3 semantics) first; only if p99 is still over ~1.5× pgss, add option 1 (adaptive batch) and update §5.3.
+
 **Depends on:** 20261006-043919-1
-**Open questions:**
-- Q1: Is changing the eviction batch size adaptively (option 1, simpler, alters §5.3 semantics) acceptable, or should we keep the fixed ~5% and do option 2 (compact scan array)?
-**Status:** blocked-on-questions
+**Open questions:** none
+**Status:** ready
 
 ### 20261006-092320-1: Flaky TAP 004: "every alternating reload replaced the extractors" (28 of 30)
 
@@ -198,18 +201,6 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 **Open questions:** none
 **Status:** ready
 
-### 20261006-101139-1: Confirm `tags_override` rename rule and nested `scan` behavior
-
-**Description:** Item -30 landed `tags_override` with two builder decisions that need the user's confirmation (DESIGN.md §6.11 and §8). If either is rejected, change the code, tests (test/t/023_tags_override.pl, test/sql/tags_override.sql) and docs (docs/configuration.md `tags_override`, docs/extractors.md pipeline) accordingly.
-
-**Acceptance criteria:** the user's answers are recorded as decisions; code, tests and docs match them.
-
-**Depends on:** 20261005-091225-30
-**Open questions:**
-- Q1: There is no global `rename`; override keys currently use the `rename` lists of the comment `sqlcommenter` extractors (config order, first match wins; marginalia/regex/appname renames are ignored; no sqlcommenter extractor → no rename). Keep this, or never rename override keys (the app writes canonical names), or add a global rename GUC?
-- Q2: With `nested_tags = scan`, nested statements re-read the override, so a function's `SET pg_stat_statement_context.tags_override` clause (or a `SET LOCAL` inside the function) tags its nested statements. With `inherit` the top-level tags are copied. Is that acceptable?
-**Status:** blocked-on-questions
-
 ### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
 
 **Description:** Found while documenting (item -28). `evicted_entries` counts both expired entries reclaimed by an eviction pass and live entries evicted, and `dealloc` counts passes. `dropped_records` (calls lost because a pass freed nothing) is not exposed. So `_info()` alone cannot tell an operator that `max_entries` is too small, contrary to DESIGN §5.3 step 3. The docs currently give a workaround: compare the row count of `pg_stat_statement_context_totals` with `max_entries`.
@@ -222,10 +213,12 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 - A full table with nothing to free moves `dropped_records`.
 - The docs' undersizing guidance uses the new counters.
 
+**Decisions:**
+- 2026-10-06: Approved: split into `reclaimed_entries` (expired/dead), `evicted_entries` (live only) and add `dropped_records`. Do it in the same builder run as 20261006-010149-1 (one `_info()` change), before `--1.0.sql` is frozen (no upgrade script).
+
 **Depends on:** 20261005-091225-21
-**Open questions:**
-- Q1: OK to change the `_info()` column set (§7, approved earlier) by renaming or splitting `evicted_entries` and adding `dropped_records`? Proposed names: `reclaimed_entries`, `evicted_entries` (live only), `dropped_records`.
-**Status:** blocked-on-questions
+**Open questions:** none
+**Status:** ready
 
 ### 20261005-091225-29: v1 release readiness
 
@@ -241,13 +234,14 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 
 **Decisions:**
 - 2026-10-05 (§11 Q1): Untagged statements are **skipped** by default (`untagged = skip`); `untagged = record` stays available. The sizing guidance assumes this default.
+- 2026-10-06 (Q1): Finish 20261005-213120-1 and 20261006-010149-1 before freezing `--1.0.sql`.
+- 2026-10-06 (Q2): Moot; 20261006-043919-1 landed. 20261006-075124-1 is not a v1 blocker.
+- 2026-10-06 (Q3): The **owner** pushes, tags `v1.0.0` and creates the GitHub release. The agent prepares everything locally (CHANGELOG, release notes, freeze) and stops before pushing.
+- 2026-10-06: v1.0 ships the roadmap features already built: appname, normalize, activity view, tags_override, and per-key cardinality caps (20261005-091225-32).
 
-**Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28
-**Open questions:**
-- Q1 (added 2026-10-06): Should 20261005-213120-1 and 20261006-010149-1 be decided, and done if accepted, before `--1.0.sql` is frozen? Both change the `_info()` columns, and after the freeze that needs a 1.0→1.1 upgrade script.
-- Q2: Should 20261006-043919-1 (eviction p99 under churn) be fixed before v1? It's in progress now.
-- Q3: May the agent push main, tag `v1.0.0` and create the GitHub release, or will the owner do that? CI has never run on GitHub, and the macOS cells are unverified until the first push.
-**Status:** blocked-on-questions
+**Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ---
 

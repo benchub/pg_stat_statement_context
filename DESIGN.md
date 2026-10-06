@@ -1112,8 +1112,8 @@ matches this extension's minimum supported version.
     session's current override, with no separate output field.
   - Each backend caches the built tags keyed on the GUC and config
     generations, with a `memcmp` fallback.
-  - The rename rule and the `scan` behavior await the user's confirmation
-    (item 20261006-101139-1).
+  - The rename rule and the `scan` behavior were confirmed by the owner
+    (2026-10-06).
 - **Context from `application_name` (done, item -38):** a DSL extractor
   `appname(format=sqlcommenter|marginalia|regex)` (§4.2). Tags from comments
   win over `appname`-derived tags on key conflicts.
