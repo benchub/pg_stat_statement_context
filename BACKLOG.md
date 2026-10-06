@@ -166,8 +166,9 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 - The recipes no longer depend on the epoch or bucket-length GUC.
 
 **Decisions:**
-- 2026-10-06: Build additions 1 (bucket metadata in `_info()`: `bucket_seconds`, `current_bucket_start`, `last_closed_bucket_start`), 2 (`pg_stat_statement_context_last_bucket` view) and 4 (epoch-number form of `stats_reset`). Addition 3 (monotonic per-entry counters) is **not** in scope for now; the owner may revisit it.
+- 2026-10-06: Build additions 1 (bucket metadata in `_info()`: `bucket_seconds`, `current_bucket_start`, `last_closed_bucket_start`), 2 (`pg_stat_statement_context_last_bucket` view) and 4 (epoch-number form of `stats_reset`). Addition 3 was initially deferred; see the next decision.
 - 2026-10-06: Do it together with 20261005-213120-1 in one builder run, before `--1.0.sql` is frozen.
+- 2026-10-06 (later): The owner wants addition 3 in v1 as well: pgss-style monotonic per-entry counters (`calls_total`, `exec_time_total`, `stats_since`) that only reset on eviction or `_reset()`, so exporters can use `rate()`. Expect about 16–24 bytes more shared memory per entry; update the §5 sizing numbers.
 
 **Depends on:** 20261005-091225-42
 **Open questions:** none
