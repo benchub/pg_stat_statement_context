@@ -21,6 +21,7 @@
 #include "storage/shmem.h"
 #include "storage/spin.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 #include "utils/timestamp.h"
 
 #include "compat.h"
@@ -110,7 +111,7 @@ static void *record_test_hook_arg = NULL;
 static PsscStoreRecordTestHook flush_test_hook = NULL;
 static void *flush_test_hook_arg = NULL;
 
-/* Testing aid: the next eviction pass in this backend cannot allocate. */
+/* Testing aid: the next eviction pass in this backend gets no candidate buffer. */
 static bool debug_fail_next_eviction_alloc = false;
 
 #define ENTRY_HEADER_OFFSET(keysize) (keysize)
@@ -521,17 +522,78 @@ entry_accum(void *entry, double elapsed_ms)
 }
 
 /*
+ * Candidate buffer of store_evict(), reused across passes. A backend keeps
+ * one of at most PSSC_EVICT_BUF_KEEP bytes in TopMemoryContext (500
+ * candidates at the default max_entries = 10000 take 16 kB); a larger one
+ * (max_entries above ~40000) is allocated for the pass and freed after it.
+ */
+#define PSSC_EVICT_BUF_KEEP		((Size) 64 * 1024)
+
+static PsscEvictCandidate *evict_buf = NULL;
+static size_t evict_buf_cap = 0;
+
+/*
+ * A buffer of cap candidates, or NULL if it cannot be allocated (never an
+ * ERROR). *transient tells the caller to pfree() it after the pass.
+ *
+ * The testing aid (pssc_store_debug_fail_next_eviction_alloc()) drops any
+ * kept buffer and makes this pass's allocation return NULL, in either
+ * branch, as MCXT_ALLOC_NO_OOM does when out of memory.
+ */
+static PsscEvictCandidate *
+evict_buffer(size_t cap, bool *transient)
+{
+	Size		bytes = (Size) cap * sizeof(PsscEvictCandidate);
+	PsscEvictCandidate *buf;
+
+	bool		fail = debug_fail_next_eviction_alloc;
+
+	debug_fail_next_eviction_alloc = false;
+	*transient = false;
+	if (fail && evict_buf != NULL)
+	{
+		pfree(evict_buf);
+		evict_buf = NULL;
+		evict_buf_cap = 0;
+	}
+	if (cap <= evict_buf_cap)
+		return evict_buf;
+	if (bytes > PSSC_EVICT_BUF_KEEP)
+	{
+		buf = fail ? NULL :
+			MemoryContextAllocExtended(CurrentMemoryContext, bytes,
+									   MCXT_ALLOC_HUGE | MCXT_ALLOC_NO_OOM);
+		*transient = (buf != NULL);
+		return buf;
+	}
+	buf = fail ? NULL :
+		MemoryContextAllocExtended(TopMemoryContext, bytes, MCXT_ALLOC_NO_OOM);
+	if (buf == NULL)
+		return NULL;
+	if (evict_buf != NULL)
+		pfree(evict_buf);
+	evict_buf = buf;
+	evict_buf_cap = cap;
+	return buf;
+}
+
+/*
  * One eviction pass (§5.3); the caller holds the exclusive lock and found
  * the table at max_entries. Returns the number of entries removed.
  *
- *	1. Raise current_bucket to the clock, as readers do, and reclaim every
- *	   dead entry (no slot in the live window) in one scan; every surviving
- *	   entry's usage decays by PSSC_USAGE_DECREASE_FACTOR, as in pgss's
- *	   entry_dealloc(). The scan allocates nothing.
- *	2. If that freed fewer than pssc_evict_target() entries, copy
- *	   (last_bucket, usage) of every live entry into an array, sort it by
- *	   last_bucket then usage (pssc_evict_sort()) and evict from the front
- *	   until the target is free.
+ *	1. Raise current_bucket to the clock, as readers do, and scan the table
+ *	   once: reclaim every dead entry (no slot in the live window); every
+ *	   surviving entry's usage decays by PSSC_USAGE_DECREASE_FACTOR, as in
+ *	   pgss's entry_dealloc(), and is offered to a selector
+ *	   (pssc_evict_select_*()) that keeps the pssc_evict_target() first
+ *	   live entries in eviction order: last_bucket, then usage, then scan
+ *	   order. A pass never evicts more live entries than the target, so
+ *	   the victims are among them.
+ *	2. If the dead entries were fewer than the target, evict the first
+ *	   (target - dead) live entries in that order: exactly the front of a
+ *	   full sort of every live entry (pssc_evict_sort()), at O(n) cost
+ *	   instead of O(n log n), in one scan, with a buffer of target entries
+ *	   (not nlive) that is reused across passes.
  *	3. dealloc += 1; evicted_entries += every entry removed, dead or live.
  *
  * The entry fields are read and written without the entry spinlocks: those
@@ -539,9 +601,9 @@ entry_accum(void *entry, double elapsed_ms)
  * readers alike take it in shared mode), so under the exclusive lock nobody
  * else can be touching any entry.
  *
- * The array in step 2 is allocated with MCXT_ALLOC_NO_OOM in the caller's
- * (short-lived) memory context: recording runs inside user statements, so
- * an out-of-memory condition must not fail the statement. If it cannot be
+ * The selector's buffer (evict_buffer()) is allocated with
+ * MCXT_ALLOC_NO_OOM: recording runs inside user statements, so an
+ * out-of-memory condition must not fail the statement. If it cannot be
  * allocated, only the dead entries are freed; the caller then drops its
  * record (dropped_records) if that left no room. Nothing between the
  * allocation and the pfree can raise an ERROR, and the table is consistent
@@ -559,10 +621,11 @@ store_evict(void)
 	int64		nlive = 0;
 	int64		nvictims;
 	int64		evicted = 0;
-	bool		fail_alloc = debug_fail_next_eviction_alloc;
+	PsscEvictCandidate *cands = NULL;
+	PsscEvictSelect sel;
+	bool		transient = false;
 
 	Assert(LWLockHeldByMeInMode(store_state->lock, LW_EXCLUSIVE));
-	debug_fail_next_eviction_alloc = false;
 
 	/*
 	 * The same watermark readers use (§5.2): an entry dead here is hidden
@@ -571,6 +634,10 @@ store_evict(void)
 	 */
 	current = observe_current_bucket(PSSC_BUCKET_NONE);
 	target = pssc_evict_target(store_state->max_entries);
+
+	cands = evict_buffer((size_t) target, &transient);
+	if (cands != NULL)
+		pssc_evict_select_init(&sel, cands, (size_t) target);
 
 	/* deleting the entry just returned by hash_seq_search() is allowed */
 	hash_seq_init(&seq, store_htab);
@@ -587,42 +654,24 @@ store_evict(void)
 		{
 			pssc_usage_decay(&hdr->usage);
 			nlive++;
+			if (cands != NULL)
+				pssc_evict_select_offer(&sel, hdr->last_bucket, hdr->usage, entry);
 		}
 	}
 	evicted = dead;
 
 	nvictims = pssc_evict_live_count(target, dead, nlive);
-	if (nvictims > 0)
+	if (nvictims > 0 && cands != NULL)
 	{
-		PsscEvictCandidate *cands = NULL;
+		size_t		n = pssc_evict_select_finish(&sel, (size_t) nvictims);
 
-		if (!fail_alloc)
-			cands = MemoryContextAllocExtended(CurrentMemoryContext,
-											   (Size) nlive * sizeof(PsscEvictCandidate),
-											   MCXT_ALLOC_HUGE | MCXT_ALLOC_NO_OOM);
-		if (cands != NULL)
-		{
-			int64		n = 0;
-
-			hash_seq_init(&seq, store_htab);
-			while ((entry = hash_seq_search(&seq)) != NULL)
-			{
-				PsscEntryHeader *hdr = entry_header(entry);
-
-				Assert(n < nlive);
-				cands[n].last_bucket = hdr->last_bucket;
-				cands[n].usage = hdr->usage;
-				cands[n].entry = entry;
-				n++;
-			}
-			Assert(n == nlive);
-			pssc_evict_sort(cands, (size_t) n);
-			for (int64 i = 0; i < nvictims; i++)
-				hash_search(store_htab, cands[i].entry, HASH_REMOVE, NULL);
-			evicted += nvictims;
-			pfree(cands);
-		}
+		Assert(n == (size_t) nvictims);
+		for (size_t i = 0; i < n; i++)
+			hash_search(store_htab, cands[i].entry, HASH_REMOVE, NULL);
+		evicted += (int64) n;
 	}
+	if (transient && cands != NULL)
+		pfree(cands);
 
 	store_state->entries -= evicted;
 	store_state->dealloc++;

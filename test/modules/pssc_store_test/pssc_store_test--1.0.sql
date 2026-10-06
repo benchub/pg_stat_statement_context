@@ -139,7 +139,7 @@ RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C CALLED ON NULL INPUT;
 
 -- One-shot (this backend): the next eviction pass (DESIGN.md §5.3) behaves
--- as if its sort array could not be allocated
+-- as if its candidate buffer could not be allocated
 -- (pssc_store_debug_fail_next_eviction_alloc(); test/t/009_eviction.pl).
 CREATE FUNCTION pssc_store_test_fail_next_eviction_alloc() RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

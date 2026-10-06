@@ -565,8 +565,11 @@ If an insert finds the table at `max_entries`, then under the exclusive lock:
    entry, live or dead), both exposed by `_info()`, so users can tell that
    `max_entries` is too small.
 
-As in pgss, an eviction pass scans and sorts the whole table. That cost is paid
-only when the table is full; the benchmarks measure it (§9).
+An eviction pass scans the whole table once. The live victims are chosen by
+partial selection (a bounded heap of `target` candidates), not by sorting
+every entry (item 20261006-043919-1). Ties in (`last_bucket`, `usage`) are
+broken by scan order, so the victims of a pass are deterministic. That cost is
+paid only when the table is full; the benchmarks measure it (§9).
 
 Details (decided 2026-10-05, item -15):
 - **Target:** each pass aims to free `max(1, max_entries * 5 / 100)` entries.
@@ -580,7 +583,8 @@ Details (decided 2026-10-05, item -15):
 - **No entry spinlocks:** every path that takes an entry spinlock holds the
   table lock (shared), so the pass reads and writes `last_bucket` and `usage`
   without spinlocks while it holds the exclusive lock.
-- **Out of memory:** the sort array is allocated with `MCXT_ALLOC_NO_OOM`. If
+- **Out of memory:** the candidate buffer (`target` entries, kept per backend
+  when ≤ 64 kB, otherwise allocated per pass) uses `MCXT_ALLOC_NO_OOM`. If
   that fails, only dead entries are reclaimed. The user's statement never
   fails, and `dealloc` still counts the pass.
 
@@ -1197,8 +1201,11 @@ matches this extension's minimum supported version.
   evicted nothing or never rolled a bucket. Results are in
   `docs/benchmarks.md`. Steady-state overhead is within the noise of a Docker
   VM, and bucket boundaries add no latency. Under sustained churn at
-  `max_entries=10000`, eviction raises p99 by 2.5–5× because each pass sorts
-  every entry under the exclusive lock; 20261006-043919-1 tracks the fix.
+  `max_entries=10000`, eviction raised p99 by 2.5–5× because each pass sorted
+  every entry under the exclusive lock. Item 20261006-043919-1 replaced the
+  sort with partial selection in a single scan (pass ~40% faster; Δp99 +196%
+  → +115% on PG 18). The rest is the scan of ~10,000 entries itself;
+  20261006-075124-1 tracks batching passes.
 - **Fuzzing** (`fuzz/`, item -25): libFuzzer targets for the code that needs no
   server:
   - the comment scanner in every position mode (`fuzz_scan`);

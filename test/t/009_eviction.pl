@@ -245,7 +245,7 @@ configure(max_entries => 100);
 
 # --------------------------- allocation failure: fall back, never corrupt
 {
-	# The live-entry sort array cannot be allocated: with no dead entry to
+	# The candidate buffer cannot be allocated: with no dead entry to
 	# reclaim, the record is dropped and counted (the statement does not fail).
 	fresh();
 	fill(1, 100);
@@ -270,6 +270,59 @@ configure(max_entries => 100);
 	is(keys_present(), ids(101 .. 197, 999), 'every live entry survived');
 	is(sql('SELECT pssc_store_test_check_invariants()'), 98, 'invariants hold');
 }
+
+# ----------------------------------- the candidate buffer across passes
+{
+	# A backend keeps its candidate buffer after a pass (max_entries 100:
+	# 5 candidates); the testing aid must still fail the next pass of the
+	# same backend, which already holds a buffer. One statement, so one
+	# backend: the first record runs a pass, four more refill the table.
+	fresh();
+	fill(1, 100);
+	is(sql(q{SELECT pssc_store_test_record(999), pssc_store_test_record(1000),
+	                pssc_store_test_record(1001), pssc_store_test_record(1002),
+	                pssc_store_test_record(1003),
+	                pssc_store_test_fail_next_eviction_alloc(),
+	                pssc_store_test_record(1004), pssc_store_test_record(1005)}),
+		'inserted|inserted|inserted|inserted|inserted||full|inserted',
+		'one backend: pass, refill, failed pass (buffer held), normal pass');
+	is(evict_state(), '96 3 10 1', 'three passes; only the failed one dropped');
+	is(sql('SELECT pssc_store_test_check_invariants()'), 96, 'invariants hold');
+}
+
+# A candidate buffer above 64 kB (max_entries 50000: 2500 candidates) is
+# allocated for each pass and freed after it, not kept.
+configure(max_entries => 50000);
+{
+	fresh();
+	fill(1, 50000);
+	fill(2501, 50000);		# 1..2500 now have the lowest usage
+	is(sql(q{SELECT count(*) FROM generate_series(50001, 52501) q
+	          WHERE pssc_store_test_record(q) <> 'inserted'}), 0,
+		'max_entries 50000: 2501 inserts in one backend succeed');
+	is(evict_state(), '47501 2 5000 0', 'two passes of 2500 each');
+	is(sql(q{SELECT count(*) FROM pssc_store_test_entries() WHERE queryid <= 2500}),
+		0, 'the first pass evicted the 2500 lowest-usage entries');
+	is(sql(q{SELECT count(*) FROM pssc_store_test_entries()
+	          WHERE queryid BETWEEN 2501 AND 50000}), 47500,
+		'the 47500 entries recorded twice survive both passes');
+	is(keys_present('queryid > 50000'), '52501',
+		'the second pass evicted the 2500 newcomers (usage 1.98 < 2.94)');
+	is(sql('SELECT pssc_store_test_check_invariants()'), 47501, 'invariants hold');
+
+	# The testing aid fails that per-pass allocation itself: nothing to
+	# free afterwards, the record is dropped, and the next pass (same
+	# backend) allocates normally.
+	fresh();
+	fill(1, 50000);
+	is(sql(q{SELECT pssc_store_test_fail_next_eviction_alloc(),
+	                pssc_store_test_record(60000), pssc_store_test_record(60001)}),
+		'|full|inserted',
+		'max_entries 50000: failed per-pass allocation, then a normal pass');
+	is(evict_state(), '47501 2 2500 1', 'the failed pass dropped; the next evicted 2500');
+	is(sql('SELECT pssc_store_test_check_invariants()'), 47501, 'invariants hold');
+}
+configure(max_entries => 100);
 
 # ------------------------------------------- concurrent churn (pgbench)
 # Two buckets: a clock step of two intervals kills every entry not written

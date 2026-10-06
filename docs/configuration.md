@@ -382,6 +382,7 @@ SELECT (SELECT count(*) FROM pg_stat_statement_context_totals) AS live_entries,
 - Live eviction removes the least recently written entries first, so it
   mostly loses the history of rare combinations.
 
-An eviction pass scans and sorts the whole table, which costs time while the
+An eviction pass scans the whole table once (choosing the live victims by
+partial selection rather than sorting every entry), which costs time while the
 table is full. In the rare case that a pass can free nothing at all, the call is
 dropped rather than failing the statement.

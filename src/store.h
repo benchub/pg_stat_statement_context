@@ -25,10 +25,11 @@
  * surviving entry's usage decays by 0.99 (as in pgss), and if fewer than
  * max(1, max_entries * 5 / 100) entries were freed (pssc_evict_target()),
  * live entries are evicted in order of last_bucket, then usage, both
- * ascending (pssc_evict_sort()), until that many are. dealloc counts the
+ * ascending, then scan order (pssc_evict_cmp(); chosen by partial
+ * selection, pssc_evict_select_*()), until that many are. dealloc counts the
  * passes, evicted_entries every entry removed (dead or live). The new
- * entry is then inserted. Only if the pass freed nothing (the sort array
- * could not be allocated and no entry was dead) is the record dropped and
+ * entry is then inserted. Only if the pass freed nothing (the candidate
+ * buffer could not be allocated and no entry was dead) is the record dropped and
  * counted in dropped_records; the statement never fails.
  *
  * Time buckets (§5.2). The header holds the epoch, bucket_interval,
@@ -340,10 +341,13 @@ extern PGDLLEXPORT void pssc_store_set_flush_test_hook(PsscStoreRecordTestHook h
 													   void *arg);
 
 /*
- * Testing aid: the next eviction pass in this backend behaves as if its
- * sort array could not be allocated (it still reclaims dead entries).
- * One-shot; the flag is cleared by that pass whether or not it needed the
- * array. Reachable only from C (test/modules/pssc_store_test).
+ * Testing aid: in the next eviction pass of this backend, the candidate
+ * buffer allocation returns NULL as if out of memory (the pass still
+ * reclaims dead entries). A buffer kept from an earlier pass is dropped
+ * first, so the real allocation path runs in both the kept and the per-pass
+ * (above 64 kB) branch. One-shot; the flag is cleared by that pass whether
+ * or not it needed the buffer. Reachable only from C
+ * (test/modules/pssc_store_test).
  */
 extern PGDLLEXPORT void pssc_store_debug_fail_next_eviction_alloc(void);
 

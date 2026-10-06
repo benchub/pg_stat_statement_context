@@ -628,6 +628,252 @@ test_evict_order(void)
 	pssc_evict_sort(arr, 0);	/* empty is fine */
 }
 
+/* ------------------------------------------------ eviction victim selection */
+
+static uint64 rng_state = UINT64_C(0x9E3779B97F4A7C15);
+
+/* xorshift64*: deterministic, so a failure reproduces */
+static uint64
+rng(void)
+{
+	rng_state ^= rng_state >> 12;
+	rng_state ^= rng_state << 25;
+	rng_state ^= rng_state >> 27;
+	return rng_state * UINT64_C(2685821657736338717);
+}
+
+static size_t
+rng_below(size_t n)
+{
+	return n == 0 ? 0 : (size_t) (rng() % n);
+}
+
+/* the old order alone (no seq): last_bucket, then usage */
+static int
+key_cmp(const PsscEvictCandidate *a, const PsscEvictCandidate *b)
+{
+	if (a->last_bucket != b->last_bucket)
+		return a->last_bucket < b->last_bucket ? -1 : 1;
+	if (a->usage < b->usage)
+		return -1;
+	if (a->usage > b->usage)
+		return 1;
+	return 0;
+}
+
+static int
+key_cmp_qsort(const void *a, const void *b)
+{
+	return key_cmp(a, b);
+}
+
+/* stable insertion sort by key: ties keep scan order, independently of seq */
+static void
+stable_sort_by_key(PsscEvictCandidate *a, size_t n)
+{
+	for (size_t i = 1; i < n; i++)
+	{
+		PsscEvictCandidate x = a[i];
+		size_t		j = i;
+
+		while (j > 0 && key_cmp(&x, &a[j - 1]) < 0)
+		{
+			a[j] = a[j - 1];
+			j--;
+		}
+		a[j] = x;
+	}
+}
+
+static bool
+same_cand(const PsscEvictCandidate *a, const PsscEvictCandidate *b)
+{
+	return a->entry == b->entry && a->seq == b->seq &&
+		a->last_bucket == b->last_bucket && same_double(a->usage, b->usage);
+}
+
+/*
+ * Offers keys[0 .. n) (in that order, as the eviction scan would) to a
+ * selector of capacity cap, takes the first k (k <= cap), and compares the
+ * result with the old full sort over all n: pssc_evict_sort() (exactly:
+ * same entries in the same order), a stable sort by key alone (likewise,
+ * for small n), and the old key-only qsort (same key sequence: its tie
+ * order is unspecified, so only the keys are comparable).
+ */
+static void
+check_select(const PsscEvictCandidate *keys, size_t n, size_t cap, size_t k,
+			 const char *what)
+{
+	PsscEvictCandidate *all = malloc((n + 1) * sizeof(*all));
+	PsscEvictCandidate *ref = malloc((n + 1) * sizeof(*ref));
+	PsscEvictCandidate *old = malloc((n + 1) * sizeof(*old));
+	PsscEvictCandidate *buf = malloc((cap + 1) * sizeof(*buf));
+	PsscEvictSelect sel;
+	size_t		want = k < n ? k : n;
+	size_t		got;
+	size_t		bad = SIZE_MAX;
+
+	for (size_t i = 0; i < n; i++)
+	{
+		all[i] = keys[i];
+		all[i].entry = (void *) (uintptr_t) (i + 1);
+		all[i].seq = (uint64) i;
+	}
+	memcpy(ref, all, n * sizeof(*all));
+	pssc_evict_sort(ref, n);
+
+	if (n <= 400)
+	{
+		memcpy(old, all, n * sizeof(*all));
+		stable_sort_by_key(old, n);
+		for (size_t i = 0; i < n && bad == SIZE_MAX; i++)
+			if (!same_cand(&old[i], &ref[i]))
+				bad = i;
+		CHECK(bad == SIZE_MAX, "%s: pssc_evict_sort differs from a stable key sort at %zu (n %zu)",
+			  what, bad, n);
+		bad = SIZE_MAX;
+	}
+	memcpy(old, all, n * sizeof(*all));
+	if (n > 1)
+		qsort(old, n, sizeof(*old), key_cmp_qsort);
+	for (size_t i = 0; i < n && bad == SIZE_MAX; i++)
+		if (key_cmp(&old[i], &ref[i]) != 0)
+			bad = i;
+	CHECK(bad == SIZE_MAX, "%s: key order differs from the old key-only sort at %zu (n %zu)",
+		  what, bad, n);
+	bad = SIZE_MAX;
+
+	pssc_evict_select_init(&sel, buf, cap);
+	for (size_t i = 0; i < n; i++)
+		pssc_evict_select_offer(&sel, keys[i].last_bucket, keys[i].usage,
+								(void *) (uintptr_t) (i + 1));
+	got = pssc_evict_select_finish(&sel, k);
+	CHECK(got == want, "%s: selected %zu, want %zu (n %zu, cap %zu, k %zu)",
+		  what, got, want, n, cap, k);
+	for (size_t i = 0; i < got && i < want && bad == SIZE_MAX; i++)
+		if (!same_cand(&buf[i], &ref[i]))
+			bad = i;
+	CHECK(bad == SIZE_MAX, "%s: victim %zu differs from the full sort (n %zu, cap %zu, k %zu)",
+		  what, bad, n, cap, k);
+
+	free(all);
+	free(ref);
+	free(old);
+	free(buf);
+}
+
+enum
+{
+	DIST_DISTINCT, DIST_TIES, DIST_SAME, DIST_ASC, DIST_DESC, DIST_EXTREME,
+	DIST_DECAYED, DIST_COUNT
+};
+
+static void
+fill_keys(PsscEvictCandidate *keys, size_t n, int dist)
+{
+	static const int64 extreme_ids[] = {INT64_MIN + 1, -1, 0, 1, INT64_MAX};
+	static const double extreme_usage[] = {0.0, -0.0, 1e-300, 1.0, 1e300};
+
+	for (size_t i = 0; i < n; i++)
+	{
+		PsscEvictCandidate *c = &keys[i];
+
+		memset(c, 0, sizeof(*c));
+		switch (dist)
+		{
+			case DIST_DISTINCT:
+				c->last_bucket = (int64) (rng() >> 1) - INT64_C(0x3FFFFFFFFFFFFFFF);
+				c->usage = (double) (rng() >> 11) / 9007199254740992.0;
+				break;
+			case DIST_TIES:
+				c->last_bucket = 100 + (int64) rng_below(3);
+				c->usage = (double) (1 + rng_below(3)) * 0.5;
+				break;
+			case DIST_SAME:
+				c->last_bucket = 7;
+				c->usage = 1.0;
+				break;
+			case DIST_ASC:
+				c->last_bucket = (int64) (i / 4);
+				c->usage = (double) (i % 4);
+				break;
+			case DIST_DESC:
+				c->last_bucket = (int64) ((n - i) / 4);
+				c->usage = (double) ((n - i) % 3);
+				break;
+			case DIST_EXTREME:
+				c->last_bucket = extreme_ids[rng_below(5)];
+				c->usage = extreme_usage[rng_below(5)];
+				break;
+			case DIST_DECAYED:
+				{
+					/* store-like: a few live buckets, usage = init + execs, decayed */
+					double		u = pssc_usage_init();
+					size_t		execs = rng_below(4);
+					size_t		decays = rng_below(6);
+
+					for (size_t e = 0; e < execs; e++)
+						pssc_usage_exec(&u);
+					for (size_t d = 0; d < decays; d++)
+						pssc_usage_decay(&u);
+					c->last_bucket = 1000 + (int64) rng_below(4);
+					c->usage = u;
+				}
+				break;
+		}
+	}
+}
+
+static void
+test_evict_select(void)
+{
+	PsscEvictCandidate *keys = malloc(10000 * sizeof(*keys));
+	char		what[64];
+
+	/* edge cases: nothing to pick, k = n, k > n (cap > n), cap 0 and 1 */
+	for (int dist = 0; dist < DIST_COUNT; dist++)
+	{
+		fill_keys(keys, 50, dist);
+		snprintf(what, sizeof(what), "edge dist %d", dist);
+		check_select(keys, 0, 0, 0, what);
+		check_select(keys, 0, 5, 5, what);
+		check_select(keys, 50, 0, 0, what);
+		check_select(keys, 50, 10, 0, what);
+		check_select(keys, 50, 1, 1, what);
+		check_select(keys, 50, 50, 50, what);
+		check_select(keys, 50, 50, 49, what);
+		check_select(keys, 50, 80, 80, what);
+		check_select(keys, 50, 80, 50, what);
+		check_select(keys, 50, 80, 7, what);
+		check_select(keys, 1, 1, 1, what);
+		check_select(keys, 2, 1, 1, what);
+	}
+
+	/* random sizes */
+	for (int iter = 0; iter < 3000; iter++)
+	{
+		int			dist = (int) rng_below(DIST_COUNT);
+		size_t		n = iter % 10 == 0 ? rng_below(5000) : rng_below(600);
+		size_t		cap = rng_below(n + 6);
+		size_t		k = rng_below(cap + 1);
+
+		fill_keys(keys, n, dist);
+		snprintf(what, sizeof(what), "random %d dist %d", iter, dist);
+		check_select(keys, n, cap, k, what);
+	}
+
+	/* the benchmark's shape: max_entries 10000, target 500 */
+	for (int dist = 0; dist < DIST_COUNT; dist++)
+	{
+		fill_keys(keys, 10000, dist);
+		snprintf(what, sizeof(what), "store-like dist %d", dist);
+		check_select(keys, 10000, 500, 500, what);
+		check_select(keys, 10000, 500, 123, what);
+		check_select(keys, 10000, 500, 1, what);
+	}
+	free(keys);
+}
+
 int
 main(void)
 {
@@ -649,6 +895,7 @@ main(void)
 	test_evict_target();
 	test_evict_live_count();
 	test_evict_order();
+	test_evict_select();
 
 	if (failures)
 	{

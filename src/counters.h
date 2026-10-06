@@ -16,7 +16,8 @@
  *
  * Backend-independent like tagset.c: test/unit builds counters.c with
  * -DPSSC_STANDALONE. Callers serialize access (the entry spinlock, §5.4);
- * nothing here locks or allocates (pssc_evict_sort() sorts in place). The backend-only part at the end is two
+ * nothing here locks or allocates (pssc_evict_sort() and the eviction
+ * selector work in the caller's array). The backend-only part at the end is two
  * thin conversions to milliseconds, done exactly as pgss does.
  */
 #ifndef PSSC_COUNTERS_H
@@ -138,8 +139,20 @@ extern void pssc_usage_decay(double *usage);
  *
  * pssc_evict_cmp / pssc_evict_sort: eviction order of live entries,
  * last_bucket ascending (least recently written first), then usage
- * ascending (least used first); ties compare equal (their order is
- * unspecified). entry is opaque here (the store's hash entry).
+ * ascending (least used first), then seq ascending (the order in which the
+ * eviction scan met them), so the order is total and the victims of a pass
+ * are deterministic. entry is opaque here (the store's hash entry).
+ *
+ * pssc_evict_select_*: the first k candidates in that order without sorting
+ * them all (store.c's eviction pass). The caller's buffer of cap elements
+ * holds a max-heap of the cap smallest candidates offered so far: n offers
+ * cost O(n log cap) at worst and close to n comparisons in practice, since
+ * once the heap is full most candidates lose to its top at once, inline.
+ * offer() numbers the candidates (seq) in offer order, starting at 0.
+ * finish(k), k <= cap, sorts the kept candidates in place (buf[0] first)
+ * and returns min(k, number offered): buf[0 .. that) is then exactly the
+ * first that many of pssc_evict_sort() over all the candidates offered.
+ * Nothing allocates; the selector is done after finish().
  */
 #define PSSC_EVICT_PERCENT	5
 
@@ -148,12 +161,47 @@ typedef struct PsscEvictCandidate
 	int64		last_bucket;
 	double		usage;
 	void	   *entry;
+	uint64		seq;
 } PsscEvictCandidate;
+
+typedef struct PsscEvictSelect
+{
+	PsscEvictCandidate *buf;
+	size_t		cap;
+	size_t		size;			/* kept so far, <= cap */
+	uint64		next_seq;
+} PsscEvictSelect;
 
 extern PGDLLEXPORT int64 pssc_evict_target(int64 max_entries);
 extern PGDLLEXPORT int64 pssc_evict_live_count(int64 target, int64 dead_freed, int64 nlive);
 extern PGDLLEXPORT int pssc_evict_cmp(const void *a, const void *b);
 extern PGDLLEXPORT void pssc_evict_sort(PsscEvictCandidate *cands, size_t n);
+extern PGDLLEXPORT void pssc_evict_select_init(PsscEvictSelect *sel,
+											   PsscEvictCandidate *buf, size_t cap);
+extern PGDLLEXPORT void pssc_evict_select_push(PsscEvictSelect *sel, int64 last_bucket,
+											   double usage, void *entry, uint64 seq);
+extern PGDLLEXPORT size_t pssc_evict_select_finish(PsscEvictSelect *sel, size_t k);
+
+static inline void
+pssc_evict_select_offer(PsscEvictSelect *sel, int64 last_bucket, double usage,
+						void *entry)
+{
+	uint64		seq = sel->next_seq++;
+
+	/*
+	 * A full heap keeps the candidate only if it sorts before the top. It
+	 * cannot tie with the top: its seq is larger, so equal keys lose too.
+	 */
+	if (sel->size == sel->cap)
+	{
+		const PsscEvictCandidate *top = &sel->buf[0];
+
+		if (sel->cap == 0 || last_bucket > top->last_bucket ||
+			(last_bucket == top->last_bucket && !(usage < top->usage)))
+			return;
+	}
+	pssc_evict_select_push(sel, last_bucket, usage, entry, seq);
+}
 
 /* Seconds to milliseconds, as pgss converts queryDesc->totaltime->total. */
 static inline double

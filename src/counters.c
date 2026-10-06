@@ -106,6 +106,8 @@ pssc_evict_cmp(const void *a, const void *b)
 		return -1;
 	if (ca->usage > cb->usage)
 		return 1;
+	if (ca->seq != cb->seq)
+		return ca->seq < cb->seq ? -1 : 1;
 	return 0;
 }
 
@@ -114,6 +116,102 @@ pssc_evict_sort(PsscEvictCandidate *cands, size_t n)
 {
 	if (n > 1)
 		qsort(cands, n, sizeof(PsscEvictCandidate), pssc_evict_cmp);
+}
+
+void
+pssc_evict_select_init(PsscEvictSelect *sel, PsscEvictCandidate *buf, size_t cap)
+{
+	sel->buf = buf;
+	sel->cap = cap;
+	sel->size = 0;
+	sel->next_seq = 0;
+}
+
+static inline bool
+evict_less(const PsscEvictCandidate *a, const PsscEvictCandidate *b)
+{
+	return pssc_evict_cmp(a, b) < 0;
+}
+
+/* restores the max-heap below position i of heap[0 .. size) */
+static void
+evict_sift_down(PsscEvictCandidate *heap, size_t size, size_t i)
+{
+	PsscEvictCandidate x = heap[i];
+
+	for (;;)
+	{
+		size_t		child = 2 * i + 1;
+
+		if (child >= size)
+			break;
+		if (child + 1 < size && evict_less(&heap[child], &heap[child + 1]))
+			child++;
+		if (!evict_less(&x, &heap[child]))
+			break;
+		heap[i] = heap[child];
+		i = child;
+	}
+	heap[i] = x;
+}
+
+/*
+ * The slow path of pssc_evict_select_offer(): adds a candidate to a heap
+ * that is not full, or replaces the top of a full one with a candidate
+ * that sorts before it.
+ */
+void
+pssc_evict_select_push(PsscEvictSelect *sel, int64 last_bucket, double usage,
+					   void *entry, uint64 seq)
+{
+	PsscEvictCandidate x;
+	PsscEvictCandidate *heap = sel->buf;
+
+	x.last_bucket = last_bucket;
+	x.usage = usage;
+	x.entry = entry;
+	x.seq = seq;
+	if (sel->size < sel->cap)
+	{
+		size_t		i = sel->size++;
+
+		while (i > 0)
+		{
+			size_t		parent = (i - 1) / 2;
+
+			if (!evict_less(&heap[parent], &x))
+				break;
+			heap[i] = heap[parent];
+			i = parent;
+		}
+		heap[i] = x;
+	}
+	else
+	{
+		Assert(sel->cap > 0 && evict_less(&x, &heap[0]));
+		heap[0] = x;
+		evict_sift_down(heap, sel->size, 0);
+	}
+}
+
+size_t
+pssc_evict_select_finish(PsscEvictSelect *sel, size_t k)
+{
+	PsscEvictCandidate *heap = sel->buf;
+	size_t		size = sel->size;
+
+	Assert(k <= sel->cap);
+	/* heapsort: move the largest to the end, one at a time */
+	while (size > 1)
+	{
+		PsscEvictCandidate top = heap[0];
+
+		size--;
+		heap[0] = heap[size];
+		heap[size] = top;
+		evict_sift_down(heap, size, 0);
+	}
+	return k < sel->size ? k : sel->size;
 }
 
 int64

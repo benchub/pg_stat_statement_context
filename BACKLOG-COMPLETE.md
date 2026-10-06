@@ -915,6 +915,27 @@ Also measure bursts at bucket boundaries (short interval) and sustained eviction
 **Open questions:** none
 **Status:** done
 
+### 20261006-043919-1: Reduce eviction-pass lock hold time (sustained churn triples p99)
+
+**Description:** Found by the benchmarks (item -26, docs/benchmarks.md). Under sustained eviction with high-cardinality tags at `max_entries=10000`, p99 latency rose from 0.477 ms (pgss alone) to 1.200 ms on PG 18.6 (+158%), and 5× on PG 14. TPS fell 12.5%. That was about 90 passes per second, each removing 500 entries. `store_evict()` in `src/store.c` (§5.3) holds the store's exclusive lock while it scans the whole table, copies every live entry, and sorts them all with `pssc_evict_sort()`. Every backend recording during a pass waits.
+
+Options, in order of preference:
+1. Choose the victims by partial selection instead of a full sort (quickselect or a bounded heap of size `nvictims`, O(n)). Eviction order stays the same: last_bucket, then usage.
+2. Reuse the candidate buffer instead of allocating it each pass.
+3. Make the batch bigger when passes come close together, so fewer passes run. This changes semantics: document it, and keep the §5.3 order.
+4. Do the scan and sort under the shared lock with a generation check, and take the exclusive lock only to remove the victims. This is more complex; justify it with measurements first.
+
+Measure each step with `bench/run.sh --only evict` and keep the semantics in §5.3 (victim order and `evicted_entries` accounting) intact; the existing TAP tests 008/018 must still pass.
+
+**Acceptance criteria:**
+- The eviction benchmark's p99 at `max_entries=10000` is no more than about 1.5× pgss alone on PG 18 (or the remaining gap is explained), with numbers updated in docs/benchmarks.md.
+- Victim selection matches the old full sort exactly; a unit test compares them on random inputs, including ties.
+- Full harness passes on PG 14–18.
+
+**Depends on:** 20261005-091225-26
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

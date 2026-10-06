@@ -308,6 +308,23 @@ only effect that reproduces clearly, matching PG 18.
        heap instead of a full sort;
      - evict a larger batch per pass when passes come close together;
      - otherwise shorten the time the exclusive lock is held.
+   - **Update (item 20261006-043919-1):** a pass now scans once and picks the
+     victims with a bounded heap instead of copying and sorting every entry.
+     Single-pass timings on PG 18 with 10,000 live entries and 500 victims
+     (medians): 953–1,181 µs before, 545–733 µs after. What remains is the
+     walk over ~8.7 MB of entries. Re-measured with
+     `bench/run.sh --major 18 --only evict --runs 5` (host load average ~20,
+     so treat as indicative):
+
+     | Config | p99 before → after (ms) | Δp99 vs pgss | ΔTPS vs pgss |
+     |---|---|---|---|
+     | pgss alone | 0.436 → 0.380 | — | — |
+     | ext, `max_entries=10000` | 1.291 → 0.818 | +196% → +115% | −21.1% → −16.0% |
+     | ext, `max_entries=1000` | 0.633 → 0.444 | +39% → +11% | −18.5% → −7.9% |
+
+     A shared-lock scan can't help this workload, since every statement
+     inserts a new key. A throwaway build that evicted 20% per pass gave
+     Δp99 +34%, but it changes §5.3 semantics; 20261006-075124-1 tracks that decision.
 5. **Noise.**
    - Medians of the same configuration range 25–65% between runs (the TPS
      spread column).

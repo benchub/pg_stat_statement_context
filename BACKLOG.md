@@ -52,7 +52,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
 | 20261006-021334-1 | Bound regex compile cost (pathological patterns stall first tagged query) | 20261005-091225-10 | no | ready |
-| 20261006-043919-1 | Reduce eviction-pass lock hold time (sustained churn triples p99) | 20261005-091225-26 | no | ready |
+| 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | yes | blocked-on-questions |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | yes | blocked-on-questions |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
@@ -191,26 +191,18 @@ The execution-time CPU limits (item -10) don't cover compile. Options (decide an
 **Open questions:** none
 **Status:** ready
 
-### 20261006-043919-1: Reduce eviction-pass lock hold time (sustained churn triples p99)
+### 20261006-075124-1: Fewer eviction passes under sustained churn (adaptive batch or compact scan)
 
-**Description:** Found by the benchmarks (item -26, docs/benchmarks.md). Under sustained eviction with high-cardinality tags at `max_entries=10000`, p99 latency rose from 0.477 ms (pgss alone) to 1.200 ms on PG 18.6 (+158%), and 5× on PG 14. TPS fell 12.5%. That was about 90 passes per second, each removing 500 entries. `store_evict()` in `src/store.c` (§5.3) holds the store's exclusive lock while it scans the whole table, copies every live entry, and sorts them all with `pssc_evict_sort()`. Every backend recording during a pass waits.
+**Description:** Follow-up to 20261006-043919-1. Partial selection made a pass ~40% faster, but under the `evict` benchmark at `max_entries=10000` p99 is still ~2.15× pgss alone (target ~1.5×). The remaining cost is the single scan of ~10,000 entries (~870 B each, ~8.7 MB) under the exclusive lock. Options:
+1. Adaptive batch: evict a larger fraction (e.g. up to 20%) when passes come close together. A throwaway build gave Δp99 +34% (TPS −7.6%) on a noisy run. Changes §5.3 semantics (target is no longer a fixed ~5%), loses more history of rare combinations.
+2. A compact per-entry array of (`last_bucket`, `usage`, entry pointer) maintained in shared memory, so the pass scans ~16–24 B per entry instead of whole entries. Keeps §5.3 semantics; more code and shared memory.
 
-Options, in order of preference:
-1. Choose the victims by partial selection instead of a full sort (quickselect or a bounded heap of size `nvictims`, O(n)). Eviction order stays the same: last_bucket, then usage.
-2. Reuse the candidate buffer instead of allocating it each pass.
-3. Make the batch bigger when passes come close together, so fewer passes run. This changes semantics: document it, and keep the §5.3 order.
-4. Do the scan and sort under the shared lock with a generation check, and take the exclusive lock only to remove the victims. This is more complex; justify it with measurements first.
+**Acceptance criteria:** eviction-benchmark p99 at `max_entries=10000` ≤ ~1.5× pgss alone on PG 18 (or gap explained); §5.3 updated if semantics change; TAP 008/009/018 pass; numbers in docs/benchmarks.md.
 
-Measure each step with `bench/run.sh --only evict` and keep the semantics in §5.3 (victim order and `evicted_entries` accounting) intact; the existing TAP tests 008/018 must still pass.
-
-**Acceptance criteria:**
-- The eviction benchmark's p99 at `max_entries=10000` is no more than about 1.5× pgss alone on PG 18 (or the remaining gap is explained), with numbers updated in docs/benchmarks.md.
-- Victim selection matches the old full sort exactly; a unit test compares them on random inputs, including ties.
-- Full harness passes on PG 14–18.
-
-**Depends on:** 20261005-091225-26
-**Open questions:** none
-**Status:** ready
+**Depends on:** 20261006-043919-1
+**Open questions:**
+- Q1: Is changing the eviction batch size adaptively (option 1, simpler, alters §5.3 semantics) acceptable, or should we keep the fixed ~5% and do option 2 (compact scan array)?
+**Status:** blocked-on-questions
 
 ### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
 
