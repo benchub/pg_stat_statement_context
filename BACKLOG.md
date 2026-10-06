@@ -51,7 +51,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
-| 20261005-233059-1 | Fix 017 cached-utility expectations on PG 15.0 | 20261005-091225-22 | no | ready |
+| 20261005-235708-1 | `extract` regression output differs on old PG14 minors (psql emoji padding) | 20261005-091225-11 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
@@ -176,15 +176,15 @@ dependencies and is not shown.
 **Open questions:** none
 **Status:** ready
 
-### 20261005-233059-1: Fix 017 cached-utility expectations on PG 15.0
+### 20261005-235708-1: `extract` regression output differs on old PG14 minors (psql emoji padding)
 
-**Description:** Found while working on 20261005-101154-1. `scripts/docker-test.sh 15.0` fails 4 subtests in `test/t/017_lifecycle.pl`: 104–105, 231 and 256. These are the cached PL/pgSQL `CREATE TEMP TABLE` checks. Both pg_stat_statements and this extension report 4 calls where the test expects 2, so the two still agree; the test's expectation is what's wrong. It fails the same way on clean HEAD, so the harness change didn't cause it. It's probably a behaviour difference between 15.0 and the latest 15.x in pgss utility tracking or in plancache re-execution. Find which 15.x release changed it, then make the expectation depend on the version (through compat.h or by using pgss as the oracle). Don't hard-code a minor version in the test without a reason. Logs are in `tmp/harness/`.
+**Description:** Found while working on 20261005-233059-1. On `scripts/docker-test.sh 14.9`, the pg_regress `extract` test fails: older psql pads the row containing the 😀 tag differently, so the aligned output doesn't match `expected/extract.out`. The extension's output is fine; only psql's width calculation differs. Fix it without weakening the test. Options: use unaligned output (`\pset format unaligned`) for the affected queries, return the value through `encode(convert_to(...), 'hex')` or as a length, or add an alternative expected file (`extract_1.out`) if the difference is truly only psql. Also check whether other old minors (14.3+, 15.0–15.x, 16.0) are affected.
 
 **Acceptance criteria:**
-- `scripts/docker-test.sh 15.0` passes, and the latest 14–18 releases still pass.
-- The test still asserts that our counts match pgss for these statements.
+- `scripts/docker-test.sh 14.9` passes the `extract` test, and so do the latest 14–18 releases.
+- The test still checks the exact emoji bytes or characters.
 
-**Depends on:** 20261005-091225-22
+**Depends on:** 20261005-091225-11
 **Open questions:** none
 **Status:** ready
 

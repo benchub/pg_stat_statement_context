@@ -47,6 +47,16 @@
 # extension cannot record them either (parity holds) and counts them in
 # utility_missing_queryid, in either load order; $lost below.
 #
+# Exception: releases before upstream commit 8700851352a8 ("Avoid
+# unnecessary plancache revalidation of utility statements", bug #18059;
+# first in 14.10, 15.5 and 16.1, so 14.0-14.9, 15.0-15.4 and 16.0) also
+# revalidated plain utilities, re-running parse analysis (so computing a
+# fresh queryId) when the saved search_path no longer matches. p_tx's first
+# CREATE TEMP TABLE creates the backend's temp namespace, which changes the
+# active search_path, so its second run is re-analyzed and counted by both.
+# $replans_utilities detects this at runtime through the bug's other
+# symptom, independently of either extension.
+#
 # No statement that pgss tracks is deliberately left out by this extension
 # when the settings agree (DESIGN.md §6.7: EXECUTE/PREPARE, and DEALLOCATE
 # before PG17, are excluded by both).
@@ -359,6 +369,28 @@ GRANT ALL ON lt, lpar, llog, ltrig TO r_app;
 };
 $node->safe_psql($_, $schema) for ('postgres', 'db2');
 
+# Does the plan cache re-analyze a cached plain utility once the temp
+# namespace appears in the search_path (see the header)? Where it does, the
+# cached SET TRANSACTION is revalidated under a snapshot after the COMMIT
+# and fails as in bug #18059.
+my $replans_utilities = do {
+	$node->safe_psql('postgres', q{
+CREATE PROCEDURE p_probe() LANGUAGE plpgsql AS $$
+BEGIN
+  COMMIT;
+  SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+END $$;});
+	my ($ret, $out, $err) = $node->psql('postgres',
+		'CALL p_probe(); CREATE TEMP TABLE probe_tmp(); CALL p_probe();');
+	$node->safe_psql('postgres', 'DROP PROCEDURE p_probe()');
+	die "plan cache probe failed unexpectedly: $err"
+	  if $ret != 0
+	  && $err !~ /SET TRANSACTION ISOLATION LEVEL must be called before any query/;
+	$ret != 0 ? 1 : 0;
+};
+note("plan cache re-analyzes cached utilities after a search_path change: "
+	  . ($replans_utilities ? 'yes' : 'no'));
+
 my %dbid = map {
 	$_ => sql("SELECT oid FROM pg_database WHERE datname = '$_'")
 } ('postgres', 'db2');
@@ -616,12 +648,13 @@ my $x_expected = join("\n",
 # its 3 executions in each of the 2 extended sessions, and with track = all
 # CREATE/DROP TABLE ltx_tmp of p_tx, run twice per psql session (CALL p_tx
 # and CALL p_outer; the CALL inside BEGIN fails first), lose the second run
-# in each of the 3 psql sessions.
+# in each of the 3 psql sessions; where $replans_utilities, the second
+# CREATE is re-analyzed and counted instead, so only the DROP loses it.
 sub lost
 {
 	my ($track, $tu) = @_;
 	return 0 if $tu ne 'on';
-	return 2 * 2 + ($track eq 'all' ? 2 * 3 : 0);
+	return 2 * 2 + ($track eq 'all' ? (2 - $replans_utilities) * 3 : 0);
 }
 
 # Runs the whole workload: psql as both roles in postgres and as the
@@ -859,19 +892,27 @@ sub lifecycle_checks
 		sql(qq{SELECT coalesce(max(queryid), 0) FROM pg_stat_statements
                 WHERE dbid = $dbid{postgres} AND query LIKE '$_[0]%'});
 	};
-	my ($x_util, $ltx) = ($util_qid->('SET statement\_timeout'),
-		$util_qid->('CREATE TEMP TABLE ltx\_tmp'));
+	my ($x_util, $ltx, $ltx_drop) = ($util_qid->('SET statement\_timeout'),
+		$util_qid->('CREATE TEMP TABLE ltx\_tmp'),
+		$util_qid->('DROP TABLE ltx\_tmp'));
 	if ($tu eq 'on')
 	{
 		my $o = $wrong ? 0 : 1;
+		# Runs counted per session: the first, plus the re-analyzed second
+		# where $replans_utilities (see the header).
+		my $n = 2 * (1 + $replans_utilities);
 		is(calls_of($x_util), "t:$o/1",
 			"$label: named utility executed 3 times counted once by both");
-		is(calls_of($ltx), ($all ? "f:" . 2 * $o . "/2" : ''),
-			"$label: PL/pgSQL utility run twice per session counted once per session by both");
+		is(calls_of($ltx), ($all ? "f:" . $o * $n . "/$n" : ''),
+			"$label: PL/pgSQL utility run twice per session counted once per session by both, "
+			  . "twice where the plan cache re-analyzes it");
+		is(calls_of($ltx_drop), ($all ? "f:" . 2 * $o . "/2" : ''),
+			"$label: PL/pgSQL utility cached after the search_path change counted once per session by both"
+		);
 	}
 	else
 	{
-		is("$x_util/$ltx", '0/0', "$label: pgss tracked no utility either");
+		is("$x_util/$ltx/$ltx_drop", '0/0/0', "$label: pgss tracked no utility either");
 	}
 }
 

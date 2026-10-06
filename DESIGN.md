@@ -1116,6 +1116,12 @@ matches this extension's minimum supported version.
   - A cursor left open is recorded as top level at transaction end, as pgss does.
   - A bound portal that is never executed counts one call.
   - With differing settings, each side records according to its own settings.
+  - Releases before upstream `8700851352a8` (14.0–14.9, 15.0–15.4, 16.0)
+    re-parse a cached utility statement when its saved search_path no longer
+    matches. That happens, for example, after the session's first temp table,
+    and the re-parsed statement gets a fresh queryId that both pgss and this
+    extension count. The test detects this at runtime instead of checking minor
+    versions.
 - **Store and SQL surface through the hooks** (items -23/-24):
   `018_store_reconfig.pl` exercises restart/resize, SIGHUP reconfiguration,
   rollover, stale buckets, clock steps, eviction and pgbench stress through

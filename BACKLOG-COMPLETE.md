@@ -768,6 +768,18 @@ Remove the matching cases from the compat test module (`test/modules/pssc_compat
 **Open questions:** none
 **Status:** done
 
+### 20261005-233059-1: Fix 017 cached-utility expectations on PG 15.0
+
+**Description:** Found while working on 20261005-101154-1. `scripts/docker-test.sh 15.0` fails 4 subtests in `test/t/017_lifecycle.pl`: 104–105, 231 and 256. These are the cached PL/pgSQL `CREATE TEMP TABLE` checks. Both pg_stat_statements and this extension report 4 calls where the test expects 2, so the two still agree; the test's expectation is what's wrong. It fails the same way on clean HEAD, so the harness change didn't cause it. It's probably a behaviour difference between 15.0 and the latest 15.x in pgss utility tracking or in plancache re-execution. Find which 15.x release changed it, then make the expectation depend on the version (through compat.h or by using pgss as the oracle). Don't hard-code a minor version in the test without a reason. Logs are in `tmp/harness/`.
+
+**Acceptance criteria:**
+- `scripts/docker-test.sh 15.0` passes, and the latest 14–18 releases still pass.
+- The test still asserts that our counts match pgss for these statements.
+
+**Depends on:** 20261005-091225-22
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
