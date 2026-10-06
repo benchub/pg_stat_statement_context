@@ -1110,6 +1110,13 @@ matches this extension's minimum supported version.
   - A cursor left open is recorded as top level at transaction end, as pgss does.
   - A bound portal that is never executed counts one call.
   - With differing settings, each side records according to its own settings.
+- **Store and SQL surface through the hooks** (items -23/-24):
+  `018_store_reconfig.pl` exercises restart/resize, SIGHUP reconfiguration,
+  rollover, stale buckets, clock steps, eviction and pgbench stress through
+  real statements, pinning the debug clock wherever short buckets would
+  otherwise make reads racy. `019_sql_surface.pl` runs the SQL examples and
+  column tables from `docs/sql-interface.md` and §7 against the catalog and
+  pgss, so incompatible doc changes fail the tests.
 - **CI matrix**: PG14–18 × {Linux, macOS}, plus a Valgrind and
   `-DUSE_ASSERT_CHECKING` build.
 - **Benchmarks**: `pgbench -S` with and without the extension, with and

@@ -113,10 +113,6 @@ pgss stores one query text per `queryid`, taken from whichever call created
 its entry, so that text includes *that* call's comment. Read the context from
 `c.tags`, never from `s.query`.
 
-pgss stores one query text per `queryid`, taken from whichever call created
-its entry, so that text includes *that* call's comment. Read the context from
-`c.tags`, never from `s.query`.
-
 **Apportioning other metrics.** pgss metrics such as rows or buffer reads can
 be attributed to a context approximately, by the context's share of the
 statement's execution time:

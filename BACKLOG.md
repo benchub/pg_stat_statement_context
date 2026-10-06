@@ -53,8 +53,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
-| 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | ready |
-| 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
@@ -209,40 +207,6 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 **Open questions:**
 - Q1: OK to change the `_info()` column set (§7, approved earlier) by renaming or splitting `evicted_entries` and adding `dropped_records`? Proposed names: `reclaimed_entries`, `evicted_entries` (live only), `dropped_records`.
 **Status:** blocked-on-questions
-
-### 20261005-091225-23: TAP tests: store, buckets, eviction, and reconfiguration
-
-**Description:** Write TAP tests for the store-related items in §9:
-- Restarts, including resizing through postmaster GUCs.
-- `SIGHUP` reconfiguration: a bad DSL is rejected and the old config is kept, and a generation change recompiles regexes.
-- Bucket rollover with a short `bucket_interval` set at startup: one entry per combination whose ring slots roll over lazily, with no re-insert at bucket boundaries.
-- Stale-bucket insertion across a rollover.
-- Clock steps, using the debug clock offset.
-- A forced hash collision followed by eviction and reinsertion.
-- Small-`max_entries` churn, with dead entries (all slots expired) reclaimed before live ones.
-- Multi-client `pgbench` stress across bucket boundaries.
-
-**Acceptance criteria:** The tests pass on PG14–18 in CI, including the assert and Valgrind jobs.
-
-**Depends on:** 20261005-091225-17, 20261005-091225-21
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-24: Tests: SQL interface, visibility, encodings, bucket merge
-
-**Description:** Write regression or TAP tests for the SQL surface:
-- Cross-database encodings, including `SQL_ASCII`. These need TAP, because `createdb` must use different encodings.
-- Visibility for unprivileged roles with and without `pg_read_all_stats`, including `showtags = false`.
-- `REVOKE` on the reset function.
-- `merge_buckets`: the totals view sums `calls` and `total_exec_time` across live buckets, and `bucket_start` is the oldest live bucket.
-- View column names and types match §7 exactly (only `calls` and `total_exec_time` as counters), and the `_info()` columns match §7.
-- The example join query from §7, including the apportioning example, runs against pgss.
-
-**Acceptance criteria:** The tests pass on PG14–18 in CI.
-
-**Depends on:** 20261005-091225-17, 20261005-091225-21
-**Open questions:** none
-**Status:** ready
 
 ### 20261005-091225-25: Fuzzing harnesses
 

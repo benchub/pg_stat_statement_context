@@ -702,6 +702,40 @@ It must also list the limitations:
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-23: TAP tests: store, buckets, eviction, and reconfiguration
+
+**Description:** Write TAP tests for the store-related items in §9:
+- Restarts, including resizing through postmaster GUCs.
+- `SIGHUP` reconfiguration: a bad DSL is rejected and the old config is kept, and a generation change recompiles regexes.
+- Bucket rollover with a short `bucket_interval` set at startup: one entry per combination whose ring slots roll over lazily, with no re-insert at bucket boundaries.
+- Stale-bucket insertion across a rollover.
+- Clock steps, using the debug clock offset.
+- A forced hash collision followed by eviction and reinsertion.
+- Small-`max_entries` churn, with dead entries (all slots expired) reclaimed before live ones.
+- Multi-client `pgbench` stress across bucket boundaries.
+
+**Acceptance criteria:** The tests pass on PG14–18 in CI, including the assert and Valgrind jobs.
+
+**Depends on:** 20261005-091225-17, 20261005-091225-21
+**Open questions:** none
+**Status:** done
+
+### 20261005-091225-24: Tests: SQL interface, visibility, encodings, bucket merge
+
+**Description:** Write regression or TAP tests for the SQL surface:
+- Cross-database encodings, including `SQL_ASCII`. These need TAP, because `createdb` must use different encodings.
+- Visibility for unprivileged roles with and without `pg_read_all_stats`, including `showtags = false`.
+- `REVOKE` on the reset function.
+- `merge_buckets`: the totals view sums `calls` and `total_exec_time` across live buckets, and `bucket_start` is the oldest live bucket.
+- View column names and types match §7 exactly (only `calls` and `total_exec_time` as counters), and the `_info()` columns match §7.
+- The example join query from §7, including the apportioning example, runs against pgss.
+
+**Acceptance criteria:** The tests pass on PG14–18 in CI.
+
+**Depends on:** 20261005-091225-17, 20261005-091225-21
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

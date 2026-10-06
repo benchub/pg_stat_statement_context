@@ -68,7 +68,8 @@ include $(PGXS)
 # injects a regex compile failure through pssc_extract_test), and seeds the
 # entries read by the stats views in 015_stats.pl and by _info() in
 # 016_info.pl (which also injects a regex compile failure through
-# pssc_extract_test).
+# pssc_extract_test). Its debug clock, stalls and forced collisions drive
+# real recording in 018_store_reconfig.pl and 019_sql_surface.pl.
 # pssc_context_test exposes the execution frames of src/context.h (frame
 # registry, active frame, frames seen at ExecutorEnd) to SQL
 # (test/t/010_context.pl, 012_utility.pl, which also reads recorded entries
