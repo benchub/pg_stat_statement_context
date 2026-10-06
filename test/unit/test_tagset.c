@@ -1547,6 +1547,37 @@ emit_corpus(const char *dir)
 	}
 }
 
+/* SQL_ASCII output escaping (pssc_tag_escape, DESIGN.md §6.11). */
+static void
+test_escape(void)
+{
+	static const struct
+	{
+		const char *in;
+		size_t		len;
+		const char *out;
+	}			cases[] = {
+		{"", 0, ""},
+		{"abc", 3, "abc"},
+		{"a\\b", 3, "a\\\\b"},
+		{"\xff", 1, "\\xff"},
+		{"c\xc3\xa9", 3, "c\\xc3\\xa9"},
+		{"\x80\x7f\\x", 4, "\\x80\x7f\\\\x"},
+	};
+	char		buf[64];
+	size_t		i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+	{
+		size_t		want = strlen(cases[i].out);
+		size_t		n = pssc_tag_escaped_len(cases[i].in, cases[i].len);
+		size_t		w = pssc_tag_escape(cases[i].in, cases[i].len, buf);
+
+		CHECK(n == want && w == want && memcmp(buf, cases[i].out, want) == 0,
+			  "escape case %zu: got %zu/%zu bytes", i, n, w);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1574,6 +1605,7 @@ main(int argc, char **argv)
 	test_oom();
 	test_random();
 	test_random_permutations();
+	test_escape();
 
 	if (failures)
 	{

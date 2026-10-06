@@ -608,7 +608,9 @@ limits work to the first or last `scan_window` bytes:
   yields no tags. The scan never parses half a comment.
 - Starting a lexer at an arbitrary offset means its state is unknown. A string
   literal ending in `*/` can therefore fool the tail path into misattributing a
-  statement. Such results are counted in `_info().heuristic_scans` so operators
+  statement, and a `--` line comment opened before the window can make text
+  inside it look like a tagged comment (fake tags; covered by the extract
+  regress test). Such results are counted in `_info().heuristic_scans` so operators
   can see how often the inexact path is used.
 - `position=any` does a full forward lexical scan.
 
@@ -816,7 +818,12 @@ some server version, it is omitted on that version rather than exposed as
 - Tags are stored in the originating database's encoding, which is recorded per
   entry as pgss does, and converted with `pg_any_to_server` when read. For a
   `SQL_ASCII` origin, non-ASCII bytes are escaped on output instead of being
-  converted.
+  converted: each byte ≥ 0x80 becomes `\xHH` (lowercase hex) and `\` becomes
+  `\\`, in both keys and values, so the escaping is reversible and distinct
+  keys stay distinct (decided 2026-10-05, item -11). All tag output goes through
+  the shared helper `pssc_tags_push_jsonb()` (`src/tagout.c`); a conversion
+  failure for a non-`SQL_ASCII` origin raises an error there, and the views
+  (-19/-20) decide how to handle it.
 - Tags may contain PII, for example user emails in a route. Visibility is
   **at least as strict as pgss**. For rows owned by another role, both `queryid`
   and `tags` are `NULL` unless the caller has the privileges of
@@ -866,6 +873,32 @@ CREATE FUNCTION pg_stat_statement_context_info(
     OUT heuristic_scans bigint, OUT regex_compile_failures bigint,
     OUT utility_missing_queryid bigint, OUT stats_reset timestamptz) ...;
 ```
+
+Debug function (item -11, ships in 1.0):
+
+```sql
+CREATE FUNCTION pg_stat_statement_context_extract(
+    query text, stmt_location int DEFAULT -1, stmt_len int DEFAULT 0)
+RETURNS jsonb VOLATILE STRICT ...;
+REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PUBLIC;
+```
+
+- Runs the hooks' extraction pipeline with the current GUC config and returns
+  `tags`, `ntags`, `tagset_bytes`, `footer`, `heuristic`, `oom`, `stmt_start`,
+  `stmt_end` (byte offsets), and this call's `invalid_tags`, `dropped_tags`,
+  `heuristic_scans`, `regex_compile_failures`.
+- Restricted because it runs the regex engine on arbitrary input (CPU cost) and
+  reveals the extractor configuration; superusers may `GRANT` it.
+- Works when `enabled = off`; errors if the library isn't preloaded.
+  `stmt_location = -1` means the whole string; out-of-range offsets error.
+- Records nothing and doesn't touch pending stats, except regex compile
+  failures, which are per-backend state and go to the shared counter.
+- Statement ownership uses the hooks' `pssc_stmt_owned_range()` (same
+  `scan_window` budget), so the result equals the hooks' for a single statement
+  or the first statement of a string. Exception: for a later statement starting
+  more than `scan_window` bytes in, the PG18 boundary cache (§6.5) can let the
+  hooks see leading comments that this function doesn't.
+- Output is escaped in `SQL_ASCII` databases (§6.11).
 
 The column set is deliberately minimal (§5.1, decided 2026-10-05): `calls` and
 `total_exec_time` only. Rows, buffers, WAL, I/O timing, JIT, and
@@ -1010,6 +1043,11 @@ matches this extension's minimum supported version.
   - small-`max_entries` churn, with dead entries reclaimed before live ones
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset
+- **pg_regress suite** (`make installcheck`: smoke, guc, extract) runs in a
+  UTF8, no-locale database. Server-level GUCs are changed with `ALTER SYSTEM` +
+  `pg_reload_conf()` and an include file that waits until the new values are
+  visible. TAP 013 checks that `_extract()` leaves the store and counters
+  unchanged, the `SQL_ASCII` escaping, and debug/hook parity.
 - **Harness source builds** (`docker/Dockerfile.source`) install
   `pg_stat_statements` too, so pgss parity checks run on them.
 - **CI matrix**: PG14–18 × {Linux, macOS}, plus a Valgrind and

@@ -14,6 +14,8 @@ OBJS = \
 	src/pairs.o \
 	src/tagset.o \
 	src/extract.o \
+	src/extract_fn.o \
+	src/tagout.o \
 	src/regex_runtime.o \
 	src/context.o \
 	src/executor.o \
@@ -25,8 +27,10 @@ PGFILEDESC = "pg_stat_statement_context - per-tag statement statistics from SQL 
 EXTENSION = pg_stat_statement_context
 DATA = sql/pg_stat_statement_context--1.0.sql
 
-REGRESS = smoke guc
-REGRESS_OPTS = --inputdir=test \
+REGRESS = smoke guc extract
+# extract needs a UTF8 database (multibyte cases); --no-locale makes the
+# database creatable with any server locale.
+REGRESS_OPTS = --inputdir=test --encoding=UTF8 --no-locale \
 	--temp-config=$(srcdir)/test/pg_stat_statement_context.conf
 
 TAP_TESTS = 1
@@ -56,7 +60,8 @@ include $(PGXS)
 # (test/t/005_extract.pl, test/t/006_regex.pl); pssc_store_test drives the
 # shared store of src/store.h (test/t/007_store.pl, 008_buckets.pl,
 # 009_eviction.pl, and reads recorded entries in 011_executor.pl and
-# 012_utility.pl).
+# 012_utility.pl, and the shared counters in 013_extract_fn.pl, which also
+# injects a regex compile failure through pssc_extract_test).
 # pssc_context_test exposes the execution frames of src/context.h (frame
 # registry, active frame, frames seen at ExecutorEnd) to SQL
 # (test/t/010_context.pl, 012_utility.pl, which also reads recorded entries

@@ -52,14 +52,13 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | ready |
 | 20261005-091225-19 | `shared_preload_libraries` load-order detection and policy | 20261005-091225-18 | no | ready |
 | 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | no | ready |
 | 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
-| 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | blocked-on-deps |
+| 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-28 | User documentation | 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27 | no | blocked-on-deps |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
@@ -195,31 +194,6 @@ dependencies and is not shown.
 - A failed download (e.g. a bad URL or a simulated mid-stream failure) or a checksum mismatch fails the build.
 
 **Depends on:** none
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-11: Debug extract function and scanner/extractor regression suite
-
-**Description:** Add a debug SQL function such as `pg_stat_statement_context_extract(query text, stmt_location int DEFAULT -1, stmt_len int DEFAULT 0) RETURNS jsonb` (§9). It runs the full extraction pipeline with the current GUC config and reports whether the heuristic path was used.
-
-Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the first bullet of §9:
-- nested comments, dollar quotes, and `$` inside identifiers
-- `E''` and `U&''` strings, and `standard_conforming_strings = off`
-- unterminated comments and multibyte text
-- multi-statement ranges and trailing footers
-- each extractor format
-- DSL errors and regex errors, including back-references
-- allowlist, denylist, and `rename`
-- `%00` and invalid encodings
-- truncation on character boundaries
-
-*Design note:* decide whether the debug function ships in the 1.0 script, and whether it is restricted (for example `REVOKE` from `PUBLIC`), then document the choice.
-
-**Acceptance criteria:**
-- `make installcheck` passes on PG14–18 in CI.
-- Any version-specific expected output uses alternative expected files, with a comment explaining why.
-
-**Depends on:** 20261005-091225-9, 20261005-091225-10
 **Open questions:** none
 **Status:** ready
 
@@ -378,7 +352,7 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 
 **Depends on:** 20261005-091225-5, 20261005-091225-6, 20261005-091225-11
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-26: Overhead and latency benchmarks
 

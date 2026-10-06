@@ -42,6 +42,23 @@ extern PGDLLEXPORT void pssc_extract_tags(const char *s, size_t start,
 										  PsscExtractResult *result);
 
 /*
+ * pssc_extract_tags() for the debug function pg_stat_statement_context_extract()
+ * (src/extract_fn.c): *stats is zeroed and receives this call's counters
+ * instead of the backend-local pending stats, so a debug call never shows
+ * up in _info(). The exception is regex_compile_failures: a lazy compile
+ * failure disables the extractor for the backend (the hooks will not fail,
+ * and count, again), so it stays counted in the pending stats as well and
+ * *stats reports it too.
+ */
+extern void pssc_extract_tags_debug(const char *s, size_t start, size_t end,
+									char *buf, size_t bufsize,
+									PsscExtractResult *result,
+									PsscTagsetStats *stats);
+
+/* False if the library was not preloaded (pssc_extract_init() not run). */
+extern bool pssc_extract_available(void);
+
+/*
  * Hash of a serialized tag set: core hash_bytes() (32 bits, the width of the
  * shared hash key's tags_hash). Stable within a server binary; not
  * persisted, so endianness does not matter.

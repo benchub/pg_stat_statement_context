@@ -524,6 +524,31 @@ Fix: advance the client statement-boundary state for every top-level statement o
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-11: Debug extract function and scanner/extractor regression suite
+
+**Description:** Add a debug SQL function such as `pg_stat_statement_context_extract(query text, stmt_location int DEFAULT -1, stmt_len int DEFAULT 0) RETURNS jsonb` (§9). It runs the full extraction pipeline with the current GUC config and reports whether the heuristic path was used.
+
+Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the first bullet of §9:
+- nested comments, dollar quotes, and `$` inside identifiers
+- `E''` and `U&''` strings, and `standard_conforming_strings = off`
+- unterminated comments and multibyte text
+- multi-statement ranges and trailing footers
+- each extractor format
+- DSL errors and regex errors, including back-references
+- allowlist, denylist, and `rename`
+- `%00` and invalid encodings
+- truncation on character boundaries
+
+*Design note:* decide whether the debug function ships in the 1.0 script, and whether it is restricted (for example `REVOKE` from `PUBLIC`), then document the choice.
+
+**Acceptance criteria:**
+- `make installcheck` passes on PG14–18 in CI.
+- Any version-specific expected output uses alternative expected files, with a comment explaining why.
+
+**Depends on:** 20261005-091225-9, 20261005-091225-10
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

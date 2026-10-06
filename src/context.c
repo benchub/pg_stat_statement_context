@@ -134,6 +134,22 @@ owned_start(const char *src, PsscStmtRange r, bool top)
 	return start;
 }
 
+/* The range of a statement as scanned for tags: its owned range (§6.5). */
+static PsscStmtRange
+owned_range(const char *src, int stmt_location, int stmt_len, bool top)
+{
+	PsscStmtRange r = pssc_stmt_range(src, stmt_location, stmt_len);
+
+	r.start = owned_start(src, r, top);
+	return r;
+}
+
+PsscStmtRange
+pssc_stmt_owned_range(const char *src, int stmt_location, int stmt_len)
+{
+	return owned_range(src, stmt_location, stmt_len, false);
+}
+
 static void
 set_no_tags(PsscFrame *frame, char *buf)
 {
@@ -179,8 +195,7 @@ resolve_tags(PsscFrame *frame, char *buf, size_t bufsize, const char *src,
 		return;
 	}
 
-	r = pssc_stmt_range(src, stmt_location, stmt_len);
-	r.start = owned_start(src, r, is_client_stmt(src));
+	r = owned_range(src, stmt_location, stmt_len, is_client_stmt(src));
 	pssc_extract_tags(src, r.start, r.end, buf, bufsize, &res);
 	frame->tags = buf;
 	frame->tags_len = (uint32) res.len;

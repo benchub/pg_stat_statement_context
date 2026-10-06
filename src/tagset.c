@@ -464,3 +464,47 @@ done:
 		out->oom = true;
 	}
 }
+
+size_t
+pssc_tag_escaped_len(const char *s, size_t len)
+{
+	size_t		n = 0;
+	size_t		i;
+
+	for (i = 0; i < len; i++)
+	{
+		unsigned char c = (unsigned char) s[i];
+
+		n += c >= 0x80 ? 4 : c == '\\' ? 2 : 1;
+	}
+	return n;
+}
+
+size_t
+pssc_tag_escape(const char *s, size_t len, char *dst)
+{
+	static const char hex[] = "0123456789abcdef";
+	char	   *d = dst;
+	size_t		i;
+
+	for (i = 0; i < len; i++)
+	{
+		unsigned char c = (unsigned char) s[i];
+
+		if (c >= 0x80)
+		{
+			*d++ = '\\';
+			*d++ = 'x';
+			*d++ = hex[c >> 4];
+			*d++ = hex[c & 0xf];
+		}
+		else if (c == '\\')
+		{
+			*d++ = '\\';
+			*d++ = '\\';
+		}
+		else
+			*d++ = (char) c;
+	}
+	return (size_t) (d - dst);
+}

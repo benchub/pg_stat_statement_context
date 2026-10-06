@@ -148,6 +148,19 @@ extern PGDLLEXPORT void pssc_utility_frame_init(PsscUtilityFrame *uf,
 												const char *queryString);
 
 /*
+ * The range of statement (stmt_location, stmt_len) of src that the hooks scan
+ * for tags: the parser range (pssc_stmt_range) extended back over its owned
+ * leading trivia (pssc_stmt_owned_start), lexing back at most scan_window
+ * bytes from the string start, as the hooks do for the first statement of
+ * a string. It neither uses nor updates the hooks' boundary cache, so for a
+ * later statement of a multi-statement string whose start lies more than
+ * scan_window bytes in, the hooks may own more leading trivia than this.
+ * Used by pg_stat_statement_context_extract().
+ */
+extern PsscStmtRange pssc_stmt_owned_range(const char *src, int stmt_location,
+										   int stmt_len);
+
+/*
  * Advances the PG18 client statement-boundary cache (DESIGN.md §3.2, §6.5)
  * past a statement that gets no frame (EXECUTE, PREPARE, a statement run
  * while disabled or without a queryId), so the leading comment of the next

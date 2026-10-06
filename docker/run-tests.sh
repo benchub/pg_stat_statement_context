@@ -13,6 +13,7 @@ step() { printf '\n=== %s\n' "$*"; }
 fail() {
 	echo "FAIL: $*" >&2
 	cp -f "$BUILD"/regression.diffs "$BUILD"/regression.out "$OUT"/ 2>/dev/null || true
+	cp -rf "$BUILD"/results "$OUT"/ 2>/dev/null || true
 	cp -rf "$BUILD"/tmp_check/log "$OUT"/tap-log 2>/dev/null || true
 	cp -f /var/lib/postgresql/*.log "$OUT"/ 2>/dev/null || true
 	exit 1

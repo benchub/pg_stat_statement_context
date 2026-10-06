@@ -60,9 +60,11 @@ env_regex(void *arg, int index, const PsscExtractorList *list,
 	regex_hook(regex_hook_arg, index, list, body, len, out, result);
 }
 
-void
-pssc_extract_tags(const char *s, size_t start, size_t end, char *buf,
-				  size_t bufsize, PsscExtractResult *result)
+/* pssc_extract_tags() with the pipeline counters added to *stats. */
+static void
+extract_tags(const char *s, size_t start, size_t end, char *buf,
+			 size_t bufsize, PsscExtractResult *result,
+			 PsscTagsetStats *stats)
 {
 	PsscTagsetEnv env;
 	PsscTagsetLimits limits;
@@ -93,8 +95,7 @@ pssc_extract_tags(const char *s, size_t start, size_t end, char *buf,
 	memset(&out, 0, sizeof(out));
 	out.buf = buf;
 	pssc_tagset_build(s, start, end, pssc_guc_extractors(), pssc_guc_tags(),
-					  pssc_guc_exclude_tags(), &limits, &env, &out,
-					  &pending_stats);
+					  pssc_guc_exclude_tags(), &limits, &env, &out, stats);
 	MemoryContextReset(extract_cxt);
 
 	result->len = out.len;
@@ -102,6 +103,32 @@ pssc_extract_tags(const char *s, size_t start, size_t end, char *buf,
 	result->footer = out.footer;
 	result->oom = out.oom;
 	result->hash = pssc_tagset_hash(buf, out.len);
+}
+
+void
+pssc_extract_tags(const char *s, size_t start, size_t end, char *buf,
+				  size_t bufsize, PsscExtractResult *result)
+{
+	extract_tags(s, start, end, buf, bufsize, result, &pending_stats);
+}
+
+void
+pssc_extract_tags_debug(const char *s, size_t start, size_t end, char *buf,
+						size_t bufsize, PsscExtractResult *result,
+						PsscTagsetStats *stats)
+{
+	uint64		compile_failures = pending_stats.regex_compile_failures;
+
+	memset(stats, 0, sizeof(*stats));
+	extract_tags(s, start, end, buf, bufsize, result, stats);
+	stats->regex_compile_failures =
+		pending_stats.regex_compile_failures - compile_failures;
+}
+
+bool
+pssc_extract_available(void)
+{
+	return extract_cxt != NULL;
 }
 
 void

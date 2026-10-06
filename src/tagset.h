@@ -177,4 +177,19 @@ extern void pssc_tagset_build(const char *s, size_t start, size_t end,
 							  PsscTagsetOut *out,
 							  PsscTagsetStats *stats);
 
+/*
+ * Output escaping of tag text stored from a SQL_ASCII database (DESIGN.md
+ * §6.11): such bytes have no known encoding, so on output every byte >= 0x80
+ * becomes the four characters \xHH (lowercase hex) and '\' becomes "\\",
+ * making the escaping reversible and keeping distinct keys distinct. ASCII
+ * other than '\' is copied. Applies to keys and values alike; the stored
+ * (canonical) bytes, hash and sizes are unaffected.
+ *
+ * pssc_tag_escaped_len() returns the escaped length of s[0, len) (at most
+ * 4 * len); pssc_tag_escape() writes it to dst, which must have room for
+ * that many bytes (no NUL is added), and returns it.
+ */
+extern size_t pssc_tag_escaped_len(const char *s, size_t len);
+extern size_t pssc_tag_escape(const char *s, size_t len, char *dst);
+
 #endif							/* PSSC_TAGSET_H */
