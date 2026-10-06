@@ -800,6 +800,9 @@ dsl_apply(DslExtractor *e, DslParam param, DslStr v)
 	return false;
 }
 
+/* Source of the value being checked (check_extractors(), check_normalize()). */
+static GucSource regex_check_source = PGC_S_DEFAULT;
+
 /*
  * Test-compile a regex extractor's pattern with the core engine, under the
  * compile time limit, and check the v1 limits (§4.2, §6.11). The compiled regex is freed right away;
@@ -830,7 +833,19 @@ dsl_check_regex(const DslExtractor *e, MemoryContext cxt)
 	wpat = palloc(sizeof(pg_wchar) * (e->pattern.len + 1));
 	wlen = pg_mb2wchar_with_len(e->pattern.s, wpat, (int) e->pattern.len);
 
-	rc = pssc_regex_compile(cxt, &re, wpat, wlen, true, PSSC_REGEX_TEST_CHECK, -1);
+	rc = pssc_regex_check_compile(cxt, &re, wpat, wlen, regex_check_source,
+								  psprintf("extractor \"%s\"", e->name));
+	if (rc == PSSC_REGEX_COMPILE_UNCHECKED)
+	{
+		/* as nsub must be nkeys, the postmaster rejects it too */
+		if (e->nkeys > pssc_max_tags)
+		{
+			GUC_check_errdetail("Extractor \"%s\" has %d keys, more than max_tags (%d).",
+								e->name, e->nkeys, pssc_max_tags);
+			return false;
+		}
+		return true;
+	}
 	if (rc == PSSC_REGEX_COMPILE_TOO_SLOW)
 	{
 		GUC_check_errdetail("Compiling the pattern of extractor \"%s\" took longer than %d ms.",
@@ -1275,6 +1290,7 @@ check_extractors(char **newval, void **extra, GucSource source)
 	PsscExtractorList *list = NULL;
 	bool		ok;
 
+	regex_check_source = source;
 	cxt = AllocSetContextCreate(CurrentMemoryContext,
 								"pg_stat_statement_context extractors check",
 								ALLOCSET_SMALL_SIZES);
@@ -1439,14 +1455,21 @@ norm_check_rule(NormRule *r, int ruleno, MemoryContext cxt)
 
 	wpat = palloc(sizeof(pg_wchar) * (r->pattern.len + 1));
 	wlen = pg_mb2wchar_with_len(r->pattern.s, wpat, (int) r->pattern.len);
-	rc = pssc_regex_compile(cxt, &re, wpat, wlen, true, PSSC_REGEX_TEST_CHECK, -1);
+	rc = pssc_regex_check_compile(cxt, &re, wpat, wlen, regex_check_source,
+								  psprintf("normalize rule %d", ruleno));
 	if (rc == PSSC_REGEX_COMPILE_TOO_SLOW)
 	{
 		GUC_check_errdetail("Compiling the pattern of rule %d took longer than %d ms.",
 							ruleno, pssc_regex_compile_limit_ms);
 		return false;
 	}
-	if (rc != REG_OKAY)
+	if (rc == PSSC_REGEX_COMPILE_UNCHECKED)
+	{
+		/* group references are checked by the lazy compile */
+		info = 0;
+		nsub = SIZE_MAX;
+	}
+	else if (rc != REG_OKAY)
 	{
 		char		msg[128];
 
@@ -1454,9 +1477,12 @@ norm_check_rule(NormRule *r, int ruleno, MemoryContext cxt)
 		GUC_check_errdetail("Pattern of rule %d is invalid: %s.", ruleno, msg);
 		return false;
 	}
-	info = re.re_info;
-	nsub = re.re_nsub;
-	pssc_regfree(&re);
+	else
+	{
+		info = re.re_info;
+		nsub = re.re_nsub;
+		pssc_regfree(&re);
+	}
 	if (info & REG_UBACKREF)
 	{
 		GUC_check_errdetail("Pattern of rule %d uses back-references, which are not allowed.",
@@ -1627,6 +1653,7 @@ check_normalize(char **newval, void **extra, GucSource source)
 	PsscNormalizeList *list = NULL;
 	bool		ok;
 
+	regex_check_source = source;
 	cxt = AllocSetContextCreate(CurrentMemoryContext,
 								"pg_stat_statement_context normalize check",
 								ALLOCSET_SMALL_SIZES);

@@ -31,6 +31,7 @@
 
 #include "mb/pg_wchar.h"
 #include "regex/regex.h"
+#include "utils/guc.h"
 #include "tagset.h"
 
 /* Creates the memory contexts and installs the hook; called by _PG_init. */
@@ -159,6 +160,25 @@ extern PGDLLEXPORT void pssc_regex_test_expire_in(int ms);
 extern int	pssc_regex_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
 							   size_t len, bool strict, int test_phase,
 							   int test_index);
+
+/*
+ * The GUC check hooks' test compile (test phase PSSC_REGEX_TEST_CHECK) of
+ * the pattern of what (e.g. "extractor \"regex\""), for a value from
+ * source: strict for a value a statement sets (ALTER SYSTEM, see
+ * pssc_regex_note_alter_system()); when reading the configuration file
+ * never PSSC_REGEX_COMPILE_TOO_SLOW, but PSSC_REGEX_COMPILE_UNCHECKED if
+ * the compile was stopped at the limit, or not run (parallel workers):
+ * accept the value without the checks that need the compiled regex (the
+ * lazy compile repeats them).
+ */
+#define PSSC_REGEX_COMPILE_UNCHECKED	(-3)
+
+extern int	pssc_regex_check_compile(MemoryContext cxt, regex_t *re,
+									 const pg_wchar *pat, size_t len,
+									 GucSource source, const char *what);
+
+/* Called by the ProcessUtility hook around ALTER SYSTEM. */
+extern void pssc_regex_note_alter_system(bool running);
 
 /* Backend-local bookkeeping, for tests. */
 typedef struct PsscRegexDebugStats

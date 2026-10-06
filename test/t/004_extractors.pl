@@ -22,6 +22,7 @@ $node->init;
 $node->append_conf('postgresql.conf', "shared_preload_libraries = '$P'\n");
 $node->start;
 $node->safe_psql('postgres', 'CREATE EXTENSION pssc_guc_test');
+$node->safe_psql('postgres', 'CREATE EXTENSION pssc_extract_test');
 
 sub sql { return $node->safe_psql('postgres', $_[0]); }
 sub show { return sql("SHOW $P.extractors"); }
@@ -70,12 +71,14 @@ sub session_close
 }
 
 # ALTER SYSTEM statements, then reload and wait until it has been processed
-# (scan_window is moved to a new sentinel value and polled for).
+# (scan_window is moved to a new sentinel value and polled for). Statements
+# in $alter_prelude run first in the same backend.
 my $sentinel = 1000;
+my $alter_prelude = '';
 sub alter_and_reload
 {
 	$sentinel++;
-	sql(join('', map { "ALTER SYSTEM $_;\n" } @_)
+	sql($alter_prelude . join('', map { "ALTER SYSTEM $_;\n" } @_)
 		  . "ALTER SYSTEM SET $P.scan_window = $sentinel;");
 	$node->reload;
 	$node->poll_query_until('postgres',
@@ -513,6 +516,12 @@ sub big_config
 	return join(', ', @e);
 }
 my @big = (big_config('p'), big_config('q'));
+# This is about memory and generations, not compile time: ALTER SYSTEM
+# test-compiles the 12 regexes without the time limit, which a host taking
+# the CPU away from a VM can make them hit (that time counts as CPU time
+# inside the VM). Reloads never reject a value for time (backlog
+# 20261006-092320-1: a backend that did kept its old extractors).
+$alter_prelude = "SELECT pssc_extract_test_regex_compile_limit(0);\n";
 my $m_null = sq($s, 'SELECT pssc_guc_test_malloc_used() IS NULL');
 SKIP:
 {
@@ -539,6 +548,7 @@ SKIP:
 	cmp_ok($m2 - $m1, '<', 1_000_000,
 		"session: malloc'd memory stable over $cycles reloads (grew by " . ($m2 - $m1) . ' bytes)');
 }
+$alter_prelude = '';
 is(sq($s, 'SELECT pg_backend_pid()'), $spid, 'session: same backend throughout');
 session_close($s);
 

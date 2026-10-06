@@ -51,6 +51,7 @@
 #include <signal.h>
 #include <time.h>
 
+#include "access/parallel.h"
 #include "catalog/pg_collation.h"
 #include "miscadmin.h"
 #include "mb/pg_wchar.h"
@@ -524,6 +525,59 @@ pssc_regex_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
 
 	return compile_retrying(cxt, &acxt, re, pat, len, strict, test_phase,
 							test_index);
+}
+
+/* Set by the ProcessUtility hook while ALTER SYSTEM runs. */
+static bool in_alter_system = false;
+
+void
+pssc_regex_note_alter_system(bool running)
+{
+	in_alter_system = running;
+}
+
+/*
+ * The time limit only rejects values a statement sets: ALTER SYSTEM (which
+ * validates with PGC_S_FILE, like a reload, hence the flag), or a source
+ * from SET and the like (PGC_S_SESSION, PGC_S_TEST; these parameters are
+ * PGC_SIGHUP, so such statements fail before the check hook today).
+ * Reading the configuration file (the postmaster, every backend again after
+ * a reload, pg_file_settings) must not reject a value for time alone:
+ * processes would end up with different configurations depending on how
+ * they were scheduled (a host preempting a VM is charged to the process as
+ * CPU time, so it can't be told from a slow compile), and a backend's
+ * rejection is only logged at DEBUG3. There the compile is non-strict: the
+ * postmaster runs it to completion, as before, and logs if it took longer
+ * than the limit; a backend still stops at the limit and then accepts the
+ * value unchecked (its lazy compile checks the pattern again, under the
+ * limit). A parallel worker restoring the leader's settings doesn't
+ * compile at all: it never extracts, and the leader has the value already.
+ */
+int
+pssc_regex_check_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
+						 size_t len, GucSource source, const char *what)
+{
+	double		start;
+	double		used;
+	int			rc;
+
+	if (IsParallelWorker())
+		return PSSC_REGEX_COMPILE_UNCHECKED;
+	if (in_alter_system || source >= PGC_S_INTERACTIVE)
+		return pssc_regex_compile(cxt, re, pat, len, true,
+								  PSSC_REGEX_TEST_CHECK, -1);
+	start = cpu_time_ms();
+	rc = pssc_regex_compile(cxt, re, pat, len, false, PSSC_REGEX_TEST_CHECK, -1);
+	if (rc == PSSC_REGEX_COMPILE_TOO_SLOW || rc == PSSC_REGEX_COMPILE_DEFERRED)
+		return PSSC_REGEX_COMPILE_UNCHECKED;
+	used = cpu_time_ms() - start;
+	if (rc == REG_OKAY && !IsUnderPostmaster && pssc_regex_compile_limit_ms > 0 &&
+		used > pssc_regex_compile_limit_ms)
+		ereport(LOG,
+				(errmsg("compiling the pattern of %s took %.0f ms, longer than the %d ms limit",
+						what, used, pssc_regex_compile_limit_ms),
+				 errdetail("The configuration file's value is used; backends that cannot compile the pattern within the limit disable it.")));
+	return rc;
 }
 
 /*

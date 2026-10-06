@@ -217,12 +217,21 @@ for example a bounded repetition of a group that can match the empty string
 (`((?:(?:$)|\Zda|(?<!1)|\S){0,255})`). The compile time limit keeps such a
 pattern from stalling queries:
 
-- When the value is set or reloaded, a pattern whose test compile takes
-  longer than 100 ms is rejected (`DETAIL: Compiling the pattern of
+- When the value is set with `ALTER SYSTEM`, a pattern whose test compile
+  takes longer than 100 ms is rejected (`DETAIL: Compiling the pattern of
   extractor "regex" took longer than 100 ms.`). `ALTER SYSTEM` stops the
-  compile at the limit, so the value is never written. A value added to
-  `postgresql.conf` by hand is still rejected, but the postmaster can't stop
-  its compile early, so a reload can take as long as that compile.
+  compile at the limit, so the value is never written.
+- Values read from the configuration file (at startup, on reload and in
+  `pg_file_settings`) are never rejected for compile time alone, so that
+  every process ends up with the same configuration. The postmaster
+  compiles the pattern to completion (a reload can take as long as that
+  compile) and logs `compiling the pattern of extractor "regex" took N ms,
+  longer than the 100 ms limit` if it was too slow; each backend checks the
+  value again on reload, stops its compile at the limit and then accepts
+  the value without the checks that need the compiled pattern. Each backend's own compile at run time (next
+  bullet) then disables a pattern that is too slow. Parallel workers don't
+  compile the patterns at all: they take the leader's value as it is and
+  never extract tags.
 - Each backend compiles the pattern again on its first tagged statement. In
   a client backend, a compile still running after 100 ms is stopped and
   counts as a compile failure (see below). The statement isn't cancelled
@@ -230,10 +239,12 @@ pattern from stalling queries:
   no limit at run time.
 - In a backend the limit is elapsed time. If a compile reaches it while
   having used less than half of it in CPU time, the backend was mostly
-  waiting for the CPU (a loaded host or VM), so the compile is retried, up
-  to 3 attempts in all. A stall then can't reject or disable a normal
-  pattern, and a statement waits at most about 300 ms for a slow one. The
-  postmaster measures CPU time only.
+  waiting for the CPU (a loaded host), so the compile is retried, up to 3
+  attempts in all, and a statement waits at most about 300 ms for a slow
+  pattern. Inside a VM, time the host takes the virtual CPU away can count
+  as CPU time, so on a heavily overloaded host a normal pattern can still
+  be rejected by `ALTER SYSTEM` (try again) or disabled in a backend
+  until the next configuration change.
 - The limit is per pattern. Compile times vary between machines and with
   load, so a pattern close to the limit may be accepted when it's set and
   still be stopped in some backends. Keep patterns well below the limit:

@@ -57,6 +57,7 @@
 #include "context.h"
 #include "executor.h"
 #include "guc.h"
+#include "regex_runtime.h"
 #include "store.h"
 #include "utility.h"
 
@@ -179,6 +180,7 @@ pssc_ProcessUtility(PSSC_PROCESS_UTILITY_PARAMS)
 	PsscFrameSave save;
 	bool		tracked;
 	bool		nest;
+	bool		alter_system = IsA(parsetree, AlterSystemStmt);
 	instr_time	start;
 	instr_time	duration;
 
@@ -209,12 +211,17 @@ pssc_ProcessUtility(PSSC_PROCESS_UTILITY_PARAMS)
 		INSTR_TIME_SET_CURRENT(start);
 
 	pssc_frame_enter(&save, frame, nest);
+	/* its regex test compiles are strict (regex_runtime.c) */
+	if (alter_system)
+		pssc_regex_note_alter_system(true);
 	PG_TRY();
 	{
 		chain(PSSC_PROCESS_UTILITY_ARGS);
 	}
 	PG_FINALLY();
 	{
+		if (alter_system)
+			pssc_regex_note_alter_system(false);
 		pssc_frame_leave(&save);
 	}
 	PG_END_TRY();

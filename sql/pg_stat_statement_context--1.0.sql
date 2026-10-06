@@ -78,13 +78,13 @@ GRANT SELECT ON pg_stat_statement_context_activity TO PUBLIC;
 -- Records nothing and works even when pg_stat_statement_context.enabled is
 -- off. Superuser-only by default (it runs the regex engine on arbitrary
 -- input and reveals the extractor configuration); GRANT EXECUTE to allow
--- others.
+-- others. PARALLEL RESTRICTED: parallel workers don't bound regex compiles.
 CREATE FUNCTION pg_stat_statement_context_extract(query text,
                                                   stmt_location int DEFAULT -1,
                                                   stmt_len int DEFAULT 0)
 RETURNS jsonb
 AS 'MODULE_PATHNAME', 'pg_stat_statement_context_extract'
-LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
+LANGUAGE C VOLATILE STRICT PARALLEL RESTRICTED;
 
 REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PUBLIC;
 

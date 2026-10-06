@@ -611,6 +611,185 @@ is($node->safe_psql('postgres', "SHOW $P.extractors"),
 	q{regex(pattern='svc=(\w+)', keys=service), regex(pattern='op=(\w+)', keys=operation, merge=on), sqlcommenter(position=any, merge=on)},
 	'the configuration is unchanged');
 
+# Re-reading the configuration file (backlog 20261006-092320-1): time alone
+# never rejects a value there. A backend's re-check after a reload whose
+# test compile hits the limit on every attempt must still apply the value
+# the postmaster accepted, or it would silently (DEBUG3) keep its old
+# configuration while other backends switch. 'sleep' burns CPU time while
+# the limit runs out, as a host preempting the VM looks from inside the
+# guest (charged to the process, so not retried as a stall). Also in a
+# session idle in a transaction block, which processes the reload there.
+for my $c ([ 'extractors', 'sleep', 0 ], [ 'extractors', 'regsleep', 0 ],
+	[ 'extractors', 'sleep', 1 ], [ 'normalize', 'sleep', 0 ])
+{
+	my ($name, $action, $in_xact) = @$c;
+	my $what = "reload re-check in a backend, $name, compile over the limit ($action"
+	  . ($in_xact ? ', idle in transaction' : '') . ')';
+	my $orig = $node->safe_psql('u8', "SHOW $P.extractors");
+	my ($val, $tags) =
+	  $name eq 'extractors'
+	  ? ("$orig, regex(pattern='op=(\\w+)', keys=op2, merge=on)", 'a=x,op2=o,operation=o,service=s')
+	  : (q{service: 's' => 'S'}, 'a=x,operation=o,service=S');
+	my $s = session_open();
+	sq($s, 'BEGIN') if $in_xact;
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, '$action', -1)");
+	my $t0 = time;
+	alter_and_reload("SET $P.$name = " . sqlq($val));
+	my $dt = time - $t0;
+	cmp_ok(sq($s, 'SELECT pssc_extract_test_regex_injected()'), '>=', 1, "$what: the re-check compile hit the limit");
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'none')");
+	is(sq($s, "SHOW $P.$name"), $val, "$what: value applied, as by the postmaster");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', "$what: no cancel left pending");
+	sq($s, 'COMMIT') if $in_xact;
+	my $r = sex($s, $Q);
+	is("$r->{tags} $r->{regex_fail}", "$tags 0", "$what: compiled lazily and used");
+	cmp_ok($dt, '<', $BOUND_S, "$what: bounded (${dt}s)");
+	session_close($s);
+	alter_and_reload($name eq 'extractors' ? "SET $P.$name = " . sqlq($orig) : "RESET $P.$name");
+}
+# A query in session $s forced into a parallel worker. The worker restores
+# the leader's settings, which runs the check hooks again there; it never
+# extracts, so it must neither fail the query nor spend a compile on them.
+my $force_parallel =
+  $node->safe_psql('postgres', 'SHOW server_version_num') >= 160000
+  ? 'debug_parallel_query' : 'force_parallel_mode';
+sub parallel_query_ok
+{
+	my ($s, $what, $bound) = @_;
+	$bound //= $BOUND_S;
+	my $t0 = time;
+	my ($out, $err) = sq_err($s,
+		"SET $force_parallel = on; SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0;\n"
+		  . 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM generate_series(1, 10)');
+	my $dt = time - $t0;
+	sq($s, "RESET $force_parallel; RESET parallel_setup_cost; RESET parallel_tuple_cost");
+	is($err, '', "$what: parallel query succeeds");
+	like($out, qr/Workers Launched: [1-9]/, "$what: in a parallel worker");
+	cmp_ok($dt, '<', $bound, "$what: parallel query bounded (${dt}s, limit ${bound}s)");
+}
+# A pathological pattern written into postgresql.conf by hand: the
+# postmaster (no timer: it compiles to completion) accepts it and logs that
+# it is too slow; backends that already run agree (their bounded re-check
+# runs out of time and accepts it), new ones inherit it, and each disables
+# the extractor at its lazy compile, as for any compile over the limit.
+{
+	my $orig = $node->safe_psql('u8', "SHOW $P.extractors");
+	my $val = "regex(pattern='$SLOW', keys=slow), sqlcommenter(position=any, merge=on)";
+	my $s = session_open();
+	my $logpos = -s $node->logfile;
+	(my $conf = $val) =~ s/\\/\\\\/g;
+	$conf =~ s/'/''/g;
+	$node->append_conf('postgresql.conf', "$P.extractors = '$conf'\n");
+	my $t0 = time;
+	alter_and_reload("RESET $P.extractors");
+	my $dt = time - $t0;
+	my $log = substr(slurp_file($node->logfile), $logpos);
+	unlike($log, qr/invalid value for parameter "\Q$P\E\.extractors"/,
+		'slow pattern in postgresql.conf: not rejected by the postmaster');
+	like($log, qr/LOG:  compiling the pattern of extractor "regex" took \d+ ms, longer than the $LIMIT_MS ms limit\n.*DETAIL:  \S/,
+		'slow pattern in postgresql.conf: the postmaster logs the compile time');
+	my ($slow_ms) = $log =~ /compiling the pattern of extractor "regex" took (\d+) ms/;
+	$slow_ms //= 0;
+	is($node->safe_psql('u8', "SHOW $P.extractors"), $val, 'slow pattern in postgresql.conf: new backends have it');
+	is(sq($s, "SHOW $P.extractors"), $val, 'slow pattern in postgresql.conf: a running backend has it too');
+	note "slow pattern in postgresql.conf: reload took ${dt}s";
+	# Setting it with a statement is still rejected for time ...
+	my ($out, $err) = sq_err($s, "ALTER SYSTEM SET $P.extractors = " . sqlq($val));
+	like($err, qr/DETAIL:  Compiling the pattern of extractor "regex" took longer than $LIMIT_MS ms\./,
+		'slow pattern in postgresql.conf: ALTER SYSTEM still rejects it for time');
+	# ... but pg_file_settings, which checks the file's values with the check
+	# hooks while running a statement, reads the configuration file (also
+	# right after that failed ALTER SYSTEM in the same backend).
+	$t0 = time;
+	is(sq($s, "SELECT applied, error IS NULL FROM pg_file_settings WHERE name = '$P.extractors' ORDER BY seqno DESC LIMIT 1"),
+		't|t', 'slow pattern in postgresql.conf: pg_file_settings shows it applied');
+	my $dt3 = time - $t0;
+	cmp_ok($dt3, '<', $BOUND_S, "slow pattern in postgresql.conf: pg_file_settings bounded (${dt3}s)");
+	# the worker doesn't compile it: well below one full compile
+	parallel_query_ok($s, 'slow pattern in postgresql.conf', $slow_ms / 2000);
+	# _extract() does extract, so it must not run in a worker either (where
+	# its lazy compile would be unbounded): it is PARALLEL RESTRICTED.
+	{
+		$node->safe_psql('u8', "CREATE EXTENSION $P");
+		my $p = session_open();
+		$t0 = time;
+		my ($pout, $perr) = sq_err($p,
+			"SET $force_parallel = on; SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0;\n"
+			  . 'SELECT count(*) FROM generate_series(1, 10) g WHERE '
+			  . "${P}_extract('SELECT 1 /* x */') IS NOT NULL");
+		my $pdt = time - $t0;
+		is("$perr|$pout", '|10', 'slow pattern in postgresql.conf: _extract() under forced parallelism succeeds');
+		cmp_ok($pdt, '<', $slow_ms / 2000,
+			"slow pattern in postgresql.conf: _extract() under forced parallelism bounded (${pdt}s)");
+		is($node->safe_psql('u8', "SELECT proparallel FROM pg_proc WHERE proname = '${P}_extract'"),
+			'r', '_extract() is PARALLEL RESTRICTED');
+		session_close($p);
+		$node->safe_psql('u8', "DROP EXTENSION $P");
+	}
+	for my $b ([ 'running', $s ], [ 'new', session_open() ])
+	{
+		$t0 = time;
+		my $r = sex($b->[1], sqlq(q{SELECT 1 /* x */ /*a='x'*/}));
+		my $dt2 = time - $t0;
+		is("$r->{tags} $r->{regex_fail}", 'a=x 1',
+			"slow pattern in postgresql.conf, $b->[0] backend: extractor disabled at its lazy compile, counted");
+		cmp_ok($dt2, '<', $BOUND_S, "slow pattern in postgresql.conf, $b->[0] backend: bounded (${dt2}s)");
+		session_close($b->[1]);
+	}
+	alter_and_reload("SET $P.extractors = " . sqlq($orig));
+	is($node->safe_psql('u8', "SHOW $P.extractors"), $orig, 'slow pattern in postgresql.conf: overridden again');
+}
+# A value the postmaster rejects for a reason other than time is rejected
+# by a backend whose re-check was stopped at the limit too, if it can tell
+# without the compiled regex: more keys (so capture groups) than max_tags.
+{
+	my $orig = $node->safe_psql('u8', "SHOW $P.extractors");
+	my $val = q{regex(pattern='(a)(b)(c)(d)(e)(f)(g)(h)(i)', keys=a|b|c|d|e|f|g|h|i)};
+	my $s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'sleep', -1)");
+	my $logpos = -s $node->logfile;
+	(my $conf = $val) =~ s/'/''/g;
+	$node->append_conf('postgresql.conf', "$P.extractors = '$conf'\n");
+	alter_and_reload("RESET $P.extractors");
+	like(substr(slurp_file($node->logfile), $logpos),
+		qr/invalid value for parameter "\Q$P\E\.extractors".*\n.*DETAIL:  Pattern of extractor "regex" has 9 capture groups, more than max_tags \(8\)\./,
+		'more keys than max_tags in postgresql.conf: rejected by the postmaster');
+	cmp_ok(sq($s, 'SELECT pssc_extract_test_regex_injected()'), '>=', 1,
+		'more keys than max_tags in postgresql.conf: the backend re-check hit the limit');
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'none')");
+	is(sq($s, "SHOW $P.extractors"), $node->safe_psql('u8', "SHOW $P.extractors"),
+		'more keys than max_tags in postgresql.conf: the backend agrees with the postmaster');
+	session_close($s);
+	alter_and_reload("SET $P.extractors = " . sqlq($orig));
+}
+# A value the postmaster rejects for a reason only the compiled regex shows
+# (2 capture groups, 1 key) but a backend accepted unchecked: the backend
+# disables it at its lazy compile, and its parallel workers, restoring the
+# backend's value, accept it too rather than fail the query.
+{
+	my $orig = $node->safe_psql('u8', "SHOW $P.extractors");
+	my $val = "$orig, regex(pattern='op=(\\w+)(x?)', keys=op2, merge=on)";
+	my $what = 'capture groups not matching the keys, accepted unchecked';
+	my $s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'sleep', -1)");
+	my $logpos = -s $node->logfile;
+	(my $conf = $val) =~ s/\\/\\\\/g;
+	$conf =~ s/'/''/g;
+	$node->append_conf('postgresql.conf', "$P.extractors = '$conf'\n");
+	alter_and_reload("RESET $P.extractors");
+	like(substr(slurp_file($node->logfile), $logpos),
+		qr/invalid value for parameter "\Q$P\E\.extractors".*\n.*DETAIL:  Extractor "regex" has 1 key but its pattern has 2 capture groups\./,
+		"$what: rejected by the postmaster");
+	cmp_ok(sq($s, 'SELECT pssc_extract_test_regex_injected()'), '>=', 1, "$what: the backend re-check hit the limit");
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'none')");
+	is(sq($s, "SHOW $P.extractors"), $val, "$what: the backend has it");
+	parallel_query_ok($s, $what);
+	my $r = sex($s, $Q);
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o,service=s 1', "$what: disabled at the lazy compile, counted");
+	session_close($s);
+	alter_and_reload("SET $P.extractors = " . sqlq($orig));
+}
+
 # ---------------------------------------------------------------------------
 # Match errors: no pairs from that comment, statement succeeds, extractor
 # stays enabled; interrupts are honored

@@ -340,10 +340,26 @@ Format-specific parameters:
   or `normalize` rule) is limited to 100 ms (`PSSC_REGEX_COMPILE_LIMIT_MS`, a
   constant). The fuzzer found patterns such as
   `((?:(?:$)|\Zda|(?<!1)|\S){0,255}` that take tens of seconds.
-  - The GUC check hooks reject a slower pattern with an errdetail. In a
-    backend (`SET`, `ALTER SYSTEM`) the test compile is aborted at the limit;
-    the postmaster has no timer, so it measures CPU time and runs to
-    completion (a hand-edited `postgresql.conf` can still stall a reload).
+  - The GUC check hooks reject a slower pattern with an errdetail only when a
+    statement sets the value: `ALTER SYSTEM`, detected by a flag the
+    ProcessUtility hook holds around `AlterSystemStmt` (it validates with
+    `PGC_S_FILE`, like a reload), or a source of `PGC_S_SESSION`/`PGC_S_TEST`
+    (unreachable today: both GUCs are `PGC_SIGHUP`). There the test compile is
+    aborted at the limit.
+  - Values read from the configuration file (startup, reload,
+    `pg_file_settings`) are never rejected for time, so that all processes
+    agree on the configuration (item 20261006-092320-1: under VM steal time a
+    backend's reload check could reject a value the postmaster had accepted
+    and silently keep stale extractors). The postmaster has no timer; it
+    compiles to completion and logs an over-limit compile (a hand-edited
+    `postgresql.conf` can still stall a reload). A backend's reload check
+    stays bounded by its timer, and on timeout it accepts the value unchecked
+    (it still rejects more keys than `max_tags`); its own run-time compile
+    then re-checks group counts, back-references and time, and disables the
+    extractor or rule in that backend (`regex_compile_failures`).
+  - Parallel workers restoring the leader's settings don't test-compile at
+    all, since they never extract tags (`_extract()` is `PARALLEL RESTRICTED`
+    so it never runs in one).
   - A client backend's lazy compile runs under a `USER_TIMEOUT` that raises a
     cancel internally; the engine notices it (`REG_CANCEL` on PG14/15, a
     thrown cancel on PG16+). It counts as a compile failure
@@ -358,6 +374,9 @@ Format-specific parameters:
     conflicts) are not lost.
   - An attempt that hit the limit but used under half of it in CPU time was a
     scheduling stall and is retried, up to 3 attempts (≤ ~300 ms per pattern).
+    Inside a VM, time the host takes the virtual CPU away can count as CPU
+    time, so a heavily overloaded host can still make `ALTER SYSTEM` reject,
+    or a backend disable, a normal pattern (item 20261006-113156-1).
     Each attempt compiles in its own memory context; a failed or interrupted
     attempt's context is deleted before the next one (item 20261006-080948-1;
     on PG16+ a thrown cancel skips the engine's own cleanup).
@@ -967,7 +986,7 @@ Debug function (item -11, ships in 1.0):
 ```sql
 CREATE FUNCTION pg_stat_statement_context_extract(
     query text, stmt_location int DEFAULT -1, stmt_len int DEFAULT 0)
-RETURNS jsonb VOLATILE STRICT ...;
+RETURNS jsonb VOLATILE STRICT PARALLEL RESTRICTED ...;
 REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PUBLIC;
 ```
 
