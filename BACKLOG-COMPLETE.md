@@ -1072,6 +1072,22 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 **Open questions:** none
 **Status:** done
 
+### 20261006-113156-1: Make the 006 compile-limit tests tolerate VM steal time
+
+Found while fixing 20261006-092320-1. At load average ~100 (CPU hogs both in the Docker VM and on the host), two older `test/t/006_regex.pl` cases still fail, because time the host takes the virtual CPU away is counted as backend CPU time:
+- the "large config" `ALTER SYSTEM` is rejected for compile time;
+- in "compile over the time limit (sleep)", the extractor is not disabled.
+
+The same accounting can make `SET`/`ALTER SYSTEM` reject a normal pattern on an overloaded host (documented in `docs/extractors.md`). Options: make these tests use the test-only limit hooks so they don't depend on real CPU time, and/or find a steal-resistant way to tell a busy compile from a stalled one.
+
+**Acceptance criteria:**
+- Both cases pass 10 of 10 runs under the load recipe in `tmp/flaky004/` (or an equivalent documented one).
+- Any product change is test-first and documented in DESIGN §4.2.
+
+**Depends on:** 20261006-092320-1
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

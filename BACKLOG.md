@@ -52,7 +52,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | no | ready |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
-| 20261006-113156-1 | Make the 006 compile-limit tests tolerate VM steal time | 20261006-092320-1 | no | ready |
+| 20261006-143225-1 | Close the deadline-postponement race in the test module's sleep injection | 20261006-113156-1 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | blocked-on-deps |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
@@ -188,19 +188,17 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 **Open questions:** none
 **Status:** ready
 
-### 20261006-113156-1: Make the 006 compile-limit tests tolerate VM steal time
+### 20261006-143225-1: Close the deadline-postponement race in the test module's sleep injection
 
-Found while fixing 20261006-092320-1. At load average ~100 (CPU hogs both in the Docker VM and on the host), two older `test/t/006_regex.pl` cases still fail, because time the host takes the virtual CPU away is counted as backend CPU time:
-- the "large config" `ALTER SYSTEM` is rejected for compile time;
-- in "compile over the time limit (sleep)", the extractor is not disabled.
+Split from 20261006-113156-1 (final review finding, not fixed within 2 rounds). In `test/modules/pssc_extract_test/pssc_extract_test.c` (around lines 342–355), the `sleep`/`regsleep` injections snapshot whether the compile deadline is pending, then postpone it with `pssc_regex_test_expire_in(60000)`. If the original 100 ms deadline fires between the snapshot and the postponement (the backend is descheduled there), the postponement doesn't clear the already-pending self-cancel. The loop then treats it as a genuine cancel and returns after almost no CPU time, so the attempt is classified as a stall and retried without the injection. That is the original load-dependent 006 failure, now in a much narrower window.
 
-The same accounting can make `SET`/`ALTER SYSTEM` reject a normal pattern on an overloaded host (documented in `docs/extractors.md`). Options: make these tests use the test-only limit hooks so they don't depend on real CPU time, and/or find a steal-resistant way to tell a busy compile from a stalled one.
+Fix options: block SIGALRM around the snapshot and postponement, or expose deadline ownership (the runtime's own "our cancel vs foreign cancel" state) through a PGDLLEXPORT test helper so the loop can tell a raced self-cancel from a genuine one.
 
 **Acceptance criteria:**
-- Both cases pass 10 of 10 runs under the load recipe in `tmp/flaky004/` (or an equivalent documented one).
-- Any product change is test-first and documented in DESIGN §4.2.
+- A deterministic test (for example a test hook that fires the deadline between the snapshot and the postponement) fails before the fix and passes after.
+- The 006 cancel/terminate/statement_timeout tests from 20261006-113156-1 still pass; the full harness passes on PG14–18.
 
-**Depends on:** 20261006-092320-1
+**Depends on:** 20261006-113156-1
 **Open questions:** none
 **Status:** ready
 
