@@ -132,8 +132,29 @@ replaces or rewrites the core `queryId`. This includes PG14/15 utility statement
 | `ExecutorEnd` | Add one call and the elapsed time from `queryDesc->totaltime` to the store under the frame's key, then drop the frame. |
 | `ProcessUtility` | Before chaining, snapshot `queryId`, statement bounds, and tags into a utility frame. Activate it (and bump nesting, except for `EXECUTE`/`PREPARE`) around the chained call, timing it. Record from the snapshot afterwards. Never touch `pstmt` after chaining (§6.7). |
 
-No `planner_hook` is installed: planning time is left to pgss
-(`track_planning`), see §8 "Rejected".
+No `planner_hook` is used for timing: planning time is left to pgss
+(`track_planning`), see §8 "Rejected". On PG17+ only, a minimal `planner_hook`
+adds one nesting level around the chained planner and restores it in
+`PG_FINALLY`. It does no timing and activates no frame, so SQL run during
+planning (constant-folded functions) is not top-level, matching pgss, which
+counts planner nesting only from PG17.0. On PG14–16 pgss ignores planning when
+deciding `toplevel`, so no hook is installed there (decided 2026-10-05, item
+-16).
+
+Frame details (item -16):
+- **User and nesting refresh:** `pssc_frame_refresh()` updates `userid`,
+  nesting level, `toplevel` and recordability at recording time (ExecutorEnd,
+  or after a utility returns), because pgss reads them then. For example, a
+  cursor closed under a different role is recorded under the closing role.
+- **PG18 statement-boundary cache (§6.5):** used and updated only when the
+  statement's source is the client query string (`debug_query_string`), at
+  nesting level 0, with no active frame. Planning-time, nested and
+  `EXECUTE`'d sources neither read nor overwrite it.
+- **Statements that get no frame:**
+  - `DECLARE CURSOR`'s inner query has `queryId` 0.
+  - PL/pgSQL simple expressions (`x := expr`) skip the executor.
+- **PL/pgSQL `INTO`:** PL/pgSQL drops the text after `INTO` from the query, so a
+  comment must come before `INTO` to be seen.
 
 **Why the executor hooks, not `post_parse_analyze`?** Parse analysis is skipped
 when a cached plan or prepared statement is re-executed, but the executor hooks

@@ -401,6 +401,43 @@ The insert that triggered eviction must then succeed.
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-16: Execution frames and active-frame tracking
+
+**Description:** Implement `src/context.c` (§3.1 item 3, §3.2 "Frame lifetime", §6.4).
+
+Frame data:
+- A frame holds the resolved tag set and statement metadata: `queryId`, `dbid`, `userid`, encoding, `toplevel`, and whether it is recordable.
+
+Executor frames:
+- Allocate them in `es_query_cxt`.
+- Register them in a backend-local list, with a `MemoryContextCallback` that unlinks the frame when the context is destroyed. This covers abort paths and failed portals that skip `ExecutorEnd`.
+- Look up a frame from its `QueryDesc`.
+
+Utility frames:
+- Snapshot the data before chaining, into storage that survives a `ROLLBACK` freeing transaction memory, for example on the stack or in a context released in `PG_FINALLY`.
+
+Active frame and nesting:
+- Provide helpers that save and restore the active-frame pointer and `nesting_level`, for use inside `PG_TRY`/`PG_FINALLY`.
+
+Tag resolution follows `nested_tags`:
+- `inherit` copies the active frame's tags.
+- `scan` runs extraction on the frame's own source.
+- `none` uses no tags.
+
+A statement planned without an active frame gets only its own tags.
+
+**Acceptance criteria:**
+- In assert builds, the frame registry is empty at transaction end after these cases:
+  - normal execution
+  - errors
+  - portals dropped without `ExecutorEnd`
+  - suspended or interleaved portals
+- All three `nested_tags` modes behave as described in §6.4.
+
+**Depends on:** 20261005-091225-9
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

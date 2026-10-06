@@ -53,9 +53,12 @@ include $(PGXS)
 # of src/extract.h on given text and injects faults into the regex runtime
 # (test/t/005_extract.pl, test/t/006_regex.pl); pssc_store_test drives the
 # shared store of src/store.h (test/t/007_store.pl, 008_buckets.pl,
-# 009_eviction.pl).
+# 009_eviction.pl). pssc_context_test installs minimal executor/utility
+# hooks driving the execution-frame API of src/context.h and exposes the
+# frame registry and active frame to SQL (test/t/010_context.pl).
 TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test \
-	test/modules/pssc_extract_test test/modules/pssc_store_test
+	test/modules/pssc_extract_test test/modules/pssc_store_test \
+	test/modules/pssc_context_test
 
 .PHONY: test-modules install-test-modules clean-test-modules check-version-guards unittest
 

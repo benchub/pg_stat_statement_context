@@ -1,0 +1,5 @@
+# TEST-ONLY: drives src/context.h; not part of pg_stat_statement_context.
+comment = 'test-only driver for pg_stat_statement_context execution frames'
+default_version = '1.0'
+module_pathname = '$libdir/pssc_context_test'
+relocatable = true

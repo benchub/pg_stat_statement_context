@@ -53,9 +53,9 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | ready |
-| 20261005-091225-16 | Execution frames and active-frame tracking | 20261005-091225-9 | no | ready |
-| 20261005-091225-17 | Executor hooks and recording | 20261005-091225-12, 20261005-091225-14, 20261005-091225-16 | no | blocked-on-deps |
+| 20261005-091225-17 | Executor hooks and recording | 20261005-091225-12, 20261005-091225-14, 20261005-091225-16 | no | ready |
 | 20261005-091225-18 | `ProcessUtility` hook | 20261005-091225-17 | no | blocked-on-deps |
+| 20261005-181131-1 | PG18 boundary cache: advance for skipped utilities (PREPARE/EXECUTE) | 20261005-091225-16 | no | ready |
 | 20261005-091225-19 | `shared_preload_libraries` load-order detection and policy | 20261005-091225-18 | no | blocked-on-deps |
 | 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | no | ready |
 | 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | no | blocked-on-deps |
@@ -226,43 +226,6 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-16: Execution frames and active-frame tracking
-
-**Description:** Implement `src/context.c` (§3.1 item 3, §3.2 "Frame lifetime", §6.4).
-
-Frame data:
-- A frame holds the resolved tag set and statement metadata: `queryId`, `dbid`, `userid`, encoding, `toplevel`, and whether it is recordable.
-
-Executor frames:
-- Allocate them in `es_query_cxt`.
-- Register them in a backend-local list, with a `MemoryContextCallback` that unlinks the frame when the context is destroyed. This covers abort paths and failed portals that skip `ExecutorEnd`.
-- Look up a frame from its `QueryDesc`.
-
-Utility frames:
-- Snapshot the data before chaining, into storage that survives a `ROLLBACK` freeing transaction memory, for example on the stack or in a context released in `PG_FINALLY`.
-
-Active frame and nesting:
-- Provide helpers that save and restore the active-frame pointer and `nesting_level`, for use inside `PG_TRY`/`PG_FINALLY`.
-
-Tag resolution follows `nested_tags`:
-- `inherit` copies the active frame's tags.
-- `scan` runs extraction on the frame's own source.
-- `none` uses no tags.
-
-A statement planned without an active frame gets only its own tags.
-
-**Acceptance criteria:**
-- In assert builds, the frame registry is empty at transaction end after these cases:
-  - normal execution
-  - errors
-  - portals dropped without `ExecutorEnd`
-  - suspended or interleaved portals
-- All three `nested_tags` modes behave as described in §6.4.
-
-**Depends on:** 20261005-091225-9
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-17: Executor hooks and recording
 
 **Description:** Install the `ExecutorStart`, `ExecutorRun`, `ExecutorFinish`, and `ExecutorEnd` hooks exactly as in §3.2 and §3.3.
@@ -295,7 +258,23 @@ A statement planned without an active frame gets only its own tags.
 
 **Depends on:** 20261005-091225-12, 20261005-091225-14, 20261005-091225-16
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
+
+### 20261005-181131-1: PG18 boundary cache: advance for skipped utilities (PREPARE/EXECUTE)
+
+**Description:** Split from 20261005-091225-16 (round 2 review finding). The PG18 statement-boundary cache in `src/context.c` (used by `pssc_stmt_owned_start` to keep leading comments of later statements in a multi-statement simple-protocol string) only advances when a frame is initialized. `PREPARE` (and possibly `EXECUTE`, other skipped utilities) bypasses frame initialization, so the cache keeps the end of an earlier statement. If the skipped utility is longer than `scan_window`, the next statement's leading comment is outside the window and its tags are lost (with `untagged=skip`, the statement becomes unrecordable).
+
+Repro (one simple-protocol query, PG18): `SELECT 1; PREPARE p AS SELECT length('<3000 chars>'); /*controller='second'*/ SELECT pssc_context_test_tags();` → empty tags.
+
+Fix: advance the client statement-boundary state for every top-level statement of the client query string (including `PREPARE`/`EXECUTE` and other utilities that skip frames/recording), independently of frame activation or recording. Coordinate with the real `ProcessUtility` hook (20261005-091225-18) — if -18 lands first, do it there; otherwise expose a `pssc_context_note_stmt_boundary()` helper that -18 must call.
+
+**Acceptance criteria:**
+- A PG18 test with a skipped utility (`PREPARE`) longer than `scan_window` between statements keeps the following statement's leading-comment tags.
+- Existing 010 tests still pass on PG14–18.
+
+**Depends on:** 20261005-091225-16
+**Open questions:** none
+**Status:** ready
 
 ### 20261005-091225-18: `ProcessUtility` hook
 

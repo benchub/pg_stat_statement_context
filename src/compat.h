@@ -17,6 +17,7 @@
 #include "funcapi.h"
 #include "jit/jit.h"
 #include "miscadmin.h"
+#include "optimizer/planner.h"
 #include "regex/regex.h"
 #include "storage/ipc.h"
 #include "tcop/utility.h"
@@ -61,6 +62,29 @@
 	QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc
 #define PSSC_PROCESS_UTILITY_ARGS \
 	pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc
+
+/*
+ * planner_hook signature, used like PSSC_EXECUTOR_RUN_*. Re-check
+ * optimizer/planner.h whenever a new major version is added.
+ */
+/* PG14-18: identical (query_string since PG13). */
+#define PSSC_PLANNER_PARAMS \
+	Query *parse, const char *query_string, int cursorOptions, \
+	ParamListInfo boundParams
+#define PSSC_PLANNER_ARGS \
+	parse, query_string, cursorOptions, boundParams
+
+/*
+ * Whether pg_stat_statements counts planning as a nesting level for
+ * toplevel and track (statements run by functions evaluated while
+ * planning, e.g. constant folding, are then not top level).
+ */
+/* PG17+: always (pgss_planner increments nesting_level even when not tracking planning); PG14-16: never (toplevel and track use exec_nested_level only). */
+#if PG_VERSION_NUM >= 170000
+#define PSSC_HAS_PLANNER_NESTING 1
+#else
+#define PSSC_HAS_PLANNER_NESTING 0
+#endif
 
 /*
  * Shared-memory requests (RequestAddinShmemSpace, RequestNamedLWLockTranche).

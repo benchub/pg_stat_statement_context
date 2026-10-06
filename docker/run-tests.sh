@@ -59,7 +59,7 @@ as_pg make PG_CFLAGS="-Werror" || fail "make"
 step "make install"
 make install || fail "make install"
 
-step "make install-test-modules (TEST-ONLY compat.h exerciser, GUC inspector, extract and store drivers)"
+step "make install-test-modules (TEST-ONLY compat.h exerciser, GUC inspector, extract and store drivers, context hooks)"
 for m in test/modules/*/; do
 	as_pg make -C "$m" PG_CFLAGS="-Werror" || fail "make test module $m"
 	make -C "$m" install || fail "install test module $m"

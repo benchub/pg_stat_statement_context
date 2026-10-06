@@ -10,6 +10,7 @@
 #include "miscadmin.h"
 
 #include "compat.h"
+#include "context.h"
 #include "extract.h"
 #include "guc.h"
 #include "regex_runtime.h"
@@ -37,6 +38,7 @@ _PG_init(void)
 	pssc_extract_init();
 	pssc_regex_init();
 	pssc_store_init();
+	pssc_context_init();
 
 	/*
 	 * Make compute_query_id = auto behave as on, so query IDs match
