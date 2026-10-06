@@ -51,7 +51,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
-| 20261006-143225-1 | Close the deadline-postponement race in the test module's sleep injection | 20261006-113156-1 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
@@ -160,20 +159,6 @@ dependencies and is not shown.
 - 2026-10-06: Do option 2 (compact per-entry array, keeps §5.3 semantics) first; only if p99 is still over ~1.5× pgss, add option 1 (adaptive batch) and update §5.3.
 
 **Depends on:** 20261006-043919-1
-**Open questions:** none
-**Status:** ready
-
-### 20261006-143225-1: Close the deadline-postponement race in the test module's sleep injection
-
-Split from 20261006-113156-1 (final review finding, not fixed within 2 rounds). In `test/modules/pssc_extract_test/pssc_extract_test.c` (around lines 342–355), the `sleep`/`regsleep` injections snapshot whether the compile deadline is pending, then postpone it with `pssc_regex_test_expire_in(60000)`. If the original 100 ms deadline fires between the snapshot and the postponement (the backend is descheduled there), the postponement doesn't clear the already-pending self-cancel. The loop then treats it as a genuine cancel and returns after almost no CPU time, so the attempt is classified as a stall and retried without the injection. That is the original load-dependent 006 failure, now in a much narrower window.
-
-Fix options: block SIGALRM around the snapshot and postponement, or expose deadline ownership (the runtime's own "our cancel vs foreign cancel" state) through a PGDLLEXPORT test helper so the loop can tell a raced self-cancel from a genuine one.
-
-**Acceptance criteria:**
-- A deterministic test (for example a test hook that fires the deadline between the snapshot and the postponement) fails before the fix and passes after.
-- The 006 cancel/terminate/statement_timeout tests from 20261006-113156-1 still pass; the full harness passes on PG14–18.
-
-**Depends on:** 20261006-113156-1
 **Open questions:** none
 **Status:** ready
 

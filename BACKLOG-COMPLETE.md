@@ -1130,6 +1130,20 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 **Open questions:** none
 **Status:** done
 
+### 20261006-143225-1: Close the deadline-postponement race in the test module's sleep injection
+
+Split from 20261006-113156-1 (final review finding, not fixed within 2 rounds). In `test/modules/pssc_extract_test/pssc_extract_test.c` (around lines 342–355), the `sleep`/`regsleep` injections snapshot whether the compile deadline is pending, then postpone it with `pssc_regex_test_expire_in(60000)`. If the original 100 ms deadline fires between the snapshot and the postponement (the backend is descheduled there), the postponement doesn't clear the already-pending self-cancel. The loop then treats it as a genuine cancel and returns after almost no CPU time, so the attempt is classified as a stall and retried without the injection. That is the original load-dependent 006 failure, now in a much narrower window.
+
+Fix options: block SIGALRM around the snapshot and postponement, or expose deadline ownership (the runtime's own "our cancel vs foreign cancel" state) through a PGDLLEXPORT test helper so the loop can tell a raced self-cancel from a genuine one.
+
+**Acceptance criteria:**
+- A deterministic test (for example a test hook that fires the deadline between the snapshot and the postponement) fails before the fix and passes after.
+- The 006 cancel/terminate/statement_timeout tests from 20261006-113156-1 still pass; the full harness passes on PG14–18.
+
+**Depends on:** 20261006-113156-1
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
