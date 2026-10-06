@@ -92,11 +92,14 @@ sub session_close
 # ALTER SYSTEM statements, then reload and wait until every backend we hold
 # (and new ones) has processed it (scan_window moves to a new sentinel).
 my $sentinel = 1000;
+# SQL run before the ALTER SYSTEM statements, in the same session.
+our $alter_pre = '';
 sub alter_and_reload
 {
 	$sentinel++;
 	$node->safe_psql('postgres',
-		join('', map { "ALTER SYSTEM $_;\n" } @_)
+		$alter_pre
+		  . join('', map { "ALTER SYSTEM $_;\n" } @_)
 		  . "ALTER SYSTEM SET $P.scan_window = $sentinel;");
 	$node->reload;
 	$node->poll_query_until('postgres',
@@ -358,7 +361,10 @@ for my $c ([ 'regcancel', 'SELECT 1', qr/canceling statement due to user request
 # PSSC_REGEX_COMPILE_LIMIT_MS (100 ms) is aborted and counted as a compile
 # failure, without failing the statement or leaving a cancel pending, on
 # either engine behavior (PG16+ raise the pending cancel, simulated by
-# 'sleep'; PG14/15 return REG_CANCEL, simulated by 'regsleep'). A genuine
+# 'sleep'; PG14/15 return REG_CANCEL, simulated by 'regsleep'). Both are
+# busy (CPU-bound) past the limit: the test module puts the deadline off
+# until the attempt has used the whole limit in CPU time, so that on a
+# loaded host they are not taken for a stall and retried. A genuine
 # cancel or statement_timeout that arrives after the limit expired still
 # cancels the statement.
 # ---------------------------------------------------------------------------
@@ -383,6 +389,58 @@ for my $action (qw(sleep regsleep))
 	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o 0',
 		"compile over the time limit ($action): stays disabled, not retried or recounted");
 	session_close($s);
+}
+# The busy injections spend the limit in CPU time before letting it expire
+# (see above). They must still honor a genuine cancel, statement_timeout or
+# termination right away, and give up (with a WARNING) after a few seconds
+# of wall-clock time if the CPU time doesn't come (a starved host). A 30 s
+# limit makes the CPU budget far longer than either.
+my $INJ_WALL_S = 5;
+sub busy_injection_run
+{
+	my ($action, $pre, $interrupt) = @_;
+	my ($out, $err) = ('', '');
+	my $app = 'pssc_victim';
+	my $script = $node->basedir . '/busy_injection.sql';
+	open(my $fh, '>', $script) or die "could not write $script: $!";
+	print $fh "SELECT pssc_extract_test_regex_compile_limit(30000);\n"
+	  . "SELECT pssc_extract_test_regex_inject('compile', 0, '$action', 1);\n"
+	  . "$pre;\n" . ex_sql($Q) . ";\n";
+	close($fh);
+	my $t0 = time;
+	my $h = IPC::Run::start(
+		[ 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=0', '-f', $script, '-d', $node->connstr('u8') . " application_name=$app" ],
+		'<', \undef, '>', \$out, '2>', \$err, IPC::Run::timeout(120));
+	if (defined $interrupt)
+	{
+		$node->poll_query_until('postgres',
+			"SELECT count(*) = 1 FROM pg_stat_activity WHERE application_name = '$app' "
+			  . "AND state = 'active' AND query LIKE '%pssc_extract_test(%'")
+		  or die "victim did not start";
+		usleep(300_000);
+		$node->safe_psql('postgres',
+			"SELECT $interrupt(pid) FROM pg_stat_activity WHERE application_name = '$app'");
+	}
+	$h->finish;
+	return ($out, $err, time - $t0);
+}
+for my $action (qw(sleep regsleep))
+{
+	for my $c ([ 'pg_cancel_backend', 'SELECT 1', qr/canceling statement due to user request/ ],
+		[ undef, "SET statement_timeout = '500ms'", qr/canceling statement due to statement timeout/ ],
+		[ 'pg_terminate_backend', 'SELECT 1', qr/terminating connection due to administrator command/ ])
+	{
+		my ($interrupt, $pre, $re) = @$c;
+		my $what = "busy injection ($action), " . ($interrupt // 'statement_timeout');
+		my ($out, $err, $dt) = busy_injection_run($action, $pre, $interrupt);
+		like($err, $re, "$what: honored");
+		unlike($err, qr/gave up/, "$what: before the injection gave up");
+		cmp_ok($dt, '<', $INJ_WALL_S - 1, "$what: promptly (${dt}s)");
+	}
+	my ($out, $err, $dt) = busy_injection_run($action, 'SELECT 1', undef);
+	like($err, qr/WARNING:  pssc_extract_test: busy injection gave up after $INJ_WALL_S s/,
+		"busy injection ($action), CPU budget not reached in time: gives up with a WARNING");
+	cmp_ok($dt, '<', $BOUND_S, "busy injection ($action), CPU budget not reached in time: bounded (${dt}s)");
 }
 # The limit is wall-clock, but a compile that was descheduled (a stall:
 # little CPU time used, e.g. a loaded host or VM) is retried, up to
@@ -615,9 +673,9 @@ is($node->safe_psql('postgres', "SHOW $P.extractors"),
 # never rejects a value there. A backend's re-check after a reload whose
 # test compile hits the limit on every attempt must still apply the value
 # the postmaster accepted, or it would silently (DEBUG3) keep its old
-# configuration while other backends switch. 'sleep' burns CPU time while
-# the limit runs out, as a host preempting the VM looks from inside the
-# guest (charged to the process, so not retried as a stall). Also in a
+# configuration while other backends switch. 'sleep' uses the limit's
+# CPU time before it runs out, as a host preempting the VM looks from inside
+# the guest (charged to the process, so not retried as a stall). Also in a
 # session idle in a transaction block, which processes the reload there.
 for my $c ([ 'extractors', 'sleep', 0 ], [ 'extractors', 'regsleep', 0 ],
 	[ 'extractors', 'sleep', 1 ], [ 'normalize', 'sleep', 0 ])
@@ -849,7 +907,12 @@ config(tags => '*', exclude_tags => '',
 }
 
 # Reloads alternating two configs of 16 expensive regexes must not grow the
-# backend's memory (malloc'd on PG14/15, palloc'd on PG16+).
+# backend's memory (malloc'd on PG14/15, palloc'd on PG16+). Each pattern
+# takes several ms of CPU time to compile; this is not a test of the compile
+# time limit, which on an overloaded VM (host steal counts as CPU time: a
+# 3 ms compile was charged 54 ms) could make ALTER SYSTEM reject them or the
+# session disable them, so it is raised to 60 s for ALTER SYSTEM and the
+# session (still a timed compile).
 sub big_regex_config
 {
 	my ($c) = @_;
@@ -859,7 +922,9 @@ sub big_regex_config
 }
 {
 	my @big = (big_regex_config('p'), big_regex_config('q'));
+	local $alter_pre = "SELECT pssc_extract_test_regex_compile_limit(60000);\n";
 	my $s = session_open();
+	sq($s, 'SELECT pssc_extract_test_regex_compile_limit(60000)');
 	my $mem = sub {
 		my ($m, $c) = split /\|/, sq($s, 'SELECT malloc_used, context_bytes FROM pssc_extract_test_mem()');
 		return ($m eq '' ? 0 : $m) + $c;

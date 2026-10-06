@@ -11,12 +11,14 @@
 #include "postgres.h"
 
 #include <signal.h>
+#include <time.h>
 
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "parser/parser.h"
+#include "portability/instr_time.h"
 #include "miscadmin.h"
 #include "regex/regex.h"
 #include "storage/procsignal.h"
@@ -278,10 +280,10 @@ typedef enum InjectAction
 	INJ_ERROR,					/* elog(ERROR) (internal error) */
 	INJ_CANCEL,					/* throw ERRCODE_QUERY_CANCELED */
 	INJ_REGCANCEL,				/* PG14/15 engine: cancel pending, REG_CANCEL */
-	INJ_SLEEP,					/* busy CHECK_FOR_INTERRUPTS loop: real timeout */
-	INJ_REGSLEEP,				/* PG14/15 engine: busy poll for cancel, REG_CANCEL */
-	INJ_STALL,					/* as SLEEP, but sleeping (descheduled, no CPU) */
-	INJ_REGSTALL,				/* as REGSLEEP, but sleeping */
+	INJ_SLEEP,					/* busy past the limit in CPU time, then CFI loop */
+	INJ_REGSLEEP,				/* as SLEEP, then poll for cancel, REG_CANCEL (PG14/15) */
+	INJ_STALL,					/* CFI loop, sleeping (descheduled, no CPU) */
+	INJ_REGSTALL,				/* cancel poll, sleeping; REG_CANCEL */
 	INJ_LATEINT,				/* deadline, then a real SIGINT, then CFI */
 	INJ_LATEREGINT,				/* deadline, then a real SIGINT, REG_CANCEL */
 	INJ_LATEWAIT,				/* deadline, then wait 1 s without CFI, then CFI */
@@ -301,6 +303,69 @@ static int	inj_fired = 0;
 
 /* INJ_EXPIRE: the compile time limit expires this long into the attempt. */
 #define PSSC_TEST_EXPIRE_MS 300
+
+static double
+cpu_ms(void)
+{
+#ifdef CLOCK_PROCESS_CPUTIME_ID
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0)
+		return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+#endif
+	return GetCurrentTimestamp() / 1000.0;
+}
+
+/*
+ * INJ_SLEEP / INJ_REGSLEEP stand for a compile that is busy past the limit,
+ * which must not be retried as a stall. On a loaded host a busy loop can get
+ * less than half of the 100 ms wall-clock limit in CPU time and so would be
+ * retried. Instead, the deadline is put off until this attempt has used the
+ * whole limit in CPU time, and is then made to expire. A cancel already
+ * pending (the deadline fired before this hook ran) is left alone; it is
+ * raised once the CPU time is spent. With no limit (0) nothing is put off.
+ *
+ * While the deadline is put off, any cancel that arrives is a genuine one
+ * (client cancel, statement_timeout), so it, or a termination, ends the
+ * spinning at once and the caller's loop raises it. If the CPU time hasn't
+ * been used after BUSY_WALL_LIMIT_MS of wall-clock time (a starved host),
+ * the injection gives up with a WARNING (the test then fails visibly) and
+ * lets the deadline expire.
+ */
+#define BUSY_WALL_LIMIT_MS 5000
+
+static void
+busy_past_limit(void)
+{
+	int			limit = *(int *) main_sym("pssc_regex_compile_limit_ms");
+	void		(*expire) (int) = (void (*) (int)) main_sym("pssc_regex_test_expire_in");
+	bool		was_pending = QueryCancelPending;
+	double		start = cpu_ms();
+	instr_time	wstart;
+	instr_time	now;
+
+	if (limit <= 0)
+		return;
+	INSTR_TIME_SET_CURRENT(wstart);
+	if (!was_pending)
+		expire(60000);
+	while (cpu_ms() - start < limit)
+	{
+		if (ProcDiePending || (!was_pending && QueryCancelPending))
+			return;
+		INSTR_TIME_SET_CURRENT(now);
+		INSTR_TIME_SUBTRACT(now, wstart);
+		if (INSTR_TIME_GET_MILLISEC(now) >= BUSY_WALL_LIMIT_MS)
+		{
+			ereport(WARNING,
+					(errmsg("pssc_extract_test: busy injection gave up after %d s with %.0f ms of CPU time, short of the %d ms limit",
+							BUSY_WALL_LIMIT_MS / 1000, cpu_ms() - start, limit)));
+			break;
+		}
+	}
+	if (!QueryCancelPending)
+		expire(1);
+}
 
 static int
 inject_hook(int phase, int index)
@@ -339,6 +404,8 @@ inject_hook(int phase, int index)
 			return PSSC_TEST_REG_CANCEL;
 		case INJ_SLEEP:
 		case INJ_REGSLEEP:
+			busy_past_limit();
+			/* FALLTHROUGH */
 		case INJ_STALL:
 		case INJ_REGSTALL:
 			{

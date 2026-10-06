@@ -243,7 +243,9 @@ pattern from stalling queries:
   waiting for the CPU (a loaded host), so the compile is retried, up to 3
   attempts in all, and a statement waits at most about 300 ms for a slow
   pattern. Inside a VM, time the host takes the virtual CPU away can count
-  as CPU time, so on a heavily overloaded host a normal pattern can still
+  as CPU time: many hypervisors (Docker Desktop on macOS, for example)
+  report no steal time to the guest, so nothing inside the VM can tell it
+  apart. On a heavily overloaded host a normal pattern can therefore still
   be rejected by `ALTER SYSTEM` (try again) or disabled in a backend
   until the next configuration change.
 - The limit is per pattern. Compile times vary between machines and with

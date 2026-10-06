@@ -378,8 +378,14 @@ Format-specific parameters:
   - An attempt that hit the limit but used under half of it in CPU time was a
     scheduling stall and is retried, up to 3 attempts (≤ ~300 ms per pattern).
     Inside a VM, time the host takes the virtual CPU away can count as CPU
-    time, so a heavily overloaded host can still make `ALTER SYSTEM` reject,
-    or a backend disable, a normal pattern (item 20261006-113156-1).
+    time, and the guest often cannot see it (Docker Desktop on macOS reports
+    no steal time), so a heavily overloaded host can still make `ALTER
+    SYSTEM` reject, or a backend disable, a normal pattern (item
+    20261006-113156-1). Tests that aren't about the limit raise it with
+    `pssc_extract_test_regex_compile_limit()`, and the test module's `sleep`
+    injections use the full limit in CPU time before the deadline fires
+    (bounded by 5 s of wall time and honouring cancels), so they never look
+    like a stall.
     Each attempt compiles in its own memory context; a failed or interrupted
     attempt's context is deleted before the next one (item 20261006-080948-1;
     on PG16+ a thrown cancel skips the engine's own cleanup).
