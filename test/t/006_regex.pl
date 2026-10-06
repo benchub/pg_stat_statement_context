@@ -21,7 +21,12 @@ my $P = 'pg_stat_statement_context';
 
 my $node = PostgreSQL::Test::Cluster->new('regex');
 $node->init;
-$node->append_conf('postgresql.conf', "shared_preload_libraries = '$P'\n");
+# enabled = off: the executor hooks (src/executor.c) would also run
+# extraction for every statement of the test sessions, compiling and freeing
+# regexes (and counting) on their own; here only the test module drives the
+# regex runtime, so its lazy compile/free counts are exact.
+$node->append_conf('postgresql.conf',
+	"shared_preload_libraries = '$P'\n$P.enabled = off\n");
 $node->start;
 
 $node->safe_psql('postgres', 'CREATE EXTENSION pssc_extract_test');

@@ -156,6 +156,23 @@ Frame details (item -16):
 - **PL/pgSQL `INTO`:** PL/pgSQL drops the text after `INTO` from the query, so a
   comment must come before `INTO` to be seen.
 
+Executor hooks (item -17):
+- **`totaltime`:** allocated exactly as pgss does (14–18):
+  `InstrAlloc(1, INSTRUMENT_ALL, false)` in `es_query_cxt`, only when it is
+  still NULL and the statement is tracked at the current level. It uses
+  `INSTRUMENT_ALL` rather than a bare timer because whichever hook allocates
+  first decides what pgss gets.
+- **Recording rule:** record at `ExecutorEnd` when a frame exists, it is
+  recordable after `pssc_frame_refresh()`, and `totaltime` is set. This is
+  pgss's rule plus the `untagged` policy.
+- **Stats flush:** backend-local extraction counters are flushed into the
+  shared header on every `ExecutorEnd`, before chaining.
+- **Load order:** the executor hooks work with pgss loaded before or after
+  this extension; only the utility hook (-18) depends on the order.
+- **Until -18 lands:** the inner statement of a plain `EXPLAIN` (no ANALYZE) is
+  recorded as top level here, while pgss counts it as nested under the
+  `EXPLAIN` utility.
+
 **Why the executor hooks, not `post_parse_analyze`?** Parse analysis is skipped
 when a cached plan or prepared statement is re-executed, but the executor hooks
 fire on every execution. Tags are resolved at `ExecutorStart` because children
@@ -979,6 +996,8 @@ matches this extension's minimum supported version.
   - small-`max_entries` churn, with dead entries reclaimed before live ones
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset
+- **Harness source builds** (`docker/Dockerfile.source`) install
+  `pg_stat_statements` too, so pgss parity checks run on them.
 - **CI matrix**: PG14–18 × {Linux, macOS}, plus a Valgrind and
   `-DUSE_ASSERT_CHECKING` build.
 - **Benchmarks**: `pgbench -S` with and without the extension, with and

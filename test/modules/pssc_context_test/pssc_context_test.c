@@ -3,12 +3,16 @@
  *		TEST-ONLY driver for the execution frames of pg_stat_statement_context
  *		(src/context.h). See test/t/010_context.pl.
  *
- * When preloaded after pg_stat_statement_context, it installs ExecutorStart,
- * ExecutorRun, ExecutorFinish, ExecutorEnd and ProcessUtility hooks that
- * create, look up, activate and snapshot frames exactly as DESIGN.md §3.2
- * and §3.3 describe, but record nothing; the recording hooks of the main
- * library (backlog items -17 and -18) follow the same pattern. SQL
- * functions expose the active frame, the frame registry and the frames
+ The main library's executor hooks (src/executor.c) create, look up and
+ * activate executor frames. When preloaded after pg_stat_statement_context,
+ * this module adds:
+ *	- an ExecutorEnd hook that only observes: it runs before the main
+ *	  library's (it is outer) and logs the frame it finds, refreshed as the
+ *	  recording hook refreshes it;
+ *	- a ProcessUtility hook that snapshots and activates utility frames as
+ *	  DESIGN.md §3.2 and §6.7 describe, but records nothing (until the main
+ *	  library's utility hook, backlog item -18, replaces it).
+ * SQL functions expose the active frame, the frame registry and the frames
  * found at ExecutorEnd.
  *
  * The main library is reached through load_external_function() (its
@@ -56,9 +60,6 @@ static int *p_nesting;
 static bool *p_enabled;
 static bool hooks_installed = false;
 
-static ExecutorStart_hook_type prev_ExecutorStart = NULL;
-static ExecutorRun_hook_type prev_ExecutorRun = NULL;
-static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
@@ -103,63 +104,12 @@ resolve_main(void)
 	f_create = (create_fn) main_sym("pssc_frame_create");
 }
 
+/* Whether the main library's ExecutorStart made a frame (src/executor.c). */
 static bool
 wants_frame(QueryDesc *queryDesc)
 {
 	return *p_enabled && !IsParallelWorker() &&
 		queryDesc->plannedstmt->queryId != 0;
-}
-
-static void
-t_ExecutorStart(QueryDesc *queryDesc, int eflags)
-{
-	if (prev_ExecutorStart)
-		prev_ExecutorStart(queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
-
-	if (wants_frame(queryDesc))
-		f_create(queryDesc);
-}
-
-static void
-t_ExecutorRun(PSSC_EXECUTOR_RUN_PARAMS)
-{
-	PsscFrameSave save;
-
-	f_enter(&save, f_lookup(queryDesc), true);
-	PG_TRY();
-	{
-		if (prev_ExecutorRun)
-			prev_ExecutorRun(PSSC_EXECUTOR_RUN_ARGS);
-		else
-			standard_ExecutorRun(PSSC_EXECUTOR_RUN_ARGS);
-	}
-	PG_FINALLY();
-	{
-		f_leave(&save);
-	}
-	PG_END_TRY();
-}
-
-static void
-t_ExecutorFinish(QueryDesc *queryDesc)
-{
-	PsscFrameSave save;
-
-	f_enter(&save, f_lookup(queryDesc), true);
-	PG_TRY();
-	{
-		if (prev_ExecutorFinish)
-			prev_ExecutorFinish(queryDesc);
-		else
-			standard_ExecutorFinish(queryDesc);
-	}
-	PG_FINALLY();
-	{
-		f_leave(&save);
-	}
-	PG_END_TRY();
 }
 
 static void
@@ -264,12 +214,6 @@ _PG_init(void)
 		return;
 	resolve_main();
 
-	prev_ExecutorStart = ExecutorStart_hook;
-	ExecutorStart_hook = t_ExecutorStart;
-	prev_ExecutorRun = ExecutorRun_hook;
-	ExecutorRun_hook = t_ExecutorRun;
-	prev_ExecutorFinish = ExecutorFinish_hook;
-	ExecutorFinish_hook = t_ExecutorFinish;
 	prev_ExecutorEnd = ExecutorEnd_hook;
 	ExecutorEnd_hook = t_ExecutorEnd;
 	prev_ProcessUtility = ProcessUtility_hook;

@@ -438,6 +438,40 @@ A statement planned without an active frame gets only its own tags.
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-17: Executor hooks and recording
+
+**Description:** Install the `ExecutorStart`, `ExecutorRun`, `ExecutorFinish`, and `ExecutorEnd` hooks exactly as in §3.2 and §3.3.
+
+`ExecutorStart`:
+- Chain first.
+- Return without a frame when the extension is disabled, `IsParallelWorker()` is true (§6.8), or `queryId == 0`.
+- Otherwise create the frame and resolve its tags eagerly.
+- Set up `queryDesc->totaltime` as pgss does.
+
+`ExecutorRun` and `ExecutorFinish`:
+- Activate the frame and increment `nesting_level` around the chained call, restoring both in `PG_FINALLY`. Use the compat signatures.
+
+`ExecutorEnd`:
+- Record when the frame is recordable under `track` (`top` or `all`), the `toplevel` rule, and the `untagged` policy (default `skip`).
+- To record, take one call plus the elapsed time from `queryDesc->totaltime` (task 20261005-091225-12) and call `store_record()` with the current bucket. No other counters (rows, buffers, WAL, JIT) are collected; pgss covers them.
+- Flush the backend-local extraction stats into the header counters.
+- Then chain.
+
+*Design note (from -5):* on PG18, `stmt_location` points at the first token, so leading comments fall before the range. Call `pssc_stmt_owned_start()` to extend the range. To keep strings with many statements O(n), cache the previous statement's end (per query string) and pass it as `from`. Starting from 0 with a gap longer than `max_bytes` silently loses PG18 leading comments.
+
+**Acceptance criteria:**
+- A commented simple-protocol `SELECT` is recorded with its tags, and its `queryid` equals the one in pgss.
+- `track=top` and `track=all` behave as in pgss.
+- Statements in a PL/pgSQL function inherit the caller's tags.
+- A parallel query is counted once.
+- A cursor fetched many times counts as one call.
+- By default (`untagged=skip`) untagged statements are not recorded; with `untagged=record` they are recorded with an empty tag set.
+- `enabled=off` records nothing.
+
+**Depends on:** 20261005-091225-12, 20261005-091225-14, 20261005-091225-16
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

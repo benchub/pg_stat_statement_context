@@ -1,5 +1,6 @@
 # Build/test image for an exact PostgreSQL release built from the official
-# source tarball (e.g. 15.0, whose API differs from later 15.x minors).
+# source tarball (e.g. 15.0, whose API differs from later 15.x minors), with
+# pg_stat_statements for the parity checks of the TAP tests.
 # Usage: scripts/docker-test.sh <major>.<minor>   e.g. scripts/docker-test.sh 15.0
 ARG PG_MAJOR=15
 FROM postgres:${PG_MAJOR}
@@ -17,6 +18,7 @@ RUN curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-
  && make -s install \
  && make -s -C src/test/perl install \
  && make -s -C src/test/regress install \
+ && make -s -C contrib/pg_stat_statements install \
  && rm -rf "/usr/src/postgresql-${PG_VERSION}"
 ENV PATH=/usr/local/pgsql/bin:$PATH
 COPY run-tests.sh /usr/local/bin/run-tests.sh

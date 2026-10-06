@@ -53,8 +53,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | ready |
-| 20261005-091225-17 | Executor hooks and recording | 20261005-091225-12, 20261005-091225-14, 20261005-091225-16 | no | ready |
-| 20261005-091225-18 | `ProcessUtility` hook | 20261005-091225-17 | no | blocked-on-deps |
+| 20261005-091225-18 | `ProcessUtility` hook | 20261005-091225-17 | no | ready |
 | 20261005-181131-1 | PG18 boundary cache: advance for skipped utilities (PREPARE/EXECUTE) | 20261005-091225-16 | no | ready |
 | 20261005-091225-19 | `shared_preload_libraries` load-order detection and policy | 20261005-091225-18 | no | blocked-on-deps |
 | 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | no | ready |
@@ -66,13 +65,13 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-28 | User documentation | 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27 | no | blocked-on-deps |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
-| 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | blocked-on-deps |
+| 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | ready |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | blocked-on-deps |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | blocked-on-deps |
-| 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | blocked-on-deps |
+| 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | ready |
 | 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | no | ready |
 | 20261005-091225-42 | Roadmap: exporter recipes and Grafana dashboard | 20261005-091225-28 | no | blocked-on-deps |
@@ -226,40 +225,6 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-17: Executor hooks and recording
-
-**Description:** Install the `ExecutorStart`, `ExecutorRun`, `ExecutorFinish`, and `ExecutorEnd` hooks exactly as in §3.2 and §3.3.
-
-`ExecutorStart`:
-- Chain first.
-- Return without a frame when the extension is disabled, `IsParallelWorker()` is true (§6.8), or `queryId == 0`.
-- Otherwise create the frame and resolve its tags eagerly.
-- Set up `queryDesc->totaltime` as pgss does.
-
-`ExecutorRun` and `ExecutorFinish`:
-- Activate the frame and increment `nesting_level` around the chained call, restoring both in `PG_FINALLY`. Use the compat signatures.
-
-`ExecutorEnd`:
-- Record when the frame is recordable under `track` (`top` or `all`), the `toplevel` rule, and the `untagged` policy (default `skip`).
-- To record, take one call plus the elapsed time from `queryDesc->totaltime` (task 20261005-091225-12) and call `store_record()` with the current bucket. No other counters (rows, buffers, WAL, JIT) are collected; pgss covers them.
-- Flush the backend-local extraction stats into the header counters.
-- Then chain.
-
-*Design note (from -5):* on PG18, `stmt_location` points at the first token, so leading comments fall before the range. Call `pssc_stmt_owned_start()` to extend the range. To keep strings with many statements O(n), cache the previous statement's end (per query string) and pass it as `from`. Starting from 0 with a gap longer than `max_bytes` silently loses PG18 leading comments.
-
-**Acceptance criteria:**
-- A commented simple-protocol `SELECT` is recorded with its tags, and its `queryid` equals the one in pgss.
-- `track=top` and `track=all` behave as in pgss.
-- Statements in a PL/pgSQL function inherit the caller's tags.
-- A parallel query is counted once.
-- A cursor fetched many times counts as one call.
-- By default (`untagged=skip`) untagged statements are not recorded; with `untagged=record` they are recorded with an empty tag set.
-- `enabled=off` records nothing.
-
-**Depends on:** 20261005-091225-12, 20261005-091225-14, 20261005-091225-16
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-181131-1: PG18 boundary cache: advance for skipped utilities (PREPARE/EXECUTE)
 
 **Description:** Split from 20261005-091225-16 (round 2 review finding). The PG18 statement-boundary cache in `src/context.c` (used by `pssc_stmt_owned_start` to keep leading comments of later statements in a multi-statement simple-protocol string) only advances when a frame is initialized. `PREPARE` (and possibly `EXECUTE`, other skipped utilities) bypasses frame initialization, so the cache keeps the end of an earlier statement. If the skipped utility is longer than `scan_window`, the next statement's leading comment is outside the window and its tags are lost (with `untagged=skip`, the statement becomes unrecordable).
@@ -298,6 +263,8 @@ Measurement:
 - Record from the snapshot, and restore state in `PG_FINALLY`.
 - Never modify `pstmt->queryId`.
 
+*Note (from -17):* until this hook exists, the inner statement of a plain `EXPLAIN` (no ANALYZE) is recorded as top level, while pgss counts it as nested under the `EXPLAIN` utility. This hook must add the utility nesting level so `toplevel` matches pgss; add a parity test.
+
 **Acceptance criteria:**
 - DDL is recorded with its tags.
 - `EXECUTE` of a prepared statement records the plan as top-level and doesn't record the utility.
@@ -308,7 +275,7 @@ Measurement:
 
 **Depends on:** 20261005-091225-17
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-19: `shared_preload_libraries` load-order detection and policy
 
@@ -556,7 +523,7 @@ Remove the matching cases from the compat test module (`test/modules/pssc_compat
 
 **Depends on:** 20261005-091225-17
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ---
 
@@ -689,7 +656,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Depends on:** 20261005-091225-9, 20261005-091225-17
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-39: Roadmap: `pg_stat_statement_context_activity` view
 

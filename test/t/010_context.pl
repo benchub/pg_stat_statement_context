@@ -1,8 +1,9 @@
 # Execution frames and active-frame tracking (DESIGN.md §3.1 item 3, §3.2
 # "Frame lifetime", §6.4, §6.5, §6.9; backlog 20261005-091225-16):
-# src/context.c driven by the TEST-ONLY module test/modules/pssc_context_test,
-# whose executor and ProcessUtility hooks create, look up, activate and
-# snapshot frames as the recording hooks will (make install-test-modules).
+# src/context.c, driven by the main library's executor hooks (src/executor.c)
+# and the ProcessUtility hook of the TEST-ONLY module
+# test/modules/pssc_context_test, which also observes the frames found at
+# ExecutorEnd (make install-test-modules).
 #
 # Covers: the frame registry is empty at every transaction end (counted by
 # pssc_frame_xact_stats in every build, an assertion in assert builds) after
@@ -36,7 +37,7 @@ $P.extractors = 'sqlcommenter(position=any)'
 $node->start;
 
 # Load pg_stat_statements first (as recommended) where it is installed
-# (not in the source-built images, which skip contrib), for parity checks.
+# (the harness images have it), for parity checks.
 my $pkglibdir = $node->safe_psql('postgres',
 	q{SELECT setting FROM pg_config WHERE name = 'PKGLIBDIR'});
 my $have_pgss = -e "$pkglibdir/pg_stat_statements.so";

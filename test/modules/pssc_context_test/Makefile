@@ -1,7 +1,10 @@
-# TEST-ONLY module: installs executor and ProcessUtility hooks that drive
-# pg_stat_statement_context's execution frames (src/context.h) the way the
-# recording hooks do (DESIGN.md §3.2, §3.3), without recording, and exposes
-# the frame registry and the active frame to SQL (see test/t/010_context.pl).
+# TEST-ONLY module: exposes pg_stat_statement_context's execution frames
+# (src/context.h; made by the main library's executor hooks, src/executor.c)
+# to SQL: the frame registry, the active frame and, through an observing
+# ExecutorEnd hook, the frames found at ExecutorEnd. Until the main library
+# has its own (backlog item -18), it also installs a ProcessUtility hook that
+# snapshots and activates utility frames (DESIGN.md §3.2, §6.7) without
+# recording (see test/t/010_context.pl).
 # It is never built or installed by the top-level "make install"; use
 # "make install-test-modules" (scripts/docker-test.sh does this). Its hooks
 # are installed only when it is listed in shared_preload_libraries after
