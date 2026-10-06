@@ -52,7 +52,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | ready |
@@ -191,27 +190,6 @@ dependencies and is not shown.
 - A failed download (e.g. a bad URL or a simulated mid-stream failure) or a checksum mismatch fails the build.
 
 **Depends on:** none
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-22: TAP tests: execution lifecycle and pgss parity
-
-**Description:** Write TAP tests (`test/t/`) for the lifecycle and adversarial cases in §9:
-- Prepared statements over the extended protocol (psql 16+ `\bind`, or `pgbench -M prepared`), asserting the stale-comment behavior documented in §6.3.
-- Overlapping and suspended portals, and cursors that are never run or are closed early.
-- SPI errors caught in PL/pgSQL followed by successful work, and failed portals.
-- `ROLLBACK`, and `COMMIT` inside procedures.
-- Both `shared_preload_libraries` orders.
-- pgss and extension `track`/`track_utility` settings that differ.
-- Nested `toplevel` parity with pgss on each version.
-- Parallel queries.
-
-**Acceptance criteria:**
-- The tests pass on PG14–18 in CI, including the assert and Valgrind jobs.
-- `calls`, `queryid`, and `toplevel` match pgss wherever the design says they should. With `untagged=record` and both extensions freshly reset, the per-`(userid, dbid, queryid, toplevel)` sums of `calls` equal pgss, and the sums of `total_exec_time` match pgss within a small tolerance.
-- The documented divergence (pgss on PG14–16 with `track_utility=off`, §6.7) is asserted explicitly.
-
-**Depends on:** 20261005-091225-18, 20261005-091225-20
 **Open questions:** none
 **Status:** ready
 

@@ -733,6 +733,11 @@ prepared plan. Recording eligibility and nesting are separate decisions:
   - Recording eligibility always follows this extension's own settings.
 - A tracked utility that arrives with `queryId = 0` (wrong load order)
   increments `utility_missing_queryid`, regardless of the `untagged` policy.
+  It also rises in the correct load order for a utility re-executed from a plan
+  cache (a named extended-protocol statement, or a PL/pgSQL `CREATE`/`DROP`):
+  pgss zeroes such a statement's `queryId` on its first execution, so pgss
+  itself counts only that first execution per backend, and so do we. Parity
+  holds; the counter shows the later executions (found in item -22).
 - **PG18 boundary cache (§6.5):** every top-level statement of the client
   string that gets no frame (`PREPARE`, `EXECUTE`, untracked utilities, or
   statements skipped at `ExecutorStart`) still advances the boundary cache via
@@ -1097,6 +1102,14 @@ matches this extension's minimum supported version.
   unchanged, the `SQL_ASCII` escaping, and debug/hook parity.
 - **Harness source builds** (`docker/Dockerfile.source`) install
   `pg_stat_statements` too, so pgss parity checks run on them.
+- **pgss parity** (`017_lifecycle.pl`, item -22): with matching settings, the
+  per-`(userid, dbid, queryid, toplevel)` `calls` equal pgss exactly.
+  `total_exec_time` is exactly equal for plannable statements, which read the
+  same `totaltime`. For utilities ours is at least pgss's, because our hook
+  wraps theirs. Other behaviour it pins down:
+  - A cursor left open is recorded as top level at transaction end, as pgss does.
+  - A bound portal that is never executed counts one call.
+  - With differing settings, each side records according to its own settings.
 - **CI matrix**: PG14–18 × {Linux, macOS}, plus a Valgrind and
   `-DUSE_ASSERT_CHECKING` build.
 - **Benchmarks**: `pgbench -S` with and without the extension, with and

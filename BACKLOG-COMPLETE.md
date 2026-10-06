@@ -681,6 +681,27 @@ It must also list the limitations:
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-22: TAP tests: execution lifecycle and pgss parity
+
+**Description:** Write TAP tests (`test/t/`) for the lifecycle and adversarial cases in §9:
+- Prepared statements over the extended protocol (psql 16+ `\bind`, or `pgbench -M prepared`), asserting the stale-comment behavior documented in §6.3.
+- Overlapping and suspended portals, and cursors that are never run or are closed early.
+- SPI errors caught in PL/pgSQL followed by successful work, and failed portals.
+- `ROLLBACK`, and `COMMIT` inside procedures.
+- Both `shared_preload_libraries` orders.
+- pgss and extension `track`/`track_utility` settings that differ.
+- Nested `toplevel` parity with pgss on each version.
+- Parallel queries.
+
+**Acceptance criteria:**
+- The tests pass on PG14–18 in CI, including the assert and Valgrind jobs.
+- `calls`, `queryid`, and `toplevel` match pgss wherever the design says they should. With `untagged=record` and both extensions freshly reset, the per-`(userid, dbid, queryid, toplevel)` sums of `calls` equal pgss, and the sums of `total_exec_time` match pgss within a small tolerance.
+- The documented divergence (pgss on PG14–16 with `track_utility=off`, §6.7) is asserted explicitly.
+
+**Depends on:** 20261005-091225-18, 20261005-091225-20
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
