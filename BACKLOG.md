@@ -246,8 +246,11 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 - 2026-10-05 (§11 Q1): Untagged statements are **skipped** by default (`untagged = skip`); `untagged = record` stays available. The sizing guidance assumes this default.
 
 **Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28
-**Open questions:** none
-**Status:** ready
+**Open questions:**
+- Q1 (added 2026-10-06): Should 20261005-213120-1 and 20261006-010149-1 be decided, and done if accepted, before `--1.0.sql` is frozen? Both change the `_info()` columns, and after the freeze that needs a 1.0→1.1 upgrade script.
+- Q2: Should 20261006-043919-1 (eviction p99 under churn) be fixed before v1? It's in progress now.
+- Q3: May the agent push main, tag `v1.0.0` and create the GitHub release, or will the owner do that? CI has never run on GitHub, and the macOS cells are unverified until the first push.
+**Status:** blocked-on-questions
 
 ---
 
