@@ -1045,6 +1045,33 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-32: Roadmap: per-key cardinality caps (overflow → JSON `null`)
+
+**Description:** Cap the number of distinct values per allowed key (§6.1, §8 v1.x). Values beyond the cap collapse to JSON `null` before the key is built (§6.11 step 8, after truncation). A client can only send strings, so `null` can't collide with a real value. Count collapses in `_info()`.
+- **Configuration:** a global default cap GUC plus optional per-key overrides.
+- **Scope:** distinct values are counted globally per key (not per bucket or per `queryid`).
+
+*Design notes* (propose and document; non-blocking):
+- GUC names and the per-key override syntax, for example `cardinality_cap = 100` and `cardinality_cap_overrides = 'route:500|job:50'`.
+- The shared structure that tracks distinct values per key (for example a fixed-size shared hash of `(key, value hash)`), its memory budget (postmaster-sized), and what happens when that structure itself is full.
+- Whether the distinct-value sets are cleared by `_reset()` and/or decay over time.
+- The canonical serialization of a `null` value in the key (it must differ from every string, e.g. a flag byte), and its `jsonb` output.
+
+**Acceptance criteria:**
+- Flooding an allowed key with random values produces at most *cap* distinct string values plus `null` for that key.
+- Per-key overrides take precedence over the global default.
+- `null` values appear as JSON `null` in `tags`, and are never produced by client input.
+- Collapses are visible in `_info()`, and the upgrade script is provided.
+- The hot path stays lock-free until the store write.
+
+**Decisions:**
+- 2026-10-05: Overflow values are represented as JSON `null`, replacing the earlier `<other>` literal.
+- 2026-10-05 (adopted proposal, non-blocking): a global default cap GUC plus optional per-key overrides; distinct values counted globally per key. Remaining details are design notes.
+
+**Depends on:** 20261005-091225-17, 20261005-091225-21
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

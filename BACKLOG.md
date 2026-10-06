@@ -55,7 +55,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261006-113156-1 | Make the 006 compile-limit tests tolerate VM steal time | 20261006-092320-1 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | blocked-on-deps |
-| 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | ready |
@@ -250,33 +249,6 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 ---
 
 ## Post-v1 roadmap tasks (§8)
-
-### 20261005-091225-32: Roadmap: per-key cardinality caps (overflow → JSON `null`)
-
-**Description:** Cap the number of distinct values per allowed key (§6.1, §8 v1.x). Values beyond the cap collapse to JSON `null` before the key is built (§6.11 step 8, after truncation). A client can only send strings, so `null` can't collide with a real value. Count collapses in `_info()`.
-- **Configuration:** a global default cap GUC plus optional per-key overrides.
-- **Scope:** distinct values are counted globally per key (not per bucket or per `queryid`).
-
-*Design notes* (propose and document; non-blocking):
-- GUC names and the per-key override syntax, for example `cardinality_cap = 100` and `cardinality_cap_overrides = 'route:500|job:50'`.
-- The shared structure that tracks distinct values per key (for example a fixed-size shared hash of `(key, value hash)`), its memory budget (postmaster-sized), and what happens when that structure itself is full.
-- Whether the distinct-value sets are cleared by `_reset()` and/or decay over time.
-- The canonical serialization of a `null` value in the key (it must differ from every string, e.g. a flag byte), and its `jsonb` output.
-
-**Acceptance criteria:**
-- Flooding an allowed key with random values produces at most *cap* distinct string values plus `null` for that key.
-- Per-key overrides take precedence over the global default.
-- `null` values appear as JSON `null` in `tags`, and are never produced by client input.
-- Collapses are visible in `_info()`, and the upgrade script is provided.
-- The hot path stays lock-free until the store write.
-
-**Decisions:**
-- 2026-10-05: Overflow values are represented as JSON `null`, replacing the earlier `<other>` literal.
-- 2026-10-05 (adopted proposal, non-blocking): a global default cap GUC plus optional per-key overrides; distinct values counted globally per key. Remaining details are design notes.
-
-**Depends on:** 20261005-091225-17, 20261005-091225-21
-**Open questions:** none
-**Status:** ready
 
 ### 20261005-091225-33: Roadmap: exemplars for excluded high-cardinality keys
 
