@@ -1207,7 +1207,7 @@ matches this extension's minimum supported version.
   - small-`max_entries` churn, with dead entries reclaimed before live ones
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset
-- **pg_regress suite** (`make installcheck`: smoke, guc, extract, normalize, appname) runs in a
+- **pg_regress suite** (`make installcheck`: smoke, guc, extract, normalize, appname, tags_override) runs in a
   UTF8, no-locale database. Server-level GUCs are changed with `ALTER SYSTEM` +
   `pg_reload_conf()` and an include file that waits until the new values are
   visible. TAP 013 checks that `_extract()` leaves the store and counters
