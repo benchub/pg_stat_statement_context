@@ -234,20 +234,23 @@ SELECT q, ex(q) FROM (VALUES
 (5 rows)
 
 -- ---- multibyte text ----
+-- Unaligned output: psql's display width of 😀 differs between minor
+-- releases (e.g. 14.9 vs. the latest 14.x), which changes the aligned
+-- padding; the values themselves are still compared byte for byte.
+\pset format unaligned
 SELECT q, ex(q) FROM (VALUES
   ('SELECT ''日本語 /*controller:fake*/'' /*controller:日本語,action:show*/'),
   ('SELECT 1 /*controller:Ünïcödé*/'),
   ('SELECT 1 /*controller=''caf%C3%A9'',action=''ü''*/'),
   ('SELECT ''😀'' /* 😀 */ /*controller:😀*/')
 ) v(q);
-                                   q                                   |                          ex                          
------------------------------------------------------------------------+------------------------------------------------------
- SELECT '日本語 /*controller:fake*/' /*controller:日本語,action:show*/ | {"tags": {"action": "show", "controller": "日本語"}}
- SELECT 1 /*controller:Ünïcödé*/                                       | {"tags": {"controller": "Ünïcödé"}}
- SELECT 1 /*controller='caf%C3%A9',action='ü'*/                        | {"tags": {"action": "ü", "controller": "café"}}
- SELECT '😀' /* 😀 */ /*controller:😀*/                                | {"tags": {"controller": "😀"}}
+q|ex
+SELECT '日本語 /*controller:fake*/' /*controller:日本語,action:show*/|{"tags": {"action": "show", "controller": "日本語"}}
+SELECT 1 /*controller:Ünïcödé*/|{"tags": {"controller": "Ünïcödé"}}
+SELECT 1 /*controller='caf%C3%A9',action='ü'*/|{"tags": {"action": "ü", "controller": "café"}}
+SELECT '😀' /* 😀 */ /*controller:😀*/|{"tags": {"controller": "😀"}}
 (4 rows)
-
+\pset format aligned
 -- ---- multi-statement strings: statement ranges and trailing footers ----
 -- Ranges are given as the parser reports them: stmt_location in bytes
 -- (PG14-17: just after the previous ';'; PG18: the first token, so leading

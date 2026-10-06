@@ -799,6 +799,18 @@ Remove the matching cases from the compat test module (`test/modules/pssc_compat
 **Open questions:** none
 **Status:** done
 
+### 20261005-235708-1: `extract` regression output differs on old PG14 minors (psql emoji padding)
+
+**Description:** Found while working on 20261005-233059-1. On `scripts/docker-test.sh 14.9`, the pg_regress `extract` test fails: older psql pads the row containing the 😀 tag differently, so the aligned output doesn't match `expected/extract.out`. The extension's output is fine; only psql's width calculation differs. Fix it without weakening the test. Options: use unaligned output (`\pset format unaligned`) for the affected queries, return the value through `encode(convert_to(...), 'hex')` or as a length, or add an alternative expected file (`extract_1.out`) if the difference is truly only psql. Also check whether other old minors (14.3+, 15.0–15.x, 16.0) are affected.
+
+**Acceptance criteria:**
+- `scripts/docker-test.sh 14.9` passes the `extract` test, and so do the latest 14–18 releases.
+- The test still checks the exact emoji bytes or characters.
+
+**Depends on:** 20261005-091225-11
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

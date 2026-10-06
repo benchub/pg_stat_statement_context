@@ -1102,7 +1102,10 @@ matches this extension's minimum supported version.
   UTF8, no-locale database. Server-level GUCs are changed with `ALTER SYSTEM` +
   `pg_reload_conf()` and an include file that waits until the new values are
   visible. TAP 013 checks that `_extract()` leaves the store and counters
-  unchanged, the `SQL_ASCII` escaping, and debug/hook parity.
+  unchanged, the `SQL_ASCII` escaping, and debug/hook parity. Regression
+  output that contains characters whose psql display width varies between
+  minor releases (for example emoji outside the last column) uses
+  `\pset format unaligned`, which still compares the exact bytes.
 - **Harness source builds** (`docker/Dockerfile.source`) install
   `pg_stat_statements` too, so pgss parity checks run on them. They install
   bison/flex (needed by PG17+ tarballs), download the release tarball and its
