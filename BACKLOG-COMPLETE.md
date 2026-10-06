@@ -647,6 +647,40 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-28: User documentation
+
+**Description:** Write the README (and `docs/` if needed) covering:
+- Purpose, plus build and install.
+- Positioning as a pg_stat_statements companion: only `calls` and `total_exec_time` are stored per context, and everything else comes from pgss via the join on `(userid, dbid, queryid, toplevel)`, including the approximate apportioning recipe and its caveats (§5.1, §7).
+- `shared_preload_libraries` ordering and the restart requirement (§3.2, §6.12).
+- A reference for every GUC (§4.1), including the `untagged = skip` default.
+- Changing configuration from SQL: `ALTER SYSTEM SET pg_stat_statement_context.extractors = '...'; SELECT pg_reload_conf();` (the `extractors`, `tags`, and `exclude_tags` GUCs are `sighup`; there is no config file).
+- The extractor DSL with examples (§4.2), including the per-extractor `position` defaults and that `keys` matches original key names before `rename`.
+- Allowlist, denylist, and cardinality guidance (§6.1).
+- The capacity sizing rule: `max_entries` counts (query × context) combinations, independent of `bucket_count` (§5.1).
+- Bucket semantics, "completions per interval" (§5.2).
+- Eviction and the `_info()` counters (§5.3).
+- The SQL interface and the example join (§7).
+- Inclusive costs and filtering on `toplevel` (§6.4).
+
+It must also list the limitations:
+- stale comments on prepared statements, with the findings from task 20261005-091225-27 (§6.3)
+- the `standard_conforming_strings` caveat and heuristic scans (§6.2)
+- fragmented utility `queryid`s on PG14/15 (§6.6)
+- `toplevel` divergence from pgss on PG14–16 (§6.7)
+- failed statements are not counted (§6.9)
+- visibility and PII (§6.11)
+- managed providers (§6.12)
+
+**Acceptance criteria:**
+- Every GUC and SQL object is documented.
+- The examples run as written against a test cluster.
+- A review against DESIGN.md finds no gaps.
+
+**Depends on:** 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

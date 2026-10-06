@@ -53,11 +53,11 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | ready |
+| 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
-| 20261005-091225-28 | User documentation | 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
 | 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | ready |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
@@ -68,7 +68,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | ready |
 | 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | no | ready |
-| 20261005-091225-42 | Roadmap: exporter recipes and Grafana dashboard | 20261005-091225-28 | no | blocked-on-deps |
+| 20261005-091225-42 | Roadmap: exporter recipes and Grafana dashboard | 20261005-091225-28 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -215,6 +215,23 @@ dependencies and is not shown.
 **Open questions:** none
 **Status:** ready
 
+### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
+
+**Description:** Found while documenting (item -28). `evicted_entries` counts both expired entries reclaimed by an eviction pass and live entries evicted, and `dealloc` counts passes. `dropped_records` (calls lost because a pass freed nothing) is not exposed. So `_info()` alone cannot tell an operator that `max_entries` is too small, contrary to DESIGN §5.3 step 3. The docs currently give a workaround: compare the row count of `pg_stat_statement_context_totals` with `max_entries`.
+
+Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless) and `evicted_entries` (live, history lost), and expose `dropped_records`. Update §5.3, §7, the docs and tests.
+
+**Acceptance criteria:**
+- Expired-only reclamation moves `reclaimed_entries`, not `evicted_entries`.
+- Undersized churn moves `evicted_entries`.
+- A full table with nothing to free moves `dropped_records`.
+- The docs' undersizing guidance uses the new counters.
+
+**Depends on:** 20261005-091225-21
+**Open questions:**
+- Q1: OK to change the `_info()` column set (§7, approved earlier) by renaming or splitting `evicted_entries` and adding `dropped_records`? Proposed names: `reclaimed_entries`, `evicted_entries` (live only), `dropped_records`.
+**Status:** blocked-on-questions
+
 ### 20261005-091225-23: TAP tests: store, buckets, eviction, and reconfiguration
 
 **Description:** Write TAP tests for the store-related items in §9:
@@ -282,40 +299,6 @@ Also measure bursts at bucket boundaries (short interval) and sustained eviction
 - p99 and maximum latency at bucket boundaries and under eviction are reported explicitly.
 
 **Depends on:** 20261005-091225-15, 20261005-091225-18, 20261005-091225-20
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-28: User documentation
-
-**Description:** Write the README (and `docs/` if needed) covering:
-- Purpose, plus build and install.
-- Positioning as a pg_stat_statements companion: only `calls` and `total_exec_time` are stored per context, and everything else comes from pgss via the join on `(userid, dbid, queryid, toplevel)`, including the approximate apportioning recipe and its caveats (§5.1, §7).
-- `shared_preload_libraries` ordering and the restart requirement (§3.2, §6.12).
-- A reference for every GUC (§4.1), including the `untagged = skip` default.
-- Changing configuration from SQL: `ALTER SYSTEM SET pg_stat_statement_context.extractors = '...'; SELECT pg_reload_conf();` (the `extractors`, `tags`, and `exclude_tags` GUCs are `sighup`; there is no config file).
-- The extractor DSL with examples (§4.2), including the per-extractor `position` defaults and that `keys` matches original key names before `rename`.
-- Allowlist, denylist, and cardinality guidance (§6.1).
-- The capacity sizing rule: `max_entries` counts (query × context) combinations, independent of `bucket_count` (§5.1).
-- Bucket semantics, "completions per interval" (§5.2).
-- Eviction and the `_info()` counters (§5.3).
-- The SQL interface and the example join (§7).
-- Inclusive costs and filtering on `toplevel` (§6.4).
-
-It must also list the limitations:
-- stale comments on prepared statements, with the findings from task 20261005-091225-27 (§6.3)
-- the `standard_conforming_strings` caveat and heuristic scans (§6.2)
-- fragmented utility `queryid`s on PG14/15 (§6.6)
-- `toplevel` divergence from pgss on PG14–16 (§6.7)
-- failed statements are not counted (§6.9)
-- visibility and PII (§6.11)
-- managed providers (§6.12)
-
-**Acceptance criteria:**
-- Every GUC and SQL object is documented.
-- The examples run as written against a test cluster.
-- A review against DESIGN.md finds no gaps.
-
-**Depends on:** 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27
 **Open questions:** none
 **Status:** ready
 
@@ -534,7 +517,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Depends on:** 20261005-091225-28
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-45: Roadmap: distribution packaging and provider outreach
 

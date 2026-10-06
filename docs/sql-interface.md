@@ -1,0 +1,339 @@
+# SQL interface
+
+`CREATE EXTENSION pg_stat_statement_context` installs these objects (in the
+extension's schema; the extension is relocatable):
+
+| Object | Kind | Default access |
+|---|---|---|
+| [`pg_stat_statement_context`](#the-views) | view, one row per entry and live bucket | `SELECT` granted to `PUBLIC` |
+| [`pg_stat_statement_context_totals`](#the-views) | view, one row per entry, live buckets summed | `SELECT` granted to `PUBLIC` |
+| [`pg_stat_statement_context(showtags, merge_buckets)`](#pg_stat_statement_contextshowtags-merge_buckets) | set-returning function behind both views | `PUBLIC` |
+| [`pg_stat_statement_context_info()`](#pg_stat_statement_context_info) | store and diagnostic counters | `PUBLIC` |
+| [`pg_stat_statement_context_reset()`](#pg_stat_statement_context_reset) | clears all statistics | superuser only |
+| [`pg_stat_statement_context_extract(query, stmt_location, stmt_len)`](#pg_stat_statement_context_extract) | debug: show the tags extracted from a statement | superuser only |
+
+A superuser can `GRANT EXECUTE` on the restricted functions to other roles.
+The views and functions work only when the library is in
+`shared_preload_libraries`; otherwise they fail with
+`pg_stat_statement_context must be loaded via "shared_preload_libraries"`.
+
+Statistics are cluster-wide: every database's statements are collected, and
+the views show all of them (filter on `dbid` if needed), as in
+`pg_stat_statements`.
+
+## The views
+
+```sql
+SELECT * FROM pg_stat_statement_context;          -- per bucket
+SELECT * FROM pg_stat_statement_context_totals;   -- per entry, over the whole window
+```
+
+Both have the same columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `bucket_start` | `timestamptz` | Start of the time bucket. In `_totals`, the start of the oldest live bucket of the entry. |
+| `userid` | `oid` | Role that ran the statement. |
+| `dbid` | `oid` | Database in which it ran. |
+| `queryid` | `bigint` | Query ID, identical to `pg_stat_statements.queryid`. |
+| `toplevel` | `bool` | True if the statement was run by the client, false if it was nested (only with `track = all`). |
+| `tags` | `jsonb` | The tag set, an object of string values, e.g. `{"action": "show", "controller": "users"}`; `{}` for statements recorded with `untagged = record`. |
+| `calls` | `bigint` | Number of completed executions in the bucket (or window). |
+| `total_exec_time` | `float8` | Total execution time in milliseconds. |
+
+An entry is one (`userid`, `dbid`, `queryid`, `toplevel`, `tags`)
+combination. `pg_stat_statement_context` returns one row per **live** bucket
+of each entry, oldest first within an entry; `_totals` returns one row per
+entry. Expired buckets (older than `bucket_count × bucket_interval`) are
+never shown.
+
+**Counter semantics.**
+
+- `calls` counts completed executions: for plannable statements, executor
+  runs that reached `ExecutorEnd`; for utilities, completed utility calls. A
+  cursor fetched many times, or a portal executed in several `Execute`
+  messages, is **one** call, attributed to the bucket in which it finishes.
+  Failed statements are not counted.
+- `total_exec_time` is measured exactly as pgss measures it.
+
+See [Time buckets](configuration.md#time-buckets) for bucket semantics
+("completions per interval").
+
+Statements by bucket for the last hour, for example:
+
+```sql
+SELECT bucket_start, tags->>'controller' AS controller,
+       sum(calls) AS calls, round(sum(total_exec_time)::numeric, 2) AS ms
+  FROM pg_stat_statement_context
+ WHERE toplevel
+ GROUP BY 1, 2
+ ORDER BY 1, 4 DESC;
+```
+
+## `pg_stat_statement_context(showtags, merge_buckets)`
+
+```
+pg_stat_statement_context(showtags boolean DEFAULT true,
+                          merge_buckets boolean DEFAULT false)
+  RETURNS SETOF (bucket_start, userid, dbid, queryid, toplevel, tags,
+                 calls, total_exec_time)
+```
+
+The view `pg_stat_statement_context` is `pg_stat_statement_context(true, false)`
+and `pg_stat_statement_context_totals` is `pg_stat_statement_context(true, true)`.
+
+- `merge_buckets = true` sums `calls` and `total_exec_time` over each entry's
+  live buckets and returns one row per entry, with `bucket_start` set to the
+  oldest live bucket.
+- `showtags = false` returns `tags` as `NULL` in every row, which is cheaper
+  when you only need the counters.
+
+## Joining to pg_stat_statements
+
+This extension stores only `calls` and `total_exec_time` per context. Query
+text and every other metric come from `pg_stat_statements`, joined on
+`(userid, dbid, queryid, toplevel)`. The top 20 contexts by execution time,
+with the query text:
+
+```sql
+SELECT c.tags->>'controller' AS controller, c.tags->>'action' AS action,
+       sum(c.calls) AS calls, sum(c.total_exec_time) AS ms,
+       left(s.query, 80) AS query
+FROM pg_stat_statement_context_totals c
+LEFT JOIN pg_stat_statements s USING (userid, dbid, queryid, toplevel)
+WHERE c.toplevel
+GROUP BY 1, 2, s.query
+ORDER BY ms DESC LIMIT 20;
+```
+
+The `LEFT JOIN` keeps rows whose statement pgss has evicted or doesn't track
+(for example when its own `track` setting differs).
+
+pgss stores one query text per `queryid`, taken from whichever call created
+its entry, so that text includes *that* call's comment. Read the context from
+`c.tags`, never from `s.query`.
+
+pgss stores one query text per `queryid`, taken from whichever call created
+its entry, so that text includes *that* call's comment. Read the context from
+`c.tags`, never from `s.query`.
+
+**Apportioning other metrics.** pgss metrics such as rows or buffer reads can
+be attributed to a context approximately, by the context's share of the
+statement's execution time:
+
+```sql
+SELECT c.tags, s.query,
+       s.shared_blks_read * c.total_exec_time / nullif(s.total_exec_time, 0)
+         AS est_shared_blks_read
+FROM pg_stat_statement_context_totals c
+JOIN pg_stat_statements s USING (userid, dbid, queryid, toplevel)
+WHERE c.toplevel;
+```
+
+This is an **estimate**, with two caveats:
+
+- It assumes the metric is proportional to execution time, which is not true
+  when contexts use the same query differently (one passes a selective
+  parameter, another a non-selective one).
+- pgss accumulates since its last reset, while this extension covers only the
+  live bucket window (1 hour by default). Reset both together
+  (`pg_stat_statements_reset()` and `pg_stat_statement_context_reset()`) and
+  use a window at least as long as the time since the reset, or compare like
+  with like, for the ratio to be meaningful.
+
+## Nested statements, `toplevel` and inclusive costs
+
+With `track = all`, statements run inside functions, procedures, `DO` blocks
+and triggers are recorded too, with `toplevel = false`. By default
+(`nested_tags = inherit`) they carry the tags of the top-level statement that
+ran them, which answers questions like "which controller caused this
+trigger's queries?".
+
+**Costs are inclusive.** A top-level statement's `total_exec_time` already
+includes the time of everything it ran, including nested queries and `AFTER`
+triggers. Adding parent and child rows double-counts. For per-application
+totals, filter on `toplevel`:
+
+```sql
+SELECT tags->>'controller' AS controller, sum(calls) AS calls,
+       sum(total_exec_time) AS ms
+  FROM pg_stat_statement_context_totals
+ WHERE toplevel
+ GROUP BY 1
+ ORDER BY ms DESC;
+```
+
+**`toplevel` matches pgss on every version**, so the join is one-to-one:
+
+- A plan run by SQL `EXECUTE` is top-level when the `EXECUTE` is; `EXECUTE`
+  and `PREPARE` themselves are not recorded as utility statements.
+- On PostgreSQL 17 and later, every other utility statement (`CALL`, `DO`,
+  `CREATE TABLE AS`, `EXPLAIN`, ...) makes the statements it runs nested, and
+  so do functions evaluated while a statement is being planned.
+- On PostgreSQL 14–16, pgss counts a utility statement as a nesting level only
+  when it tracks that utility itself. The extension mirrors this by reading
+  pgss's own settings (`pg_stat_statements.track` and
+  `pg_stat_statements.track_utility`) on each utility statement. When pgss
+  isn't loaded, its own `track` and `track_utility` are used instead.
+
+Whether a statement is *recorded* always follows this extension's own
+`track`, `track_utility` and `untagged` settings.
+
+## Visibility and privacy
+
+Tags can contain personal data, for example an e-mail address in a route.
+Visibility is at least as strict as in pgss:
+
+- Rows of other roles show `queryid` and `tags` as `NULL`, unless the caller
+  has the privileges of `pg_read_all_stats` (or is a superuser). The check is
+  made inside the function, so calling `pg_stat_statement_context()` directly
+  doesn't bypass it.
+- Your own rows are always complete.
+- On PostgreSQL 14 the check (`has_privs_of_role`) is slightly stricter than
+  pgss's there: a `NOINHERIT` member of `pg_read_all_stats` doesn't get to see
+  other roles' tags.
+
+```sql
+GRANT pg_read_all_stats TO monitoring;   -- monitoring: an existing role
+```
+
+## Encodings and `SQL_ASCII`
+
+Tags are stored in the encoding of the database where the statement ran, and
+converted to the encoding of the database you query from.
+
+- **`SQL_ASCII` origin.** Tags recorded in a `SQL_ASCII` database have no
+  known encoding, so they are escaped instead of converted: every byte
+  ≥ 0x80 becomes `\xHH` (two lowercase hex digits) and every `\` becomes
+  `\\`, in both keys and values. The escaping is reversible, and distinct
+  keys stay distinct. For example, the bytes `café` written in UTF-8 in a
+  `SQL_ASCII` database are shown as `caf\xc3\xa9`. (In jsonb text output a
+  backslash itself is shown escaped, so this appears as `"caf\\xc3\\xa9"`; use
+  `->>` to get the plain text.)
+- **Unconvertible tags.** If a tag set can't be converted to the current
+  database's encoding, that whole tag set is shown with the same `\xHH`
+  escaping, so one bad entry never makes the query fail.
+- In a `SQL_ASCII` database, tags recorded in other databases are shown
+  unconverted.
+
+`pg_stat_statement_context_extract()` escapes its output the same way when
+run in a `SQL_ASCII` database.
+
+## `pg_stat_statement_context_info()`
+
+One row of store-wide counters, readable by everyone (like
+`pg_stat_statements_info`):
+
+```sql
+SELECT * FROM pg_stat_statement_context_info();
+```
+
+| Column | Type | Description |
+|---|---|---|
+| `entries` | `bigint` | Entries currently in the table (including dead ones not yet reclaimed). |
+| `max_entries` | `bigint` | The `max_entries` setting. |
+| `dealloc` | `bigint` | Eviction passes run because the table was full. |
+| `evicted_entries` | `bigint` | Entries removed by those passes, live or dead combined; see [Eviction](configuration.md#eviction) for telling them apart. |
+| `buckets` | `int` | The `bucket_count` setting. |
+| `oldest_bucket` | `timestamptz` | Start of the oldest live bucket of any entry (equal to `min(bucket_start)` in the view), or `NULL` if no bucket is live. |
+| `shmem_bytes` | `bigint` | Exact shared memory size requested at startup. |
+| `invalid_tags` | `bigint` | Tags rejected as malformed: NUL bytes, invalid encoding, keys over 63 bytes, malformed pairs (see [the tag pipeline](extractors.md#the-tag-pipeline)). |
+| `dropped_tags` | `bigint` | Valid tags dropped because the tag set would exceed `max_tags` or `max_tagset_bytes`. |
+| `heuristic_scans` | `bigint` | Statements whose comments were found with the heuristic tail scan (`position=append` on statements longer than `scan_window`). |
+| `regex_compile_failures` | `bigint` | Regex extractors that failed to compile in some backend at run time and were disabled there. |
+| `utility_missing_queryid` | `bigint` | Tracked utility statements that arrived without a query ID and were not recorded; normally a sign of the wrong `shared_preload_libraries` order (see the [README](../README.md#load-order)). |
+| `stats_reset` | `timestamptz` | Time of the last `pg_stat_statement_context_reset()`, or of server start. |
+
+The extraction counters (`invalid_tags`, `dropped_tags`, `heuristic_scans`)
+are collected per backend and added to the shared counters when a statement
+finishes; `_info()` includes the calling session's own pending counts.
+
+## `pg_stat_statement_context_reset()`
+
+```sql
+SELECT pg_stat_statement_context_reset();
+```
+
+Removes every entry, zeroes every counter of `_info()` and sets
+`stats_reset`. Statements still running in other sessions are recorded after
+the reset when they finish. Superuser-only by default; to delegate it:
+
+```sql
+GRANT EXECUTE ON FUNCTION pg_stat_statement_context_reset() TO monitoring;   -- an existing role
+```
+
+## `pg_stat_statement_context_extract()`
+
+```
+pg_stat_statement_context_extract(query text,
+                                  stmt_location int DEFAULT -1,
+                                  stmt_len int DEFAULT 0)
+  RETURNS jsonb
+```
+
+A debug function: runs the same extraction as the hooks, with the current
+configuration, on one statement of `query`, and returns what it found. It
+doesn't execute the query and records nothing.
+
+```sql
+SELECT jsonb_pretty(pg_stat_statement_context_extract(
+         'SELECT 1 /*controller:users,action:show,application:app*/'));
+```
+
+```
+{
+    "oom": false,
+    "tags": {
+        "action": "show",
+        "controller": "users"
+    },
+    "ntags": 2,
+    "footer": false,
+    "stmt_end": 57,
+    "heuristic": false,
+    "stmt_start": 0,
+    "dropped_tags": 0,
+    "invalid_tags": 0,
+    "tagset_bytes": 29,
+    "heuristic_scans": 0,
+    "regex_compile_failures": 0
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `tags` | The tag set that would be recorded. |
+| `ntags`, `tagset_bytes` | Number of tags and their serialized size (compare with `max_tags`, `max_tagset_bytes`). |
+| `footer` | The tags came from a comment after the statement's range (the multi-statement fallback). |
+| `heuristic` | The heuristic tail scan was used. |
+| `oom` | Extraction ran out of memory (the hooks would then record no tags). |
+| `stmt_start`, `stmt_end` | The byte range of the statement that was scanned, after extending it backwards over leading comments. |
+| `invalid_tags`, `dropped_tags`, `heuristic_scans`, `regex_compile_failures` | This call's contribution to the `_info()` counters of the same names. |
+
+**Arguments.** `stmt_location` and `stmt_len` select one statement of a
+multi-statement string, in bytes, the way the parser reports it:
+`stmt_location = -1` means the whole string and `stmt_len = 0` means "to the
+end". Out-of-range values raise an error.
+
+```sql
+SELECT pg_stat_statement_context_extract('SELECT 1; SELECT 2; /*controller:x*/', 0, 8) -> 'tags' AS first,
+       pg_stat_statement_context_extract('SELECT 1; SELECT 2; /*controller:x*/', 9, 9) -> 'tags' AS second;
+-- first: {}, second: {"controller": "x"}
+```
+
+**Notes.**
+
+- It is **superuser-only by default**, because it runs the regex engine on
+  arbitrary input (CPU cost) and reveals the extractor configuration. A
+  superuser may `GRANT EXECUTE ON FUNCTION
+  pg_stat_statement_context_extract(text, int, int) TO ...`.
+- It works when `enabled = off`, but needs the library preloaded.
+- It doesn't change the statistics or `_info()` counters, except
+  `regex_compile_failures`: a regex compile failure disables the extractor in
+  the calling backend and is counted, as it would be in the hooks.
+- For a single statement, or the first statement of a string, its result is
+  the same as the hooks'. For a later statement that starts more than
+  `scan_window` bytes into a multi-statement string, the hooks may see
+  leading comments that this function doesn't (on PostgreSQL 18).
+- In a `SQL_ASCII` database the output is escaped as described
+  [above](#encodings-and-sql_ascii); `tagset_bytes` counts the stored bytes.

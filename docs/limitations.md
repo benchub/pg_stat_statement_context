@@ -1,0 +1,140 @@
+# Limitations
+
+## Prepared statements carry the comment from PREPARE time
+
+Comments are read from the statement text saved when the statement was
+**prepared** (protocol-level Parse, or SQL `PREPARE`). Bind/Execute messages
+and SQL `EXECUTE` don't send new statement text, so a comment on an `EXECUTE`
+is ignored, and every execution of a prepared statement is attributed to the
+tags in its original text. If an application prepares a statement once and
+executes it from different code paths, every execution gets the first
+caller's tags. This applies to named and unnamed statements alike (an unnamed
+statement gets fresh context only if the driver sends a new Parse each time).
+`pg_stat_statements` has the same limitation for query text.
+
+```sql
+PREPARE q AS SELECT 1 /*controller:users*/;
+EXECUTE q /*controller:admin*/;   -- recorded with {"controller": "users"}
+DEALLOCATE q;
+```
+
+**In practice, common drivers are not affected.** We tested (Oct 2026) pgx
+5.11, pgjdbc 42.7.13, psycopg 3.3.6, ActiveRecord 7.0–8.1 with the pg gem 1.7
+and marginalia 1.11, and pgbouncer 1.26 in transaction mode, in their default
+and most aggressive prepare settings. None reuses a prepared statement across
+different comments: they key their statement caches on the full SQL text,
+comment included, or re-Parse on every call, and pgbouncer shares server-side
+statements by query text. Stale tags appear only when the **application**
+holds on to one prepared handle (for example a pgx `conn.Prepare` name or a
+long-lived JDBC `PreparedStatement`) and reuses it across requests. Details
+are in
+[research/driver-prepared-statements](../research/driver-prepared-statements/README.md).
+
+Related findings:
+
+- **Comment cardinality costs prepared statements.** Because the comment is
+  part of the drivers' cache key, every distinct comment value creates its own
+  server-side prepared statement per query shape. High-cardinality values in
+  comments (request IDs, `traceparent`) defeat statement caching and churn the
+  caches (pgx's LRU, pgjdbc `preparedStatementCacheQueries`, psycopg
+  `prepared_max`, Rails `statement_limit`, pgbouncer
+  `max_prepared_statements`). Keep comment tags low-cardinality
+  (controller, action, route, job).
+- **Rails 7.1+ `query_log_tags` disables prepared statements**
+  (`ActiveRecord.disable_prepared_statements = true`), which changes the
+  protocol and plan-caching behavior. That is Rails' own trade-off.
+- **marginalia on Rails 8.0+ doesn't annotate ordinary model queries**
+  (`where`/`pick`/`find_by` carry no comment; they are simply untagged).
+  Use Rails' built-in `query_log_tags` instead.
+
+A session-level tag override that would work with application-held prepared
+statements is not in v1.
+
+## Scanner caveats
+
+- **`standard_conforming_strings`.** The scanner uses the *current* value of
+  `standard_conforming_strings`, because the setting in effect when the
+  statement was parsed isn't available to the hooks. If it is changed between
+  `PREPARE` and `EXECUTE`, plain string literals containing backslashes may be
+  mis-scanned. Leave it at its default (`on`).
+- **Heuristic scans.** For a statement longer than `scan_window`, an
+  `append` extractor only looks at the last `scan_window` bytes, without
+  knowing the lexical state at the start of that window. A string literal that
+  ends in `*/`, or a `--` line comment that started before the window, can
+  then produce tags from text that isn't really a comment. Such scans are
+  counted in `_info().heuristic_scans`. Use `position=prepend` (exact) or a
+  larger `scan_window` if this matters. See
+  [Where comments are found](extractors.md#where-comments-are-found).
+- **Comments in PL/pgSQL (`nested_tags = scan`).** A nested statement is
+  scanned with the usual position rules, using the text PL/pgSQL passes on:
+  - In a SQL statement (`SELECT`, `INSERT`, `UPDATE`, `DELETE`), a trailing
+    comment is kept. `SELECT ... INTO n FROM t /*controller:x*/` works, because
+    PL/pgSQL blanks out only the `INTO n` clause.
+  - In `PERFORM` and in expressions (`RETURN (SELECT ...)`, `n := (SELECT ...)`,
+    `IF` conditions), PL/pgSQL drops a comment that ends the expression. A
+    comment inside the expression is mid-statement, so only an extractor with
+    `position=any` sees it.
+- Some statements are never recorded because they have no query ID: the
+  query inside `DECLARE CURSOR` (its execution is recorded under the `DECLARE`
+  statement and its tags), and PL/pgSQL simple expressions (`x := 1 + y`),
+  which bypass the executor.
+
+## Utility statement query IDs on PostgreSQL 14 and 15
+
+On PostgreSQL 14 and 15, core computes the query ID of a utility statement
+(DDL, `VACUUM`, ...) by hashing its **text**, comments included. Every
+distinct tag set therefore gives a different `queryid` for the same DDL, and
+utility fingerprints fragment. PostgreSQL 16 and later compute it from the
+parse tree, so comments have no effect. The extension always reports the core
+`queryid`, which `pg_stat_statements` shows too, so joins still work.
+
+## `toplevel` on PostgreSQL 14–16
+
+`toplevel` matches `pg_stat_statements` on every version (see
+[Nested statements](sql-interface.md#nested-statements-toplevel-and-inclusive-costs)).
+On 14–16 this relies on reading pgss's `track` and `track_utility` settings:
+a utility statement only makes its children nested when pgss tracks it. As in
+pgss on those versions, statements run while a parent is being planned are
+top-level. There is no divergence to work around, but be aware that changing
+`pg_stat_statements.track_utility` on 14–16 changes which statements this
+extension reports as top-level.
+
+## Failed statements are not counted
+
+A statement that raises an error (or is cancelled) never reaches
+`ExecutorEnd`, so it isn't counted, the same as in `pg_stat_statements`.
+Error and cancellation counts per tag set are out of scope.
+
+## Only `calls` and `total_exec_time`
+
+Rows, buffers, WAL, I/O timing, JIT, min/max/mean/stddev and planning time are
+not stored; get them from `pg_stat_statements` (see
+[Joining](sql-interface.md#joining-to-pg_stat_statements)). Apportioning them
+to contexts by execution time is an approximation.
+
+## Statistics are not persistent
+
+The statistics live in shared memory and are lost on a restart or crash. The
+history covers only the last `bucket_count × bucket_interval`.
+
+## Visibility and PII
+
+Tag values come from clients and can contain personal data. Other roles'
+`tags` and `queryid` are hidden unless the caller has the privileges of
+`pg_read_all_stats`, but anyone with those privileges sees every tag value.
+Don't put personal data in comments, and keep it out of the `tags` allowlist.
+See [Visibility and privacy](sql-interface.md#visibility-and-privacy).
+
+## Deployment
+
+The library must be in `shared_preload_libraries` (after
+`pg_stat_statements`), so enabling it requires a server restart. Managed
+PostgreSQL providers (Amazon RDS, Google Cloud SQL, Azure, ...) only allow
+extensions on their allowlists; until a provider adds this one, it can't be
+used there.
+
+## Not in v1
+
+Per-key value normalization and cardinality caps, exemplars, context from
+`application_name` or a session/transaction override GUC, a per-backend
+activity view, and persistence across restarts are not implemented.

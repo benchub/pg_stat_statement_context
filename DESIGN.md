@@ -130,7 +130,7 @@ replaces or rewrites the core `queryId`. This includes PG14/15 utility statement
 | `ExecutorStart` | If enabled and `queryId != 0`: create the executor frame in `es_query_cxt` and resolve its tags eagerly (scan, or inherit from the active frame). Set up `queryDesc->totaltime`, as pgss does. |
 | `ExecutorRun` / `ExecutorFinish` | Make this frame active and increment `nesting_level`. Restore both in `PG_FINALLY`. |
 | `ExecutorEnd` | Add one call and the elapsed time from `queryDesc->totaltime` to the store under the frame's key, then drop the frame. |
-| `ProcessUtility` | Before chaining, snapshot `queryId`, statement bounds, and tags into a utility frame. Activate it (and bump nesting, except for `EXECUTE`/`PREPARE`) around the chained call, timing it. Record from the snapshot afterwards. Never touch `pstmt` after chaining (§6.7). |
+| `ProcessUtility` | Before chaining, snapshot `queryId`, statement bounds, and tags into a utility frame. Activate it and bump nesting (`EXECUTE`/`PREPARE` get no frame and no nesting bump; on PG14–16 nesting mirrors pgss, §6.7) around the chained call, timing it. Record from the snapshot afterwards. Never touch `pstmt` after chaining (§6.7). |
 
 No `planner_hook` is used for timing: planning time is left to pgss
 (`track_planning`), see §8 "Rejected". On PG17+ only, a minimal `planner_hook`
@@ -153,8 +153,11 @@ Frame details (item -16):
 - **Statements that get no frame:**
   - `DECLARE CURSOR`'s inner query has `queryId` 0.
   - PL/pgSQL simple expressions (`x := expr`) skip the executor.
-- **PL/pgSQL `INTO`:** PL/pgSQL drops the text after `INTO` from the query, so a
-  comment must come before `INTO` to be seen.
+- **PL/pgSQL `INTO`:** PL/pgSQL blanks out only the `INTO target` clause, so a
+  comment anywhere else in the statement, including after `INTO`, is seen
+  (verified on PG14 and PG17 in item -28; corrects an earlier note). PL/pgSQL
+  does drop a comment that ends a `PERFORM` statement or an expression such as
+  `RETURN (SELECT ...)`.
 
 Executor hooks (item -17):
 - **`totaltime`:** allocated exactly as pgss does (14–18):
@@ -796,12 +799,16 @@ some server version, it is omitted on that version rather than exposed as
      fill (decided 2026-10-05):
      - Tags are considered in priority order: allowlist order, or sorted-key
        order when `tags = '*'`.
-     - A tag is kept if it still fits; one that doesn't is dropped and counted
-       in `dropped_tags`, and the next tag is tried.
+     - A tag is kept if it still fits within both `max_tags` and
+       `max_tagset_bytes`; one that doesn't is dropped and counted in
+       `dropped_tags`, and the next tag is tried.
      - So an oversized tag never evicts smaller lower-priority tags.
 
   Extractor-chain semantics:
-  - An extractor "produces" only if at least one pair survives these steps.
+  - An extractor "produces" if at least one pair survives steps 1–7, before
+    the `max_tags`/`max_tagset_bytes` limits of step 9. If step 9 then drops
+    every tag, skipped extractors are not retried, and the statement counts
+    as untagged (found while reviewing the user docs, item -28).
   - Once one has produced, later non-`merge` extractors are skipped, but later
     `merge=on` extractors still run.
   - The first occurrence of a key wins: by chain order, then comment order,
@@ -815,7 +822,9 @@ some server version, it is omitted on that version rather than exposed as
   Malformed tags are dropped and counted in `_info().invalid_tags`. This
   includes:
   - NUL or invalid encoding
-  - keys longer than 63 bytes
+  - keys longer than 63 bytes, when `tags = '*'`. With an allowlist they can
+    never match (allowlist keys are at most 63 bytes), so they are dropped
+    silently like any other unlisted key
   - parser-malformed segments, counted only for a comment from which the same
     parser obtained at least one well-formed pair, so probing another format's
     comment isn't counted (decided 2026-10-05) They never raise an error in the user's
@@ -918,7 +927,7 @@ min/max/mean/stddev come from `pg_stat_statements`, joined on
 cardinality caps, §8).
 
 `_info()` columns added on 2026-10-05: `evicted_entries` (§5.3),
-`dropped_tags` (tags dropped because the tag set would exceed
+`dropped_tags` (tags dropped because the tag set would exceed `max_tags` or
 `max_tagset_bytes`, §4.1), and `regex_compile_failures` (lazy-compile failures,
 §4.2). Regex failures happen per backend, so they are flushed into a shared
 counter in the header.
