@@ -286,7 +286,8 @@ typedef enum InjectAction
 	INJ_LATEREGINT,				/* deadline, then a real SIGINT, REG_CANCEL */
 	INJ_LATEWAIT,				/* deadline, then wait 1 s without CFI, then CFI */
 	INJ_LATECONFLICT,			/* deadline, then a recovery conflict, then CFI */
-	INJ_LATEREGCONFLICT			/* deadline, then a recovery conflict, REG_CANCEL */
+	INJ_LATEREGCONFLICT,		/* deadline, then a recovery conflict, REG_CANCEL */
+	INJ_EXPIRE					/* let the engine run; the limit expires mid-compile */
 } InjectAction;
 
 static int	inj_phase = -1;
@@ -297,6 +298,9 @@ static int	inj_fired = 0;
 
 /* REG_CANCEL of the PG14/15 engine (21); PG16+ throws instead. */
 #define PSSC_TEST_REG_CANCEL 21
+
+/* INJ_EXPIRE: the compile time limit expires this long into the attempt. */
+#define PSSC_TEST_EXPIRE_MS 300
 
 static int
 inject_hook(int phase, int index)
@@ -391,6 +395,13 @@ inject_hook(int phase, int index)
 				return PSSC_TEST_REG_CANCEL;
 			CHECK_FOR_INTERRUPTS();
 			return REG_OKAY;
+		case INJ_EXPIRE:
+			{
+				void		(*expire) (int) = (void (*) (int)) main_sym("pssc_regex_test_expire_in");
+
+				expire(PSSC_TEST_EXPIRE_MS);
+				return REG_OKAY;
+			}
 	}
 	return REG_OKAY;
 }
@@ -411,7 +422,8 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 		[INJ_REGSLEEP] = "regsleep", [INJ_STALL] = "stall",
 		[INJ_REGSTALL] = "regstall", [INJ_LATEINT] = "lateint",
 		[INJ_LATEREGINT] = "lateregint", [INJ_LATEWAIT] = "latewait",
-		[INJ_LATECONFLICT] = "lateconflict", [INJ_LATEREGCONFLICT] = "lateregconflict"
+		[INJ_LATECONFLICT] = "lateconflict", [INJ_LATEREGCONFLICT] = "lateregconflict",
+		[INJ_EXPIRE] = "expire"
 	};
 	int			a = -1;
 

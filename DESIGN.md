@@ -358,7 +358,9 @@ Format-specific parameters:
     conflicts) are not lost.
   - An attempt that hit the limit but used under half of it in CPU time was a
     scheduling stall and is retried, up to 3 attempts (≤ ~300 ms per pattern).
-    20261006-080948-1 tracks discarding an interrupted attempt's memory.
+    Each attempt compiles in its own memory context; a failed or interrupted
+    attempt's context is deleted before the next one (item 20261006-080948-1;
+    on PG16+ a thrown cancel skips the engine's own cleanup).
   - With interrupts held off the compile is put off. Processes other than
     client backends compile without a bound.
 - **appname** (done, item -38): `appname(format=sqlcommenter|marginalia|regex)`

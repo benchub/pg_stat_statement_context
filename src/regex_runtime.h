@@ -122,14 +122,26 @@ extern PGDLLEXPORT PsscRegexTestHook pssc_regex_test_hook;
 #define PSSC_REGEX_COMPILE_ATTEMPTS 3
 extern PGDLLEXPORT int pssc_regex_compile_limit_ms;
 
+/*
+ * TEST-ONLY (test/modules/pssc_extract_test): while the compile time limit
+ * of a client backend's compile attempt is armed (e.g. from the test hook's
+ * *COMPILE or CHECK phase), makes it expire ms from now instead, so that the
+ * engine itself is interrupted mid-compile. No-op when not armed.
+ */
+extern PGDLLEXPORT void pssc_regex_test_expire_in(int ms);
+
 /* pssc_regex_compile() results besides the engine's return codes. */
 #define PSSC_REGEX_COMPILE_TOO_SLOW	(-1)
 #define PSSC_REGEX_COMPILE_DEFERRED	(-2)
 
 /*
  * Compiles pat[0, len) into re (REG_ADVANCED, C collation; with
- * pssc_regcomp() in cxt), under the compile time limit, after calling the
- * test hook for test_phase (if >= 0) with test_index. Returns REG_OKAY,
+ * pssc_regcomp() in a new child of cxt, released with cxt or by
+ * pssc_regfree()), under the compile time limit, after calling the test
+ * hook for test_phase (if >= 0) with test_index. Each attempt compiles into
+ * a child context of its own; one that fails or is interrupted is deleted,
+ * with whatever the engine left in it, before the next attempt or
+ * returning, so only a successful attempt's memory is kept. Returns REG_OKAY,
  * an engine error code (re not compiled), or:
  *	PSSC_REGEX_COMPILE_TOO_SLOW  the compile took longer than the limit (re
  *		not compiled). In a client backend the compile is aborted at the

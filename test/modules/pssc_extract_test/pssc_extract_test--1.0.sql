@@ -80,7 +80,10 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 -- (the same, but wait another 1 s instead of sending SIGINT, so that a
 -- statement_timeout or transaction_timeout can fire), 'lateconflict' /
 -- 'lateregconflict' (the same, but send this backend a real recovery
--- conflict signal (SIGUSR1) instead of SIGINT), 'none' (off). Phase 'check' is the check
+-- conflict signal (SIGUSR1) instead of SIGINT), 'expire' (only in a
+-- phase run under the compile time limit: make the limit expire 300 ms
+-- into the attempt and let the real engine run, so it is interrupted
+-- mid-compile, after it has allocated), 'none' (off). Phase 'check' is the check
 -- hooks' test compile of any pattern (idx -1).
 CREATE FUNCTION pssc_extract_test_regex_inject(phase text, idx int, action text,
                                                count int DEFAULT 1) RETURNS void

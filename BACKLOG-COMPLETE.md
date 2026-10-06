@@ -954,6 +954,19 @@ The execution-time CPU limits (item -10) don't cover compile. Options (decide an
 **Open questions:** none
 **Status:** done
 
+### 20261006-080948-1: Regex compile retry: discard allocations of interrupted attempts
+
+**Description:** Found in the round-2 review of 20261006-021334-1. On PG16–18 a compile stopped by the 100 ms limit throws out of `pg_regcomp()` before its cleanup runs. The retry (an attempt that used < half the limit in CPU time is retried, up to 3 attempts) reuses the same slot memory context, so the interrupted attempt's allocations stay there, and the next compile overwrites the regex's ownership pointers. If a retry succeeds, the slot keeps the abandoned allocations until its configuration generation is released. Reviewer reproduced on PG18 with the real `{0,13}` pathological pattern and a test-only 1000 ms limit: ~4 MB abandoned (5,956,832 vs 1,796,472 bytes used). Existing stall injections miss it because they interrupt before the engine allocates. See `src/regex_runtime.c` compile_slot / run_compile.
+
+**Acceptance criteria:**
+- Each attempt compiles in its own disposable context; an interrupted attempt's context is deleted before retrying; only the successful attempt's context is kept.
+- A failing-first test (e.g. a test-module injection that interrupts after the engine has allocated, then checks the slot context's size or that a retry's context equals a clean compile's) turns green.
+- Full harness passes on PG 14–18.
+
+**Depends on:** 20261006-021334-1
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

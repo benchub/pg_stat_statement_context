@@ -36,8 +36,12 @@
  * compile failure, without an error for the statement; a genuine cancel or
  * timeout during the compile still propagates. A compile that hit the limit
  * because it was descheduled (little CPU time used) is retried, a few
- * times. With interrupts held off the compile is put off (retried next
- * time), since it could not be bounded.
+ * times. Every attempt compiles into a new context, deleted if the attempt
+ * fails: on PG16+ an attempt stopped by the limit throws out of
+ * pg_regcomp() before its cleanup, leaving its allocations behind (PG14/15
+ * return REG_CANCEL after freeing their own). The slot keeps the context of
+ * the successful attempt. With interrupts held off the compile is put off
+ * (retried next time), since it could not be bounded.
  *
  * A failed match yields no (further) pairs for that comment and is not
  * counted.
@@ -316,7 +320,19 @@ compile_deadline_disarm(void)
 	sigprocmask(SIG_SETMASK, &old, NULL);
 	return res;
 }
+
+void
+pssc_regex_test_expire_in(int ms)
+{
+	if (deadline_armed)
+		enable_timeout_after(compile_timeout_id, ms);
+}
 #else
+void
+pssc_regex_test_expire_in(int ms)
+{
+}
+
 static bool
 compile_deadline_arm(int limit_ms)
 {
@@ -457,29 +473,57 @@ compile_attempt(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
  * attempts, if it used less than half the limit in CPU time: then most of
  * the time went to a stall, not to the pattern. Interrupts pending from
  * the attempt are processed before the next one.
+ *
+ * Each attempt compiles into a new child of parent, stored in *cxtp before
+ * the attempt starts (so that a caller catching an error can delete it).
+ * An attempt that fails is not trusted to have freed what it allocated (on
+ * PG16+ a compile stopped by the limit throws out of pg_regcomp() before
+ * its cleanup), so its context is deleted, and *cxtp reset to NULL, before
+ * the next attempt or returning. On REG_OKAY *cxtp holds the regex.
  */
-int
-pssc_regex_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
-				   size_t len, bool strict, int test_phase, int test_index)
+static int
+compile_retrying(MemoryContext parent, MemoryContext *cxtp, regex_t *re,
+				 const pg_wchar *pat, size_t len, bool strict,
+				 int test_phase, int test_index)
 {
 	int			limit = pssc_regex_compile_limit_ms;
 	int			rc;
 
-	if (limit <= 0)
-		return run_compile(cxt, re, pat, len, test_phase, test_index);
+	*cxtp = NULL;
 	for (int attempt = 1;; attempt++)
 	{
 		double		start = cpu_time_ms();
-		bool		timed;
+		bool		timed = false;
 
-		rc = compile_attempt(cxt, re, pat, len, strict, test_phase,
-							 test_index, limit, &timed);
+		*cxtp = AllocSetContextCreate(parent,
+									  "pg_stat_statement_context regex pattern",
+									  ALLOCSET_SMALL_SIZES);
+		if (limit <= 0)
+			rc = run_compile(*cxtp, re, pat, len, test_phase, test_index);
+		else
+			rc = compile_attempt(*cxtp, re, pat, len, strict, test_phase,
+								 test_index, limit, &timed);
+		if (rc != REG_OKAY)
+		{
+			MemoryContextDelete(*cxtp);
+			*cxtp = NULL;
+		}
 		if (rc != PSSC_REGEX_COMPILE_TOO_SLOW || !timed ||
 			attempt >= PSSC_REGEX_COMPILE_ATTEMPTS ||
 			cpu_time_ms() - start >= limit / 2.0)
 			return rc;
 		CHECK_FOR_INTERRUPTS();
 	}
+}
+
+int
+pssc_regex_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
+				   size_t len, bool strict, int test_phase, int test_index)
+{
+	MemoryContext acxt;
+
+	return compile_retrying(cxt, &acxt, re, pat, len, strict, test_phase,
+							test_index);
 }
 
 /*
@@ -524,13 +568,10 @@ compile_slot(Slot *slot, int index, int ctx_phase, int comp_phase,
 			rc = pssc_regex_test_hook(ctx_phase, index);
 		if (rc == REG_OKAY)
 		{
-			slot->cxt = AllocSetContextCreate(regex_cxt,
-											  "pg_stat_statement_context regex pattern",
-											  ALLOCSET_SMALL_SIZES);
 			wpat = MemoryContextAlloc(exec_cxt, sizeof(pg_wchar) * (patlen + 1));
 			wlen = pg_mb2wchar_with_len(pat, wpat, patlen);
-			rc = pssc_regex_compile(slot->cxt, &slot->re, wpat, wlen, false,
-									comp_phase, index);
+			rc = compile_retrying(regex_cxt, &slot->cxt, &slot->re, wpat, wlen,
+								  false, comp_phase, index);
 		}
 	}
 	PG_CATCH();
