@@ -736,6 +736,20 @@ It must also list the limitations:
 **Open questions:** none
 **Status:** done
 
+### 20261005-101154-1: Harden exact-release source-build harness
+
+**Description:** These problems were split off from 20261005-091225-2 after its second review round. They are in the `scripts/docker-test.sh <major>.<minor>` path, which builds an exact PostgreSQL release from source using `docker/Dockerfile.source`.
+- **Missing build tools:** the source image doesn't install Bison or Flex, which PG17+ needs even when building from release tarballs. `scripts/docker-test.sh 17.0` fails with `configure: error: bison not found`.
+- **Download not verified:** the `curl … | tar` pipeline runs under `/bin/sh` without `pipefail`, so a failed or truncated download can still let the build continue. The tarball also isn't checked against a SHA-256 checksum. Fix: download to a file, verify the checksum against the official `.sha256` for that release, and only then extract.
+
+**Acceptance criteria:**
+- `scripts/docker-test.sh 17.0` and `scripts/docker-test.sh 18.0` build and pass. `scripts/docker-test.sh 15.0` still passes.
+- A failed download (e.g. a bad URL or a simulated mid-stream failure) or a checksum mismatch fails the build.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

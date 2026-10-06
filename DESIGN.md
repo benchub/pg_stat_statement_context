@@ -1101,7 +1101,10 @@ matches this extension's minimum supported version.
   visible. TAP 013 checks that `_extract()` leaves the store and counters
   unchanged, the `SQL_ASCII` escaping, and debug/hook parity.
 - **Harness source builds** (`docker/Dockerfile.source`) install
-  `pg_stat_statements` too, so pgss parity checks run on them.
+  `pg_stat_statements` too, so pgss parity checks run on them. They install
+  bison/flex (needed by PG17+ tarballs), download the release tarball and its
+  official `.sha256` to files, and verify the checksum before extracting; any
+  download or checksum failure fails the build.
 - **pgss parity** (`017_lifecycle.pl`, item -22): with matching settings, the
   per-`(userid, dbid, queryid, toplevel)` `calls` equal pgss exactly.
   `total_exec_time` is exactly equal for plannable statements, which read the
