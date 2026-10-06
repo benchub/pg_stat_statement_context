@@ -107,6 +107,8 @@ static Size store_keysize = 0;
 
 static PsscStoreRecordTestHook record_test_hook = NULL;
 static void *record_test_hook_arg = NULL;
+static PsscStoreRecordTestHook flush_test_hook = NULL;
+static void *flush_test_hook_arg = NULL;
 
 /* Testing aid: the next eviction pass in this backend cannot allocate. */
 static bool debug_fail_next_eviction_alloc = false;
@@ -629,21 +631,73 @@ store_evict(void)
 	return evicted;
 }
 
+static inline bool
+stats_nonzero(const PsscTagsetStats *s)
+{
+	return s->invalid_tags != 0 || s->dropped_tags != 0 ||
+		s->heuristic_scans != 0 || s->regex_compile_failures != 0;
+}
+
+/*
+ * Adds one statement's diagnostic counters (and its utility_missing_queryid,
+ * 0 or 1) to the header, then zeroes *stats. The caller holds the lock in
+ * either mode: pssc_store_reset() zeroes these atomics under the exclusive
+ * lock, so a flush is wholly before or wholly after any reset (never split).
+ */
+static void
+add_diagnostics_locked(PsscTagsetStats *stats, uint64 utility_missing_queryid)
+{
+	Assert(LWLockHeldByMe(store_state->lock));
+	if (stats->invalid_tags)
+		pg_atomic_fetch_add_u64(&store_state->invalid_tags, stats->invalid_tags);
+	/* testing aid: a stall between two adds, which a reset must not split */
+	if (unlikely(flush_test_hook != NULL))
+		flush_test_hook(flush_test_hook_arg);
+	if (stats->dropped_tags)
+		pg_atomic_fetch_add_u64(&store_state->dropped_tags, stats->dropped_tags);
+	if (stats->heuristic_scans)
+		pg_atomic_fetch_add_u64(&store_state->heuristic_scans, stats->heuristic_scans);
+	if (stats->regex_compile_failures)
+		pg_atomic_fetch_add_u64(&store_state->regex_compile_failures,
+								stats->regex_compile_failures);
+	if (utility_missing_queryid)
+		pg_atomic_fetch_add_u64(&store_state->utility_missing_queryid,
+								utility_missing_queryid);
+	memset(stats, 0, sizeof(*stats));
+}
+
+static PsscStoreResult record_impl(const PsscKey *key, int64 bucket_id,
+								   double elapsed_ms, PsscTagsetStats *pending);
+
 PsscStoreResult
 pssc_store_record(const PsscKey *key, double elapsed_ms)
+{
+	return pssc_store_record_with_stats(key, elapsed_ms, NULL);
+}
+
+PsscStoreResult
+pssc_store_record_with_stats(const PsscKey *key, double elapsed_ms,
+							 PsscTagsetStats *pending)
 {
 	if (store_state == NULL || store_htab == NULL)
 		return PSSC_STORE_UNAVAILABLE;
 
 	/*
-	 * The bucket in which the execution completes. record_at() re-reads the
-	 * clock once it holds the lock, so a stall moves the call forward.
+	 * The bucket in which the execution completes. record_impl() re-reads
+	 * the clock once it holds the lock, so a stall moves the call forward.
 	 */
-	return pssc_store_record_at(key, pssc_store_clock_bucket(), elapsed_ms);
+	return record_impl(key, pssc_store_clock_bucket(), elapsed_ms, pending);
 }
 
 PsscStoreResult
 pssc_store_record_at(const PsscKey *key, int64 bucket_id, double elapsed_ms)
+{
+	return record_impl(key, bucket_id, elapsed_ms, NULL);
+}
+
+static PsscStoreResult
+record_impl(const PsscKey *key, int64 bucket_id, double elapsed_ms,
+			PsscTagsetStats *pending)
 {
 	PsscStoreResult result;
 	uint32		normal;
@@ -677,6 +731,8 @@ pssc_store_record_at(const PsscKey *key, int64 bucket_id, double elapsed_ms)
 	if (entry != NULL)
 	{
 		(void) entry_accum(entry, elapsed_ms);
+		if (pending != NULL && stats_nonzero(pending))
+			add_diagnostics_locked(pending, 0);
 		LWLockRelease(store_state->lock);
 		return PSSC_STORE_UPDATED;
 	}
@@ -718,6 +774,8 @@ pssc_store_record_at(const PsscKey *key, int64 bucket_id, double elapsed_ms)
 	}
 	else
 		(void) entry_accum(entry, elapsed_ms);
+	if (pending != NULL && stats_nonzero(pending))
+		add_diagnostics_locked(pending, 0);
 
 	Assert(store_state->entries == hash_get_num_entries(store_htab));
 	Assert(store_state->entries <= store_state->max_entries);
@@ -807,22 +865,21 @@ pssc_store_reset(void)
 	LWLockRelease(store_state->lock);
 }
 
-bool
-pssc_store_get_counters(PsscStoreCounters *c)
+/*
+ * Fills *c; the caller holds the lock (either mode). The lock-free counters
+ * are read under it too: pssc_store_reset() zeroes them under the exclusive
+ * lock, so the copy is wholly from before or wholly from after any reset.
+ */
+static void
+read_counters_locked(PsscStoreCounters *c)
 {
-	memset(c, 0, sizeof(*c));
-	if (store_state == NULL || store_htab == NULL)
-		return false;
-
-	LWLockAcquire(store_state->lock, LW_SHARED);
+	Assert(LWLockHeldByMe(store_state->lock));
 	c->entries = store_state->entries;
 	c->hash_entries = (int64) hash_get_num_entries(store_htab);
 	c->dealloc = store_state->dealloc;
 	c->evicted_entries = store_state->evicted_entries;
 	c->stats_reset = store_state->stats_reset;
 	c->force_collisions = store_state->force_collisions;
-	LWLockRelease(store_state->lock);
-
 	c->max_entries = store_state->max_entries;
 	c->invalid_tags = (int64) pg_atomic_read_u64(&store_state->invalid_tags);
 	c->dropped_tags = (int64) pg_atomic_read_u64(&store_state->dropped_tags);
@@ -837,30 +894,100 @@ pssc_store_get_counters(PsscStoreCounters *c)
 	c->entrysize = store_state->entrysize;
 	c->bucket_count = store_state->bucket_count;
 	c->max_tagset_bytes = store_state->max_tagset_bytes;
+}
+
+bool
+pssc_store_get_counters(PsscStoreCounters *c)
+{
+	memset(c, 0, sizeof(*c));
+	if (store_state == NULL || store_htab == NULL)
+		return false;
+
+	LWLockAcquire(store_state->lock, LW_SHARED);
+	read_counters_locked(c);
+	LWLockRelease(store_state->lock);
+	return true;
+}
+
+bool
+pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
+{
+	HASH_SEQ_STATUS seq;
+	void	   *entry;
+	int			count;
+	int64	   *ids;
+	int64		oldest = PSSC_BUCKET_NONE;
+
+	memset(c, 0, sizeof(*c));
+	*oldest_bucket = PSSC_BUCKET_NONE;
+	if (store_state == NULL || store_htab == NULL)
+		return false;
+	count = store_state->bucket_count;
+	ids = palloc(count * sizeof(int64));
+
+	LWLockAcquire(store_state->lock, LW_SHARED);
+	read_counters_locked(c);
+
+	/* as every reader (§5.2): advance the watermark to the clock first */
+	(void) observe_current_bucket(PSSC_BUCKET_NONE);
+	hash_seq_init(&seq, store_htab);
+	while ((entry = hash_seq_search(&seq)) != NULL)
+	{
+		PsscEntryHeader *hdr = entry_header(entry);
+		PsscSlot   *slots = entry_slots(entry);
+		int64		current;
+
+		SpinLockAcquire(&hdr->mutex);
+		for (int i = 0; i < count; i++)
+			ids[i] = slots[i].bucket_id;
+		SpinLockRelease(&hdr->mutex);
+
+		/* read after the copy, as in pssc_store_foreach() */
+		current = watermark_read();
+		for (int i = 0; i < count; i++)
+			if (pssc_bucket_is_live(ids[i], current, count) &&
+				(oldest == PSSC_BUCKET_NONE || ids[i] < oldest))
+				oldest = ids[i];
+	}
+	LWLockRelease(store_state->lock);
+
+	pfree(ids);
+	*oldest_bucket = oldest;
 	return true;
 }
 
 void
 pssc_store_add_tagset_stats(const PsscTagsetStats *stats)
 {
-	if (store_state == NULL)
+	PsscTagsetStats copy;
+
+	/* the common case (nothing pending) takes no lock */
+	if (store_state == NULL || !stats_nonzero(stats))
 		return;
-	if (stats->invalid_tags)
-		pg_atomic_fetch_add_u64(&store_state->invalid_tags, stats->invalid_tags);
-	if (stats->dropped_tags)
-		pg_atomic_fetch_add_u64(&store_state->dropped_tags, stats->dropped_tags);
-	if (stats->heuristic_scans)
-		pg_atomic_fetch_add_u64(&store_state->heuristic_scans, stats->heuristic_scans);
-	if (stats->regex_compile_failures)
-		pg_atomic_fetch_add_u64(&store_state->regex_compile_failures,
-								stats->regex_compile_failures);
+	/* LWLocks are not reentrant; no caller flushes while holding the lock */
+	Assert(!LWLockHeldByMe(store_state->lock));
+	copy = *stats;
+	LWLockAcquire(store_state->lock, LW_SHARED);
+	add_diagnostics_locked(&copy, 0);
+	LWLockRelease(store_state->lock);
 }
 
 void
-pssc_store_count_utility_missing_queryid(void)
+pssc_store_count_utility_missing_queryid(PsscTagsetStats *pending)
 {
-	if (store_state != NULL)
-		pg_atomic_fetch_add_u64(&store_state->utility_missing_queryid, 1);
+	PsscTagsetStats none;
+
+	if (store_state == NULL)
+		return;
+	if (pending == NULL)
+	{
+		memset(&none, 0, sizeof(none));
+		pending = &none;
+	}
+	Assert(!LWLockHeldByMe(store_state->lock));
+	LWLockAcquire(store_state->lock, LW_SHARED);
+	add_diagnostics_locked(pending, 1);
+	LWLockRelease(store_state->lock);
 }
 
 void
@@ -893,6 +1020,13 @@ pssc_store_set_record_test_hook(PsscStoreRecordTestHook hook, void *arg)
 {
 	record_test_hook = hook;
 	record_test_hook_arg = arg;
+}
+
+void
+pssc_store_set_flush_test_hook(PsscStoreRecordTestHook hook, void *arg)
+{
+	flush_test_hook = hook;
+	flush_test_hook_arg = arg;
 }
 
 

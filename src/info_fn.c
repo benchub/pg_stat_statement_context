@@ -1,0 +1,125 @@
+/*
+ * info_fn.c
+ *		pg_stat_statement_context_info() and pg_stat_statement_context_reset()
+ *		(DESIGN.md §7).
+ *
+ * _info() returns one row from a consistent snapshot of the shared header
+ * (pssc_store_get_info(): one acquisition of the shared lock, so it is
+ * wholly before or wholly after any reset):
+ *	entries, max_entries, dealloc, evicted_entries	the table (§5.1, §5.3)
+ *	buckets			bucket_count, the ring size (§4.1)
+ *	oldest_bucket	start of the oldest live slot of any entry, i.e. the
+ *					oldest bucket_start the stats view can show; NULL if no
+ *					slot is live (empty table, or every entry expired)
+ *	shmem_bytes		exactly the size requested at startup (§5.1)
+ *	invalid_tags, dropped_tags, heuristic_scans, regex_compile_failures,
+ *	utility_missing_queryid, stats_reset
+ * Finding oldest_bucket scans the whole table under the shared lock, as the
+ * stats SRF does. Like every reader, _info() first raises current_bucket to
+ * the clock.
+ *
+ * The extraction counters are accumulated per backend and flushed into the
+ * header at each ExecutorEnd and utility completion. _info() flushes the
+ * calling backend's pending counters first, so a statement sees its own
+ * extraction (e.g. a malformed tag in the comment of the very statement
+ * that calls _info()); other backends' in-flight statements show up when
+ * they end.
+ *
+ * _reset() (superuser by default: REVOKE ... FROM PUBLIC in the script)
+ * removes every entry and zeroes every counter under the exclusive lock,
+ * and sets stats_reset. Concurrent writers wait for the lock and record
+ * after it; that includes each statement's flush of its diagnostic counters
+ * (and its utility_missing_queryid), which is added under the shared lock as
+ * a whole, so a reset never splits one statement's counters. The calling
+ * backend's pending extraction counters belong to the reset statement
+ * itself, which started before the reset: they are discarded. Other backends' pending counters (statements in flight during
+ * the reset) are added after it, when those statements end. A backend whose
+ * regex extractor failed to compile before the reset keeps it disabled
+ * until the next configuration change and does not count the failure
+ * again, so after a reset regex_compile_failures only counts new failures.
+ *
+ * Both raise ERROR if the library was not preloaded, as the stats SRF does.
+ * Both are PARALLEL RESTRICTED: the pending counters they flush or discard
+ * are those of the leader.
+ */
+#include "postgres.h"
+
+#include "access/htup_details.h"
+#include "fmgr.h"
+#include "funcapi.h"
+#include "utils/timestamp.h"
+
+#include "counters.h"
+#include "executor.h"
+#include "extract.h"
+#include "store.h"
+
+#define INFO_COLS	13
+
+static void
+require_preloaded(void)
+{
+	if (!pssc_store_available())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("pg_stat_statement_context must be loaded via \"shared_preload_libraries\"")));
+}
+
+PG_FUNCTION_INFO_V1(pg_stat_statement_context_info);
+
+Datum
+pg_stat_statement_context_info(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[INFO_COLS];
+	bool		nulls[INFO_COLS];
+	PsscStoreCounters c;
+	int64		oldest;
+	int			i = 0;
+
+	require_preloaded();
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	if (tupdesc->natts != INFO_COLS)
+		elog(ERROR, "incorrect number of output arguments");
+
+	pssc_flush_extract_stats();
+	if (!pssc_store_get_info(&c, &oldest))
+		elog(ERROR, "pg_stat_statement_context shared store is not set up");
+
+	memset(nulls, 0, sizeof(nulls));
+	values[i++] = Int64GetDatum(c.entries);
+	values[i++] = Int64GetDatum(c.max_entries);
+	values[i++] = Int64GetDatum(c.dealloc);
+	values[i++] = Int64GetDatum(c.evicted_entries);
+	values[i++] = Int32GetDatum(c.bucket_count);
+	if (oldest == PSSC_BUCKET_NONE)
+		nulls[i++] = true;
+	else
+		values[i++] = TimestampTzGetDatum(pssc_store_bucket_start(oldest));
+	values[i++] = Int64GetDatum((int64) c.shmem_bytes);
+	values[i++] = Int64GetDatum(c.invalid_tags);
+	values[i++] = Int64GetDatum(c.dropped_tags);
+	values[i++] = Int64GetDatum(c.heuristic_scans);
+	values[i++] = Int64GetDatum(c.regex_compile_failures);
+	values[i++] = Int64GetDatum(c.utility_missing_queryid);
+	values[i++] = TimestampTzGetDatum(c.stats_reset);
+	Assert(i == INFO_COLS);
+
+	tupdesc = BlessTupleDesc(tupdesc);
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+PG_FUNCTION_INFO_V1(pg_stat_statement_context_reset);
+
+Datum
+pg_stat_statement_context_reset(PG_FUNCTION_ARGS)
+{
+	PsscTagsetStats discard;
+
+	require_preloaded();
+	memset(&discard, 0, sizeof(discard));
+	pssc_extract_take_stats(&discard);
+	pssc_store_reset();
+	PG_RETURN_VOID();
+}

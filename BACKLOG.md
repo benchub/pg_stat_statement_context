@@ -52,20 +52,20 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | no | ready |
 | 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | ready |
-| 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
-| 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
+| 20261005-204419-1 | Fix flaky `008_buckets.pl` ring-wrap check | 20261005-091225-14 | no | ready |
+| 20261005-091225-23 | TAP tests: store, buckets, eviction, and reconfiguration | 20261005-091225-17, 20261005-091225-21 | no | ready |
+| 20261005-091225-24 | Tests: SQL interface, visibility, encodings, bucket merge | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
-| 20261005-091225-28 | User documentation | 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27 | no | blocked-on-deps |
+| 20261005-091225-28 | User documentation | 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
 | 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | ready |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
-| 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
+| 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
-| 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | blocked-on-deps |
+| 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | ready |
 | 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | ready |
 | 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | no | ready |
@@ -195,35 +195,6 @@ dependencies and is not shown.
 **Open questions:** none
 **Status:** ready
 
-### 20261005-091225-21: `_info()` and `_reset()` functions
-
-**Description:** Implement `pg_stat_statement_context_info()` (§7), which returns:
-- `entries`, `max_entries`, `dealloc`, `evicted_entries`
-- `buckets`, `oldest_bucket`, the exact `shmem_bytes`
-- `invalid_tags`, `dropped_tags` (tags dropped because the tag set would exceed `max_tagset_bytes`), `heuristic_scans`
-- `regex_compile_failures` (regex lazy-compile failures; these happen per backend, so the backend-local count is flushed into a shared header counter)
-- `utility_missing_queryid`, `stats_reset`
-
-Implement `pg_stat_statement_context_reset()`, which clears all entries and counters and sets `stats_reset`. In the SQL script, run `REVOKE ALL ... FROM PUBLIC` on the reset function.
-
-**Acceptance criteria:**
-- Each counter moves under the activity that drives it:
-  - `dealloc` and `evicted_entries` after churn
-  - `invalid_tags` after malformed tags
-  - `dropped_tags` after a tag set larger than `max_tagset_bytes`
-  - `heuristic_scans` after `append` scans of long statements
-  - `regex_compile_failures` after an injected lazy-compile failure (task 20261005-091225-10), visible from another session
-  - `utility_missing_queryid` under the wrong load order
-- Reset zeroes the counters and updates `stats_reset`.
-- An unprivileged role gets "permission denied" when calling reset.
-
-**Decisions:**
-- 2026-10-05: Add `evicted_entries`, `dropped_tags` (tags dropped for exceeding `max_tagset_bytes`), and `regex_compile_failures` (needs a shared counter) to `_info()`.
-
-**Depends on:** 20261005-091225-15, 20261005-091225-20
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-22: TAP tests: execution lifecycle and pgss parity
 
 **Description:** Write TAP tests (`test/t/`) for the lifecycle and adversarial cases in §9:
@@ -245,6 +216,18 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 **Open questions:** none
 **Status:** ready
 
+### 20261005-204419-1: Fix flaky `008_buckets.pl` ring-wrap check
+
+**Description:** Found during 20261005-091225-21. `test/t/008_buckets.pl` check "the ring wrapped during phase B" (`current_bucket > $b0 + 64`, around line 384) failed once on PG15 and passed on rerun. It depends on random clock jumps driven by pgbench; the builder's simulation estimates a ~1% failure rate. Make the check deterministic (e.g. drive the clock with fixed steps, or loop until the wrap condition holds with a bounded number of iterations) without weakening what it verifies. Failing log was in `tmp/harness-15-flake.log` (scratch, may be gone).
+
+**Acceptance criteria:**
+- The check cannot fail by chance: either it's deterministic, or the probability argument is documented and below 1e-6.
+- The test still fails if ring wrap-around handling is broken (show this by temporarily breaking it).
+
+**Depends on:** 20261005-091225-14
+**Open questions:** none
+**Status:** ready
+
 ### 20261005-091225-23: TAP tests: store, buckets, eviction, and reconfiguration
 
 **Description:** Write TAP tests for the store-related items in §9:
@@ -261,7 +244,7 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 
 **Depends on:** 20261005-091225-17, 20261005-091225-21
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-24: Tests: SQL interface, visibility, encodings, bucket merge
 
@@ -277,7 +260,7 @@ Implement `pg_stat_statement_context_reset()`, which clears all entries and coun
 
 **Depends on:** 20261005-091225-17, 20261005-091225-21
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-25: Fuzzing harnesses
 
@@ -347,7 +330,7 @@ It must also list the limitations:
 
 **Depends on:** 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-29: v1 release readiness
 
@@ -443,7 +426,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Depends on:** 20261005-091225-17, 20261005-091225-21
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-33: Roadmap: exemplars for excluded high-cardinality keys
 
@@ -499,7 +482,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Depends on:** 20261005-091225-15, 20261005-091225-21
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-38: Roadmap: context from `application_name`
 

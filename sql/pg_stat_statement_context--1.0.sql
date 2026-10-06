@@ -3,9 +3,6 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION pg_stat_statement_context" to load this file. \quit
 
--- SQL objects _info() and _reset() are added by later tasks; see
--- DESIGN.md §7.
-
 -- Statistics per (userid, dbid, queryid, toplevel, tags) and time bucket
 -- (DESIGN.md §7): one row per live bucket of each entry, or with
 -- merge_buckets one row per entry summing its live buckets (bucket_start is
@@ -64,3 +61,38 @@ AS 'MODULE_PATHNAME', 'pg_stat_statement_context_extract'
 LANGUAGE C VOLATILE STRICT PARALLEL SAFE;
 
 REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PUBLIC;
+
+-- Store and diagnostic counters (DESIGN.md §7), one row: entries,
+-- max_entries, eviction passes (dealloc) and the entries they removed
+-- (evicted_entries), buckets (= bucket_count), oldest_bucket (start of the
+-- oldest live bucket of any entry; NULL if none), the exact shared memory
+-- size requested at startup (shmem_bytes), the extraction counters, and
+-- the time of the last reset (or of startup). Readable by everyone, like
+-- pg_stat_statements_info.
+CREATE FUNCTION pg_stat_statement_context_info(
+    OUT entries bigint,
+    OUT max_entries bigint,
+    OUT dealloc bigint,
+    OUT evicted_entries bigint,
+    OUT buckets int,
+    OUT oldest_bucket timestamptz,
+    OUT shmem_bytes bigint,
+    OUT invalid_tags bigint,
+    OUT dropped_tags bigint,
+    OUT heuristic_scans bigint,
+    OUT regex_compile_failures bigint,
+    OUT utility_missing_queryid bigint,
+    OUT stats_reset timestamptz
+)
+RETURNS record
+AS 'MODULE_PATHNAME', 'pg_stat_statement_context_info'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+-- Removes every entry, zeroes every counter of _info() and sets
+-- stats_reset. Superuser-only by default; GRANT EXECUTE to allow others.
+CREATE FUNCTION pg_stat_statement_context_reset()
+RETURNS void
+AS 'MODULE_PATHNAME', 'pg_stat_statement_context_reset'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+REVOKE ALL ON FUNCTION pg_stat_statement_context_reset() FROM PUBLIC;

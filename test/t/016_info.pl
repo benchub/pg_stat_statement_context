@@ -1,0 +1,392 @@
+# pg_stat_statement_context_info() and pg_stat_statement_context_reset()
+# (DESIGN.md §5.1-§5.3, §6.2, §6.7, §6.11, §7; backlog 20261005-091225-21).
+#
+# Covers: the exact §7 signature and privileges (_info() is PUBLIC like
+# pg_stat_statements_info, _reset() is revoked from PUBLIC); a single row
+# with entries, max_entries, buckets (= bucket_count) and the exact
+# shmem_bytes requested at startup; every counter moving under the activity
+# that drives it, through real statements: invalid_tags (malformed tags),
+# dropped_tags (a tag set over max_tagset_bytes), heuristic_scans (append
+# scan of a statement longer than scan_window), dealloc and evicted_entries
+# (churn over max_entries), regex_compile_failures (an injected lazy-compile
+# failure, read from another session) and utility_missing_queryid (wrong
+# shared_preload_libraries order); _info() sees the calling statement's own
+# extraction counters; oldest_bucket is the start of the oldest live slot
+# of any entry (NULL when there is none); reset clears entries and counters
+# (including the caller's pending counters, and without re-counting a regex
+# extractor that stays disabled in a backend) and sets stats_reset; a reset
+# never splits a concurrent flush of diagnostic counters (a flush stalled
+# under the store lock by a test hook makes the reset wait); and all
+# three SQL functions raise the "not preloaded" error without
+# shared_preload_libraries. Entries and the clock are also driven through
+# the TEST-ONLY module test/modules/pssc_store_test, and regex faults are
+# injected with test/modules/pssc_extract_test.
+use strict;
+use warnings;
+
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
+use Test::More;
+use IPC::Run;
+use Time::HiRes qw(usleep);
+
+my $P = 'pg_stat_statement_context';
+
+my $node = PostgreSQL::Test::Cluster->new('info');
+$node->init;
+$node->append_conf('postgresql.conf', qq{
+shared_preload_libraries = '$P'
+$P.max_entries = 100
+$P.bucket_count = 4
+$P.tags = '*'
+$P.exclude_tags = ''
+});
+$node->start;
+
+sub sql { return $node->safe_psql('postgres', $_[0]); }
+
+sql("CREATE EXTENSION $P; CREATE EXTENSION pssc_store_test; "
+	  . 'CREATE EXTENSION pssc_extract_test');
+sql('CREATE ROLE alice');
+
+my @cols = qw(entries max_entries dealloc evicted_entries buckets oldest_bucket
+  shmem_bytes invalid_tags dropped_tags heuristic_scans regex_compile_failures
+  utility_missing_queryid stats_reset);
+
+# The one row of _info() as a hash; NULLs as 'NULL'. $suffix (e.g. a
+# tagged comment) is appended to the statement that calls _info().
+sub info
+{
+	my ($suffix) = @_;
+	$suffix //= '';
+	my $sel = join(" || '|' || ", map { "coalesce(${_}::text, 'NULL')" } @cols);
+	my @v = split /\|/, sql("SELECT $sel FROM ${P}_info() i $suffix"), -1;
+	die "unexpected _info() output" unless @v == @cols;
+	my %h;
+	@h{@cols} = @v;
+	return \%h;
+}
+
+# "invalid dropped heuristic regex utility"
+sub diag_counters
+{
+	my $i = info(@_);
+	return join(' ', @$i{qw(invalid_tags dropped_tags heuristic_scans
+		  regex_compile_failures utility_missing_queryid)});
+}
+
+# "entries dealloc evicted_entries"
+sub churn_counters
+{
+	my $i = info();
+	return join(' ', @$i{qw(entries dealloc evicted_entries)});
+}
+
+sub set_conf
+{
+	my ($name, $literal, $expected) = @_;
+	sql("ALTER SYSTEM SET $P.$name = $literal");
+	sql('SELECT pg_reload_conf()');
+	$node->poll_query_until('postgres', "SHOW $P.$name", $expected)
+	  or die "$P.$name did not become $expected";
+}
+
+# Pin the shared debug clock in the middle of bucket $b.
+sub pin
+{
+	sql(qq{SELECT pssc_store_test_pin_clock(pssc_store_test_bucket_start($_[0])
+	         + (interval_us / 2 || ' microseconds')::interval) FROM pssc_store_test_buckets()});
+}
+
+# ------------------------------------------------------- catalog: §7
+{
+	is(sql(qq{SELECT pg_get_function_arguments(p.oid) || ' -> ' || pg_get_function_result(p.oid)
+	          || ' ' || concat_ws(' ', provolatile, proretset)
+	          FROM pg_proc p WHERE proname = '${P}_info'}),
+		'OUT entries bigint, OUT max_entries bigint, OUT dealloc bigint, '
+		  . 'OUT evicted_entries bigint, OUT buckets integer, '
+		  . 'OUT oldest_bucket timestamp with time zone, OUT shmem_bytes bigint, '
+		  . 'OUT invalid_tags bigint, OUT dropped_tags bigint, '
+		  . 'OUT heuristic_scans bigint, OUT regex_compile_failures bigint, '
+		  . 'OUT utility_missing_queryid bigint, '
+		  . 'OUT stats_reset timestamp with time zone -> record v f',
+		'_info(): exactly the §7 columns, one row, VOLATILE');
+	is(sql(qq{SELECT pg_get_function_arguments(p.oid) || ' -> ' || pg_get_function_result(p.oid)
+	          || ' ' || provolatile::text FROM pg_proc p WHERE proname = '${P}_reset'}),
+		' -> void v', '_reset(): no arguments, returns void, VOLATILE');
+	is(sql(qq{SELECT has_function_privilege('alice', '${P}_info()', 'EXECUTE'),
+	                 has_function_privilege('alice', '${P}_reset()', 'EXECUTE')}),
+		't|f', '_info() is executable by PUBLIC, _reset() is not');
+	is(sql(qq{SELECT count(*) FROM ${P}_info()}), 1, '_info() returns one row');
+}
+
+# ------------------------------------------------- sizes, empty store
+{
+	my $i = info();
+	is("$i->{entries} $i->{max_entries} $i->{buckets} $i->{oldest_bucket}",
+		'0 100 4 NULL', 'empty: entries 0, max_entries, buckets = bucket_count, '
+		  . 'oldest_bucket NULL');
+	is($i->{shmem_bytes}, sql('SELECT pssc_store_test_shmem_size_for(100, 512, 4)'),
+		'shmem_bytes equals the startup request for these settings');
+	is($i->{shmem_bytes}, sql('SELECT shmem_bytes FROM pssc_store_test_counters()'),
+		'shmem_bytes equals the size the store recorded when it requested it');
+	ok( sql(qq{SELECT sum(allocated_size) BETWEEN 1 AND $i->{shmem_bytes}
+	           FROM pg_shmem_allocations WHERE name LIKE '$P%'}) eq 't',
+		'the named allocations fit within shmem_bytes');
+	is(sql(qq{SELECT stats_reset <= now() AND stats_reset > now() - interval '1 hour'
+	          FROM ${P}_info()}), 't', 'stats_reset is set at startup');
+	is(diag_counters() . ' ' . churn_counters(), '0 0 0 0 0 0 0 0',
+		'all counters start at zero');
+}
+
+# ------------------------------------------------- per-counter activity
+my $long = q{'SELECT length(''' || repeat('x', 3000) || ''') /*a=''1''*/'};
+my $big = q{'SELECT 2 /*' || (SELECT string_agg('k' || i || '=''' || repeat('v', 64)
+  || '''', ',') FROM generate_series(1, 8) i) || '*/'};
+{
+	sql("SELECT ${P}_reset()");
+	sql(q{SELECT 1 /*a='1',bad='%00'*/});
+	is(diag_counters(), '1 0 0 0 0', 'invalid_tags counts a malformed tag');
+
+	sql("SELECT ${P}_reset()");
+	sql("SELECT $big \\gexec");
+	is(diag_counters(), '0 1 0 0 0',
+		'dropped_tags counts a tag that does not fit max_tagset_bytes');
+
+	sql("SELECT ${P}_reset()");
+	sql("SELECT $long \\gexec");
+	is(diag_counters(), '0 0 1 0 0',
+		'heuristic_scans counts an append scan of a statement over scan_window');
+	sql("SELECT $long \\gexec") for 1 .. 2;
+	is(diag_counters(), '0 0 3 0 0', 'heuristic_scans counts every such scan');
+
+	# The calling statement's own extraction counters are flushed before
+	# reading (they would otherwise only be flushed at its ExecutorEnd).
+	sql("SELECT ${P}_reset()");
+	is(diag_counters(q{/*a='1',bad='%00'*/}), '1 0 0 0 0',
+		'_info() sees the invalid tag of the statement calling it');
+	is(diag_counters(), '1 0 0 0 0', 'and it is counted only once');
+	is(info()->{entries}, 1, 'that statement was recorded at its end');
+}
+
+# ----------------------------------------------- churn: dealloc, evicted
+{
+	sql("SELECT ${P}_reset()");
+	is(churn_counters(), '0 0 0', 'reset: no entries, no passes');
+	sql(q{SELECT format('SELECT 1 /*k=''%s''*/', i) FROM generate_series(1, 100) i \gexec});
+	is(churn_counters(), '100 0 0', '100 distinct tag sets fill the table, no pass yet');
+	is(info()->{entries},
+		sql(q{SELECT count(*) FROM (SELECT DISTINCT dbid, userid, queryid, toplevel, tags
+		      FROM pssc_store_test_entries()) e}),
+		'entries equals the number of entries in the table');
+	sql(q{SELECT format('SELECT 1 /*k=''x%s''*/', i) FROM generate_series(1, 10) i \gexec});
+	my ($n, $d, $e) = split / /, churn_counters();
+	ok($d >= 2, "churn: dealloc counts eviction passes ($d)");
+	ok($e >= 10 && $e >= $d * 5, "churn: evicted_entries counts evicted entries ($e)");
+	ok($n <= 100 && $n == 100 + 10 - $e,
+		"churn: entries ($n) = 110 inserted - $e evicted, within max_entries");
+}
+
+# ---------------------------------------------- regex_compile_failures
+{
+	sql("SELECT ${P}_reset()");
+	set_conf('extractors', q{'regex(pattern=''svc=(\w+)'', keys=service)'},
+		q{regex(pattern='svc=(\w+)', keys=service)});
+	# A failed lazy compile disables the extractor for the backend: counted
+	# once, then flushed into the shared counter at the statement's end.
+	is( sql(
+			"SELECT pssc_extract_test_regex_inject('compile', 0, 'oom', -1); "
+			  . 'SELECT 1 /* svc=s */; SELECT 2 /* svc=s */; '
+			  . 'SELECT pssc_extract_test_regex_injected()'),
+		"\n1\n2\n1", 'the injected compile failure fired once in that session');
+	is(info()->{regex_compile_failures}, 1,
+		'regex_compile_failures is visible from another session');
+
+	# Reset in the failing backend: the extractor stays disabled there and
+	# is not counted again (no pre-reset count comes back).
+	is( sql(
+			"SELECT pssc_extract_test_regex_inject('compile', 0, 'oom', -1); "
+			  . 'SELECT 1 /* svc=s */; '
+			  . "SELECT ${P}_reset(); "
+			  . 'SELECT 2 /* svc=s */; '
+			  . "SELECT regex_compile_failures FROM ${P}_info()"),
+		"\n1\n\n2\n0", 'after a reset, a backend whose regex failed earlier counts nothing');
+	is(info()->{regex_compile_failures}, 0, 'and nothing is flushed later');
+	set_conf('extractors', q{'sqlcommenter, marginalia'}, 'sqlcommenter, marginalia');
+}
+
+# ------------------------------------------------------------- reset
+{
+	sql(q{SELECT 1 /*a='1',bad='%00'*/});
+	sql("SELECT $long \\gexec");
+	sql("SELECT $big \\gexec");
+	sql('SELECT pssc_store_test_add_stats(0, 0, 0, 5); '
+		  . 'SELECT pssc_store_test_utility_missing_queryid()');
+	my $before = info();
+	is(join(' ', map { $before->{$_} > 0 ? 1 : 0 } qw(entries invalid_tags dropped_tags
+		heuristic_scans regex_compile_failures utility_missing_queryid)),
+		'1 1 1 1 1 1', 'before reset: entries and every diagnostic counter are non-zero');
+	sql(q{SELECT format('SELECT 1 /*r=''%s''*/', i) FROM generate_series(1, 101) i \gexec});
+	ok(info()->{dealloc} > 0, 'before reset: dealloc non-zero');
+
+	my $ts = sql(qq{SELECT statement_timestamp() FROM ${P}_reset()});
+	my $after = info();
+	is(diag_counters() . ' ' . churn_counters(), '0 0 0 0 0 0 0 0',
+		'reset zeroes entries and every counter');
+	is($after->{oldest_bucket}, 'NULL', 'reset: oldest_bucket NULL');
+	is(sql(qq{SELECT stats_reset >= '$ts' AND stats_reset > '$before->{stats_reset}'
+	          FROM ${P}_info()}), 't', 'reset sets stats_reset to the time of the reset');
+	is(sql("SELECT count(*) FROM $P"), 0, 'the stats view is empty after reset');
+	is( join(' ', @$after{qw(max_entries buckets shmem_bytes)}),
+		join(' ', @$before{qw(max_entries buckets shmem_bytes)}),
+		'reset keeps the sizes');
+
+	# The reset statement's own extraction counters predate the reset.
+	sql(qq{SELECT ${P}_reset() /*a='1',bad='%00'*/});
+	is(diag_counters(), '0 0 0 0 0',
+		'reset discards the calling statement\'s pending counters');
+	is(info()->{entries}, 1, 'the (tagged) reset statement itself is recorded after it');
+
+	my ($ret, $out, $err) = $node->psql('postgres',
+		"SET ROLE alice; SELECT ${P}_reset()");
+	isnt($ret, 0, 'unprivileged reset fails');
+	like($err, qr/permission denied for function ${P}_reset/,
+		'unprivileged role gets permission denied');
+	is(info()->{entries}, 1, 'and nothing was reset');
+	($ret, $out, $err) = $node->psql('postgres',
+		"SET ROLE alice; SELECT entries FROM ${P}_info()");
+	is("$ret|$out|$err", '0|1|', 'an unprivileged role can call _info()');
+	sql("GRANT EXECUTE ON FUNCTION ${P}_reset() TO alice");
+	($ret, $out, $err) = $node->psql('postgres',
+		"SET ROLE alice; SELECT ${P}_reset(); SELECT entries FROM ${P}_info()");
+	is("$ret|$out|$err", "0|\n0|", 'reset works once granted');
+}
+
+# ------------------------------------- reset vs a concurrent flush
+# A backend's flush of its diagnostic counters is stalled (by a TEST-ONLY
+# hook) under the store lock, after it has added invalid_tags and before the
+# other counters; a reset started meanwhile must wait for the whole flush,
+# so the counters are all zero afterwards (an unlocked flush would leave the
+# counters added after the reset, e.g. heuristic_scans 1).
+{
+	my $release = $node->basedir . '/flush_release';
+
+	# psql running the given statements (one -c each) in the background.
+	my $bg = sub {
+		my ($app, @cmds) = @_;
+		my %r = (out => '', err => '');
+		$r{h} = IPC::Run::start(
+			[ 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d',
+			  $node->connstr('postgres') . " application_name=$app",
+			  map { ('-c', $_) } @cmds ],
+			'>', \$r{out}, '2>', \$r{err}, IPC::Run::timeout(180));
+		return \%r;
+	};
+	my $wait_for = sub {
+		for (1 .. 300)
+		{
+			return 1 if sql($_[0]) eq 't';
+			usleep(100_000);
+		}
+		return 0;
+	};
+	my $waiting = sub {
+		my ($app, $cond) = @_;
+		return $wait_for->(qq{SELECT EXISTS (SELECT FROM pg_stat_activity
+		                      WHERE application_name = '$app' AND $cond)});
+	};
+
+	my $bad_long = "SELECT length('" . ('x' x 3000) . q{') /*a='1',bad='%00'*/};
+	sql("SELECT ${P}_reset()");
+	sql($bad_long);
+	is(diag_counters(), '1 0 1 0 0',
+		'a long statement with a malformed tag counts invalid_tags and heuristic_scans');
+
+	for my $t (
+		[ 'statement end (flush under the record\'s lock)', $bad_long ],
+		[ 'standalone flush', 'SELECT pssc_store_test_add_stats(1, 1, 1, 1)' ],
+		[ 'utility_missing_queryid', 'SELECT pssc_store_test_utility_missing_queryid()' ])
+	{
+		my ($name, $trigger) = @$t;
+		unlink $release;
+		sql("SELECT ${P}_reset()");
+		my $a = $bg->('pssc_flusher',
+			"SELECT pssc_store_test_stall_next_flush('$release')", $trigger);
+		ok($waiting->('pssc_flusher', q{wait_event = 'PgSleep'}),
+			"$name: the flush stalls under the store lock");
+		my $b = $bg->('pssc_resetter', "SELECT ${P}_reset()");
+		ok($waiting->('pssc_resetter', q{wait_event_type = 'LWLock'}),
+			"$name: a concurrent reset waits for the flush");
+		open(my $fh, '>', $release) or die "cannot create $release: $!";
+		close($fh);
+		$_->{h}->finish for $a, $b;
+		is("$a->{err}$b->{err}", '', "$name: both sessions succeed");
+		is(diag_counters(), '0 0 0 0 0',
+			"$name: the reset came wholly after the flush (nothing split)");
+	}
+	unlink $release;
+}
+
+# --------------------------------------------------------- oldest_bucket
+{
+	sql("SELECT ${P}_reset()");
+	my $b = sql('SELECT reader_bucket + 10 FROM pssc_store_test_buckets()');
+	my $start = sub { sql("SELECT pssc_store_test_bucket_start($_[0])") };
+	pin($b);
+	sql('SELECT pssc_store_test_record(1)');
+	is(info()->{oldest_bucket}, $start->($b), 'oldest_bucket: the bucket of the only slot');
+	pin($b + 1);
+	sql('SELECT pssc_store_test_record(2)');
+	sql('SELECT pssc_store_test_record(1)');
+	is(info()->{oldest_bucket}, $start->($b), 'oldest_bucket: the oldest live slot of any entry');
+	is(info()->{oldest_bucket}, sql("SELECT min(bucket_start) FROM $P"),
+		'oldest_bucket = the oldest bucket_start in the stats view');
+	pin($b + 4);    # window [b+1, b+4]: slot b expired
+	is(info()->{oldest_bucket}, $start->($b + 1), 'oldest_bucket skips expired slots');
+	is(info()->{oldest_bucket}, sql("SELECT min(bucket_start) FROM $P"),
+		'still the oldest bucket_start in the stats view');
+	pin($b + 8);    # everything expired, entries still stored
+	my $i = info();
+	is("$i->{entries} $i->{oldest_bucket}", '2 NULL',
+		'oldest_bucket NULL when no slot is live, though entries remain');
+	sql('SELECT pssc_store_test_set_clock_offset(0)');
+}
+
+# ------------------------------------------- utility_missing_queryid
+SKIP:
+{
+	my $pkglibdir = sql(q{SELECT setting FROM pg_config WHERE name = 'PKGLIBDIR'});
+	skip 'pg_stat_statements is not installed', 2
+	  unless -e "$pkglibdir/pg_stat_statements.so";
+	$node->append_conf('postgresql.conf',
+		"shared_preload_libraries = '$P, pg_stat_statements'\n");
+	$node->restart;
+	sql('CREATE EXTENSION pg_stat_statements');
+	sql("SELECT ${P}_reset()");
+	sql(q{CREATE TABLE info_wrong(i int) /*controller='x'*/});
+	sql(q{DROP TABLE info_wrong});
+	is(info()->{utility_missing_queryid}, 2,
+		'wrong load order: utilities counted in utility_missing_queryid');
+	is(info()->{entries}, 0, 'and not recorded');
+}
+
+$node->stop;
+unlike(slurp_file($node->logfile), qr/TRAP|PANIC|terminated by signal/, 'no crash');
+
+# ------------------------------------------------------ not preloaded
+{
+	my $np = PostgreSQL::Test::Cluster->new('info_nopreload');
+	$np->init;
+	$np->start;
+	$np->safe_psql('postgres', "CREATE EXTENSION $P");
+	for my $q ("SELECT * FROM ${P}_info()", "SELECT ${P}_reset()",
+		"SELECT * FROM $P", "SELECT * FROM ${P}_totals")
+	{
+		my ($ret, $out, $err) = $np->psql('postgres', $q);
+		like($err, qr/ERROR:  $P must be loaded via "shared_preload_libraries"/,
+			"not preloaded: $q raises the preload error");
+	}
+	$np->stop;
+}
+
+done_testing();

@@ -84,6 +84,13 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_store_test_utility_missing_queryid() RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- One-shot (this backend): the next diagnostic-counter flush (any of the
+-- above, or a statement's own at its end) stalls under the store lock,
+-- between adding invalid_tags and the other counters, until release_file
+-- exists (at most two minutes).
+CREATE FUNCTION pssc_store_test_stall_next_flush(release_file text) RETURNS void
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
 -- One-shot (this backend): the next pssc_store_record() switches forced
 -- collisions to on_ after it has hashed its key and before it takes a lock
 -- (pssc_store_set_record_test_hook()), i.e. as if another backend had done

@@ -931,6 +931,26 @@ released. Reading changes no entry data: it may only advance the
 `current_bucket` watermark (§5.2). Expired slots keep their contents until a
 writer rolls them over. Non-merged rows of an entry come out in bucket order.
 
+`_info()` and `_reset()` (item -21):
+- `buckets` is the configured `bucket_count`. `oldest_bucket` is the start of
+  the oldest live slot of any entry (it equals `min(bucket_start)` in the
+  view), or `NULL` when no slot is live. All values come from one snapshot
+  under the shared lock; `shmem_bytes` is the exact size requested at startup.
+- `_info()` first flushes the caller's pending extraction counters, so a
+  session sees its own activity. It is callable by `PUBLIC`, like
+  `pg_stat_statements_info`.
+- `_reset()` (superuser-only by default) takes the exclusive lock, clears all
+  entries and header counters, sets `stats_reset`, and discards the caller's
+  own pending counters. Counts from statements running elsewhere land after
+  the reset. A backend whose regex failed before the reset keeps that
+  extractor disabled and doesn't count the failure again.
+- Diagnostic counter flushes hold the store's shared lock, so a flush lands
+  entirely before or after a reset. When nothing is pending, no lock is taken.
+  At `ExecutorEnd` the flush reuses the record's lock hold
+  (`pssc_store_record_with_stats()`).
+- Both functions are `VOLATILE PARALLEL RESTRICTED`, because pending counters
+  live only in the leader backend.
+
 Bucket merging (`merge_buckets = true`) sums `calls` and `total_exec_time`
 across an entry's live slots (§5.2). Because the key has no bucket, each entry
 yields exactly one merged row, and `bucket_start` is its oldest live slot.

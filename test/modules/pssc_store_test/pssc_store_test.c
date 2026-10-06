@@ -10,14 +10,18 @@
  */
 #include "postgres.h"
 
+#include <sys/stat.h>
+
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "storage/latch.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
+#include "utils/wait_event.h"
 
 #include "compat.h"
 #include "store.h"
@@ -53,6 +57,7 @@ typedef Size (*keysize_for_fn) (int);
 typedef Size (*entrysize_for_fn) (Size, int);
 typedef Size (*shmem_size_for_fn) (int, int, int);
 typedef void (*add_stats_fn) (const PsscTagsetStats *);
+typedef void (*count_missing_fn) (PsscTagsetStats *);
 
 /*
  * Serializes a text[] of alternating keys and values as "k\0v\0..." into a
@@ -354,7 +359,7 @@ PG_FUNCTION_INFO_V1(pssc_store_test_utility_missing_queryid);
 Datum
 pssc_store_test_utility_missing_queryid(PG_FUNCTION_ARGS)
 {
-	((void_fn) main_sym("pssc_store_count_utility_missing_queryid")) ();
+	((count_missing_fn) main_sym("pssc_store_count_utility_missing_queryid")) (NULL);
 	PG_RETURN_VOID();
 }
 
@@ -376,6 +381,34 @@ pssc_store_test_flip_collisions_in_next_record(PG_FUNCTION_ARGS)
 {
 	flip_to = PG_GETARG_BOOL(0);
 	((set_hook_fn) main_sym("pssc_store_set_record_test_hook")) (flip_hook, NULL);
+	PG_RETURN_VOID();
+}
+
+static char stall_release_file[MAXPGPATH];
+
+/*
+ * One-shot: runs inside the next diagnostic-counter flush, under the store
+ * lock, and sleeps (wait event PgSleep) until the release file exists or
+ * two minutes have passed.
+ */
+static void
+stall_flush_hook(void *arg)
+{
+	struct stat st;
+	int			i;
+
+	((set_hook_fn) main_sym("pssc_store_set_flush_test_hook")) (NULL, NULL);
+	for (i = 0; i < 12000 && stat(stall_release_file, &st) != 0; i++)
+		(void) WaitLatch(MyLatch, WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 10L,
+						 WAIT_EVENT_PG_SLEEP);
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_stall_next_flush);
+Datum
+pssc_store_test_stall_next_flush(PG_FUNCTION_ARGS)
+{
+	strlcpy(stall_release_file, text_to_cstring(PG_GETARG_TEXT_PP(0)), MAXPGPATH);
+	((set_hook_fn) main_sym("pssc_store_set_flush_test_hook")) (stall_flush_hook, NULL);
 	PG_RETURN_VOID();
 }
 

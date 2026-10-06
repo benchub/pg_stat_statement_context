@@ -157,7 +157,7 @@ chain(PSSC_PROCESS_UTILITY_PARAMS)
 }
 
 static void
-record_frame(const PsscFrame *frame, double elapsed_ms)
+record_frame(const PsscFrame *frame, double elapsed_ms, PsscTagsetStats *pending)
 {
 	PsscKeyBuffer kb;
 	PsscKey    *key = PSSC_KEY_FROM_BUFFER(&kb);
@@ -167,7 +167,7 @@ record_frame(const PsscFrame *frame, double elapsed_ms)
 							  frame->tags, frame->tags_len,
 							  frame->tags_hash))
 		return;
-	(void) pssc_store_record(key, elapsed_ms);
+	(void) pssc_store_record_with_stats(key, elapsed_ms, pending);
 }
 
 static void
@@ -220,19 +220,25 @@ pssc_ProcessUtility(PSSC_PROCESS_UTILITY_PARAMS)
 	PG_END_TRY();
 
 	/* pstmt may be gone (COMMIT/ROLLBACK): only the snapshot from here on. */
-	if (tracked && frame != NULL)
-	{
-		INSTR_TIME_SET_CURRENT(duration);
-		INSTR_TIME_SUBTRACT(duration, start);
-
-		pssc_frame_refresh(frame);
-		if (frame->queryId == 0)
-			pssc_store_count_utility_missing_queryid();
-		else if (frame->recordable)
-			record_frame(frame, INSTR_TIME_GET_MILLISEC(duration));
-	}
 	if (frame != NULL)
-		pssc_flush_extract_stats();
+	{
+		PsscTagsetStats pending;
+
+		memset(&pending, 0, sizeof(pending));
+		if (tracked)
+		{
+			INSTR_TIME_SET_CURRENT(duration);
+			INSTR_TIME_SUBTRACT(duration, start);
+			pssc_frame_refresh(frame);
+		}
+		pssc_extract_take_stats(&pending);
+		/* both add pending under their own lock hold (and zero it) */
+		if (tracked && frame->queryId == 0)
+			pssc_store_count_utility_missing_queryid(&pending);
+		else if (tracked && frame->recordable)
+			record_frame(frame, INSTR_TIME_GET_MILLISEC(duration), &pending);
+		pssc_store_add_tagset_stats(&pending);
+	}
 }
 
 void

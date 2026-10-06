@@ -606,6 +606,35 @@ SQL script:
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-21: `_info()` and `_reset()` functions
+
+**Description:** Implement `pg_stat_statement_context_info()` (§7), which returns:
+- `entries`, `max_entries`, `dealloc`, `evicted_entries`
+- `buckets`, `oldest_bucket`, the exact `shmem_bytes`
+- `invalid_tags`, `dropped_tags` (tags dropped because the tag set would exceed `max_tagset_bytes`), `heuristic_scans`
+- `regex_compile_failures` (regex lazy-compile failures; these happen per backend, so the backend-local count is flushed into a shared header counter)
+- `utility_missing_queryid`, `stats_reset`
+
+Implement `pg_stat_statement_context_reset()`, which clears all entries and counters and sets `stats_reset`. In the SQL script, run `REVOKE ALL ... FROM PUBLIC` on the reset function.
+
+**Acceptance criteria:**
+- Each counter moves under the activity that drives it:
+  - `dealloc` and `evicted_entries` after churn
+  - `invalid_tags` after malformed tags
+  - `dropped_tags` after a tag set larger than `max_tagset_bytes`
+  - `heuristic_scans` after `append` scans of long statements
+  - `regex_compile_failures` after an injected lazy-compile failure (task 20261005-091225-10), visible from another session
+  - `utility_missing_queryid` under the wrong load order
+- Reset zeroes the counters and updates `stats_reset`.
+- An unprivileged role gets "permission denied" when calling reset.
+
+**Decisions:**
+- 2026-10-05: Add `evicted_entries`, `dropped_tags` (tags dropped for exceeding `max_tagset_bytes`), and `regex_compile_failures` (needs a shared counter) to `_info()`.
+
+**Depends on:** 20261005-091225-15, 20261005-091225-20
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

@@ -208,6 +208,16 @@ extern PGDLLEXPORT PsscStoreResult pssc_store_record(const PsscKey *key,
 													 double elapsed_ms);
 
 /*
+ * The same, and if pending is not NULL also adds those backend-local
+ * extraction counters to the header (and zeroes *pending) under the lock
+ * the record already holds, so a statement's flush costs no extra lock
+ * acquisition. *pending is left untouched if the store is unavailable.
+ */
+extern PGDLLEXPORT PsscStoreResult pssc_store_record_with_stats(const PsscKey *key,
+																double elapsed_ms,
+																PsscTagsetStats *pending);
+
+/*
  * The same with a bucket id the caller already computed from the clock
  * (pssc_store_clock_bucket()). The id is only a lower bound: current_bucket
  * is raised to max(it, the clock bucket under the lock, this id) and the
@@ -273,11 +283,32 @@ extern PGDLLEXPORT void pssc_store_reset(void);
 /* Header counters; false (and *c zeroed) if the store is not set up. */
 extern PGDLLEXPORT bool pssc_store_get_counters(PsscStoreCounters *c);
 
-/* Adds backend-local extraction counters to the shared header. */
+/*
+ * For _info() (DESIGN.md §7): the counters as pssc_store_get_counters(),
+ * and *oldest_bucket, the oldest live slot of any entry (PSSC_BUCKET_NONE
+ * if no slot is live), all under one acquisition of the shared lock, so
+ * the snapshot is wholly before or wholly after any reset. Like every
+ * reader it first raises current_bucket to the clock, and it judges each
+ * entry's slots against the watermark read after copying them (as
+ * pssc_store_foreach()). Scans the whole table. false (*c zeroed,
+ * *oldest_bucket PSSC_BUCKET_NONE) if the store is not set up.
+ */
+extern PGDLLEXPORT bool pssc_store_get_info(PsscStoreCounters *c,
+											int64 *oldest_bucket);
+
+/*
+ * Adds backend-local extraction counters to the shared header. All of them
+ * are added under the store lock (shared), so pssc_store_reset() (exclusive)
+ * never splits one flush; when all are zero (the common case) no lock is
+ * taken. Must not be called while holding the store lock.
+ */
 extern PGDLLEXPORT void pssc_store_add_tagset_stats(const PsscTagsetStats *stats);
 
-/* Counts a recordable utility statement that arrived with queryId 0. */
-extern PGDLLEXPORT void pssc_store_count_utility_missing_queryid(void);
+/*
+ * Counts a recordable utility statement that arrived with queryId 0, and
+ * adds *pending (if not NULL; then zeroed) under the same lock acquisition.
+ */
+extern PGDLLEXPORT void pssc_store_count_utility_missing_queryid(PsscTagsetStats *pending);
 
 /*
  * Testing aid (DESIGN.md §9): while on, every key hashes to the same value,
@@ -298,6 +329,15 @@ typedef void (*PsscStoreRecordTestHook) (void *arg);
 /* (The hook runs after the record has computed its bucket id.) */
 extern PGDLLEXPORT void pssc_store_set_record_test_hook(PsscStoreRecordTestHook hook,
 														void *arg);
+
+/*
+ * Testing aid: if set, every diagnostic-counter flush in this backend calls
+ * hook(arg) while holding the store lock, after adding invalid_tags and
+ * before the other counters, so tests can show that a concurrent reset waits
+ * for the whole flush. NULL (the default) disables it.
+ */
+extern PGDLLEXPORT void pssc_store_set_flush_test_hook(PsscStoreRecordTestHook hook,
+													   void *arg);
 
 /*
  * Testing aid: the next eviction pass in this backend behaves as if its

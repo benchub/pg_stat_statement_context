@@ -135,7 +135,7 @@ pssc_ExecutorFinish(QueryDesc *queryDesc)
 }
 
 static void
-record_frame(QueryDesc *queryDesc, PsscFrame *frame)
+record_frame(QueryDesc *queryDesc, PsscFrame *frame, PsscTagsetStats *pending)
 {
 	PsscKeyBuffer kb;
 	PsscKey    *key = PSSC_KEY_FROM_BUFFER(&kb);
@@ -145,8 +145,9 @@ record_frame(QueryDesc *queryDesc, PsscFrame *frame)
 							  frame->tags, frame->tags_len,
 							  frame->tags_hash))
 		return;
-	(void) pssc_store_record(key,
-							 pssc_exec_ms_from_totaltime(queryDesc->totaltime));
+	(void) pssc_store_record_with_stats(key,
+										pssc_exec_ms_from_totaltime(queryDesc->totaltime),
+										pending);
 }
 
 void
@@ -156,23 +157,23 @@ pssc_flush_extract_stats(void)
 
 	memset(&stats, 0, sizeof(stats));
 	pssc_extract_take_stats(&stats);
-	if (stats.invalid_tags || stats.dropped_tags || stats.heuristic_scans ||
-		stats.regex_compile_failures)
-		pssc_store_add_tagset_stats(&stats);
+	pssc_store_add_tagset_stats(&stats);
 }
 
 static void
 pssc_ExecutorEnd(QueryDesc *queryDesc)
 {
 	PsscFrame  *frame = pssc_frame_lookup(queryDesc);
+	PsscTagsetStats pending;
 
+	memset(&pending, 0, sizeof(pending));
 	if (frame != NULL)
-	{
 		pssc_frame_refresh(frame);
-		if (frame->recordable && queryDesc->totaltime != NULL)
-			record_frame(queryDesc, frame);
-	}
-	pssc_flush_extract_stats();
+	pssc_extract_take_stats(&pending);
+	/* the record adds pending under its own lock hold (and zeroes it) */
+	if (frame != NULL && frame->recordable && queryDesc->totaltime != NULL)
+		record_frame(queryDesc, frame, &pending);
+	pssc_store_add_tagset_stats(&pending);
 
 	if (prev_ExecutorEnd)
 		prev_ExecutorEnd(queryDesc);
