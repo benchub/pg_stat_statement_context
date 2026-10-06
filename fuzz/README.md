@@ -91,7 +91,9 @@ How a run is organised:
   * generates a regex pattern: structured patterns with known capture
     groups, plus broken and over-long ones;
   * sets `extractors` (with keys, position and merge), `tags`,
-    `exclude_tags` and `scan_window` with `ALTER SYSTEM` and a reload;
+    `exclude_tags` and `scan_window` with `ALTER SYSTEM` and a reload, and
+    pins `normalize` to '' (no rules), so every result must report
+    `normalized_tags` = 0 and `normalize_failures` = 0;
   * calls `pg_stat_statement_context_extract()` on generated statements:
     comments that the pattern matches, nested and unterminated comments,
     strings, multibyte text and invalid arguments.
@@ -99,6 +101,10 @@ How a run is organised:
   * The check_hook verdict is predicted (too long, invalid, back-reference,
     more groups than `max_tags`, key count ≠ group count) and compared with
     the server's DETAIL. Core `regexp_matches()` is the authority on syntax.
+    Only the `ALTER SYSTEM`'s own error is classified (its SQLSTATE, message
+    and DETAIL), never an earlier error from the same round. A timeout from
+    the check hook is accepted only when the pre-check timed out too.
+    `--self-test` covers this verdict as well.
   * Every result is checked against the limits, the key list, the encoding
     and the scanner's positional contract.
   * Repeated calls must give identical results.

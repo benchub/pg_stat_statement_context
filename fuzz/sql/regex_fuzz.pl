@@ -10,8 +10,8 @@
 # (max_tags, max_tag_value_len, max_tagset_bytes). Each round:
 #
 #   1. asks the server whether the pattern compiles (regexp_matches), then
-#	  sets extractors/tags/exclude_tags/scan_window with ALTER SYSTEM and
-#	  reloads. A rejection must be the one predicted from the pattern
+#	  sets extractors/tags/exclude_tags/scan_window (and normalize = '')
+#	  with ALTER SYSTEM and reloads. A rejection must be the one predicted from the pattern
 #	  (length, compile error, back-reference, too many groups, keys versus
 #	  groups), and a configuration predicted to be rejected must not pass;
 #   2. runs a batch of extract calls in a UTF8 or a SQL_ASCII database and
@@ -79,7 +79,8 @@ my $ROUND_TIMEOUT_S = 300 * $SLOW;
 my $RESOURCE_RE = qr/invalid memory alloc request size|out of memory|regular expression is too complex|statement timeout/;
 my $CRASH_RE = qr/TRAP:|terminated by signal|PANIC|server process \(PID \d+\) (?:was terminated|exited with exit code)|terminating any other active server processes|server closed the connection|connection to server was lost/;
 my @RESULT_KEYS = sort qw(tags ntags tagset_bytes footer heuristic oom stmt_start
-  stmt_end invalid_tags dropped_tags heuristic_scans regex_compile_failures);
+  stmt_end invalid_tags dropped_tags heuristic_scans regex_compile_failures
+  normalized_tags normalize_failures);
 my $JSON = JSON::PP->new->utf8;
 
 print "regex_fuzz: seed $opt{seed}\n" unless $opt{self_test};
@@ -607,6 +608,11 @@ sub check_result
 	  && $res->{stmt_end} <= $qlen;
 	problem("$where: regex_compile_failures $res->{regex_compile_failures}")
 	  if $res->{regex_compile_failures} != 0;
+	# the driver pins normalize to '' (no rules)
+	for my $k (qw(normalized_tags normalize_failures))
+	{
+		problem("$where: $k $res->{$k} without normalize rules") if $res->{$k} != 0;
+	}
 	problem("$where: heuristic on a $qlen-byte query with scan_window $cfg->{window}")
 	  if $res->{heuristic} && $qlen <= $cfg->{window};
 	problem("$where: negative counter")
@@ -695,6 +701,41 @@ sub check_oracle
 	  if $res->{tagset_bytes} != $used;
 }
 
+# Verdict on a rejected configuration: ($ok, $reason, $detail). Only the
+# check hook's own error is classified: its SQLSTATE from the @@REJECTED
+# line, its message and DETAIL from stderr after the last @@HOOK marker
+# (the pre-check before it may have failed too). The pre-check's timeout is
+# only the condition for accepting a timeout from the check hook.
+sub rejection_verdict
+{
+	my ($out, $err, $want, $fuzzy) = @_;
+	my ($inv) = $out =~ /^\@\@INVALID\|\s*(.*)$/m;
+	$inv //= '';
+	my ($state) = $out =~ /^\@\@REJECTED\|\s*(\w*)$/m;
+	$state //= '';
+	my $pos = rindex $err, "\@\@HOOK\n";
+	my $herr = $pos >= 0 ? substr($err, $pos + 7) : '';
+	my ($msg) = $herr =~ /ERROR:\s*(.*)/;
+	$msg //= '(no error message)';
+	my ($detail) = $herr =~ /DETAIL:\s*(.*)/;
+	$detail //= '(no detail)';
+	my $reason = $pos < 0 ? 'other: no check-hook marker on stderr'
+	  : $state eq '57014' && $msg =~ /statement timeout/ ? 'timeout'
+	  : $state ne '22023' ? "other: SQLSTATE $state: $msg; $detail"
+	  : $detail =~ /longer than \d+ bytes/ ? 'long'
+	  : $detail =~ /is invalid:/ ? 'invalid'
+	  : $detail =~ /back-references/ ? 'backref'
+	  : $detail =~ /more than max_tags/ ? 'max_tags'
+	  : $detail =~ /has \d+ keys? but its pattern has (\d+) capture/ ? "nkeys($1)"
+	  : "other: $msg; $detail";
+	my $ok = $reason eq $want || ($fuzzy && $want ne 'long' && $reason !~ /^other/)
+	  || ($want eq 'resource' && $reason ne 'long' && $reason !~ /^other/);
+	# a pattern whose compile outlasts statement_timeout in core regexp_matches
+	# may also outlast it in the check hook (compiling is interruptible)
+	$ok = 0 if $reason eq 'timeout' && !($want eq 'resource' && $inv =~ /statement timeout/);
+	return ($ok, $reason, $detail);
+}
+
 # --self-test: check_oracle on synthetic results (no server), including
 # results a regression could produce that must be reported.
 if ($opt{self_test})
@@ -728,6 +769,44 @@ if ($opt{self_test})
 		my $got = @problems ? 0 : 1;
 		printf "%s: %s%s\n", $got == $ok ? 'ok' : 'FAILED', $name,
 		  @problems ? " (reported: $problems[0])" : '';
+		$bad++ if $got != $ok;
+	}
+
+	# rejection_verdict on synthetic round output: the pre-check's error
+	# must not be read as the check hook's.
+	my $pre_to = "psql:round.sql:3: ERROR:  canceling statement due to statement timeout\n";
+	my $inv_to = "\@\@INVALID| canceling statement due to statement timeout\n";
+	my $hook = sub {
+		my ($state, $msg, $detail) = @_;
+		return ("\@\@HOOK\npsql:round.sql:6: ERROR:  $msg\n" . (defined $detail ? "DETAIL:  $detail\n" : ''),
+			"\@\@REJECTED| $state\n");
+	};
+	my $gucmsg = 'invalid value for parameter "pg_stat_statement_context.extractors": "regex(...)"';
+	my @vcases = (
+		# [name, pre-check stdout, pre-check stderr, hook [sqlstate, message, detail], want, fuzzy, ok]
+		['pre-check and check hook time out', $inv_to, $pre_to,
+			['57014', 'canceling statement due to statement timeout'], 'resource', 0, 1],
+		['pre-check timeout, unrelated check-hook error', $inv_to, $pre_to,
+			['22012', 'division by zero'], 'resource', 0, 0],
+		['pre-check timeout, length rejection', $inv_to, $pre_to,
+			['22023', $gucmsg, 'Pattern of extractor "regex" is longer than 1024 bytes.'], 'long', 0, 1],
+		['pre-check timeout, check hook times out on a long pattern', $inv_to, $pre_to,
+			['57014', 'canceling statement due to statement timeout'], 'long', 0, 0],
+		['check hook times out, pre-check did not', '', '',
+			['57014', 'canceling statement due to statement timeout'], 'accept', 0, 0],
+		['invalid pattern rejected as invalid', "\@\@INVALID| invalid regular expression: x\n",
+			"psql:round.sql:3: ERROR:  invalid regular expression: x\n",
+			['22023', $gucmsg, 'Pattern of extractor "regex" is invalid: x.'], 'invalid', 0, 1],
+		['check-hook DETAIL with the wrong SQLSTATE', '', '',
+			['XX000', $gucmsg, 'Pattern of extractor "regex" is longer than 1024 bytes.'], 'long', 0, 0],
+	);
+	for my $t (@vcases)
+	{
+		my ($name, $pout, $perr, $h, $want, $fuzzy, $ok) = @$t;
+		my ($herr, $hout) = $hook->(@$h);
+		my ($got, $reason) = rejection_verdict($pout . $hout, $perr . $herr, $want, $fuzzy);
+		$got = $got ? 1 : 0;
+		printf "%s: %s (reason '%s', want '%s')\n", $got == $ok ? 'ok' : 'FAILED', $name, $reason, $want;
 		$bad++ if $got != $ok;
 	}
 	exit($bad ? 1 : 0);
@@ -882,11 +961,13 @@ sub run_round
 	  . "-- seed $opt{seed} round $cur_round (round seed $rseed), $db\n"
 	  . "SELECT '\@\@VALID|' || count(*) FROM regexp_matches('' COLLATE \"C\", " . sql_std_lit($patb) . ");\n"
 	  . "\\if :ERROR\n\\echo '\@\@INVALID|' :'LAST_ERROR_MESSAGE'\n\\endif\n"
+	  . "\\warn '\@\@HOOK'\n"
 	  . "ALTER SYSTEM SET pg_stat_statement_context.extractors = $extlit;\n"
-	  . "\\if :ERROR\n\\echo '\@\@REJECTED'\n\\quit\n\\endif\n"
+	  . "\\if :ERROR\n\\echo '\@\@REJECTED|' :LAST_ERROR_SQLSTATE\n\\quit\n\\endif\n"
 	  . "ALTER SYSTEM SET pg_stat_statement_context.tags = " . sql_std_lit($tags) . ";\n"
 	  . "ALTER SYSTEM SET pg_stat_statement_context.exclude_tags = " . sql_std_lit($excl) . ";\n"
 	  . "ALTER SYSTEM SET pg_stat_statement_context.scan_window = $window;\n"
+	  . "ALTER SYSTEM SET pg_stat_statement_context.normalize = '';\n"
 	  . "SELECT pg_reload_conf() AS reloaded \\gset\n\\set polls 0\n\\i $files{'wait.sql'}\n"
 	  . "\\if :cfg_ok\n\\echo '\@\@CONFIG_OK'\n\\else\n\\echo '\@\@CONFIG_TIMEOUT'\n\\quit\n\\endif\n";
 	spit($files{'wait.sql'},
@@ -894,6 +975,7 @@ sub run_round
 		  . "   AND current_setting('pg_stat_statement_context.tags') = " . sql_std_lit($tags) . "\n"
 		  . "   AND current_setting('pg_stat_statement_context.exclude_tags') = " . sql_std_lit($excl) . "\n"
 		  . "   AND (SELECT setting FROM pg_settings WHERE name = 'pg_stat_statement_context.scan_window') = '$window'\n"
+		  . "   AND current_setting('pg_stat_statement_context.normalize') = ''\n"
 		  . "   AS cfg_ok, :polls + 1 AS polls, :polls >= 500 AS cfg_timeout \\gset\n"
 		  . "\\if :cfg_ok\n\\elif :cfg_timeout\n\\else\nSELECT pg_sleep(0.01) \\gset\n\\i $files{'wait.sql'}\n\\endif\n");
 
@@ -954,22 +1036,9 @@ sub run_round
 	  : $st->{ngroups} > $limits{max_tags} ? 'max_tags'
 	  : $nkeys != $st->{ngroups} ? "nkeys($st->{ngroups})"
 	  : 'accept';
-	if ($out =~ /^\@\@REJECTED$/m)
+	if ($out =~ /^\@\@REJECTED\|/m)
 	{
-		my ($detail) = $err =~ /DETAIL:\s*(.*)/;
-		$detail //= '(no detail)';
-		my $reason = $err =~ /canceling statement due to statement timeout/ ? 'timeout'
-		  : $detail =~ /longer than \d+ bytes/ ? 'long'
-		  : $detail =~ /is invalid:/ ? 'invalid'
-		  : $detail =~ /back-references/ ? 'backref'
-		  : $detail =~ /more than max_tags/ ? 'max_tags'
-		  : $detail =~ /has \d+ keys? but its pattern has (\d+) capture/ ? "nkeys($1)"
-		  : "other: $detail";
-		my $ok = $reason eq $want || ($st->{fuzzy} && $want ne 'long' && $reason !~ /^other/)
-		  || ($want eq 'resource' && $reason ne 'long' && $reason !~ /^other/);
-		# a pattern whose compile outlasts statement_timeout in core regexp_matches
-		# may also outlast it in the check hook (compiling is interruptible)
-		$ok = 0 if $reason eq 'timeout' && !($want eq 'resource' && $inv =~ /statement timeout/);
+		my ($ok, $reason, $detail) = rejection_verdict($out, $err, $want, $st->{fuzzy});
 		unless ($ok)
 		{
 			fail_run("configuration rejected as '$reason' but predicted '$want'\n"

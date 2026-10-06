@@ -52,7 +52,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
 | 20261006-021334-1 | Bound regex compile cost (pathological patterns stall first tagged query) | 20261005-091225-10 | no | ready |
-| 20261006-021621-1 | SQL fuzzer: classify only the check hook's own error | 20261005-091225-25 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
@@ -190,22 +189,6 @@ The execution-time CPU limits (item -10) don't cover compile. Options (decide an
 - A test covers the case (TAP or pg_regress).
 
 **Depends on:** 20261005-091225-10
-**Open questions:** none
-**Status:** ready
-
-### 20261006-021621-1: SQL fuzzer: classify only the check hook's own error
-
-**Description:** Left over from item -25 after its second review round. In `fuzz/sql/regex_fuzz.pl` (around lines 959–972), `$err` holds stderr from the whole round, so a statement timeout from the earlier `regexp_matches()` pre-check gets read as the check hook's rejection reason. That has two effects:
-- Once the pre-check times out, an unrelated check-hook error (e.g. `division by zero`) is accepted as an expected timeout, hiding a real bug.
-- A correct length-limit rejection after a pre-check timeout counts as a false failure (`want='long'` but `reason='timeout'`).
-
-Fix: capture the check hook's own error message and SQLSTATE right after `ALTER SYSTEM` and classify only that. Keep the pre-check timeout only as the condition for accepting a timeout from the check hook itself.
-
-**Acceptance criteria:**
-- New `--self-test` cases cover both scenarios above and give the right verdict.
-- A short SQL fuzz run against the assert build still passes.
-
-**Depends on:** 20261005-091225-25
 **Open questions:** none
 **Status:** ready
 

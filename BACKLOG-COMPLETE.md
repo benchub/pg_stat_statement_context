@@ -861,6 +861,22 @@ Remove the matching cases from the compat test module (`test/modules/pssc_compat
 **Open questions:** none
 **Status:** done
 
+### 20261006-021621-1: SQL fuzzer: classify only the check hook's own error
+
+**Description:** Left over from item -25 after its second review round. In `fuzz/sql/regex_fuzz.pl` (around lines 959–972), `$err` holds stderr from the whole round, so a statement timeout from the earlier `regexp_matches()` pre-check gets read as the check hook's rejection reason. That has two effects:
+- Once the pre-check times out, an unrelated check-hook error (e.g. `division by zero`) is accepted as an expected timeout, hiding a real bug.
+- A correct length-limit rejection after a pre-check timeout counts as a false failure (`want='long'` but `reason='timeout'`).
+
+Fix: capture the check hook's own error message and SQLSTATE right after `ALTER SYSTEM` and classify only that. Keep the pre-check timeout only as the condition for accepting a timeout from the check hook itself.
+
+**Acceptance criteria:**
+- New `--self-test` cases cover both scenarios above and give the right verdict.
+- A short SQL fuzz run against the assert build still passes.
+
+**Depends on:** 20261005-091225-25
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
