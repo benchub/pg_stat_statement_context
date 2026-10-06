@@ -390,6 +390,32 @@ for my $action (qw(sleep regsleep))
 		"compile over the time limit ($action): stays disabled, not retried or recounted");
 	session_close($s);
 }
+# The deadline can expire after the busy injection saw no cancel pending but
+# before it put the deadline off (the backend was descheduled there). That
+# cancel is still the deadline's, not a genuine one: the attempt must still
+# spend the limit in CPU time, not be taken for a stall and retried.
+# 'racesleep' / 'raceregsleep' make the deadline due exactly there.
+for my $action (qw(racesleep raceregsleep))
+{
+	my $s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, '$action', 1)");
+	my $t0 = time;
+	my $r = sex($s, $Q);
+	my $dt = time - $t0;
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o 1',
+		"compile over the time limit, deadline due as it is put off ($action): extractor disabled, not retried");
+	# the hook waits up to 5 s for the deadline's signal
+	cmp_ok($dt, '<', 4, "compile over the time limit, deadline due as it is put off ($action): aborted promptly (${dt}s)");
+	cmp_ok($dt, '>=', 0.9 * $LIMIT_MS / 1000,
+		"compile over the time limit, deadline due as it is put off ($action): not before the limit");
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1,
+		"compile over the time limit, deadline due as it is put off ($action): one attempt");
+	is(rstats($s), '1|0|1|1',
+		"compile over the time limit, deadline due as it is put off ($action): one compiled, one failed");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42',
+		"compile over the time limit, deadline due as it is put off ($action): no cancel left pending");
+	session_close($s);
+}
 # The busy injections spend the limit in CPU time before letting it expire
 # (see above). They must still honor a genuine cancel, statement_timeout or
 # termination right away, and give up (with a WARNING) after a few seconds

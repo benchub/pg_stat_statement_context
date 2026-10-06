@@ -282,6 +282,8 @@ typedef enum InjectAction
 	INJ_REGCANCEL,				/* PG14/15 engine: cancel pending, REG_CANCEL */
 	INJ_SLEEP,					/* busy past the limit in CPU time, then CFI loop */
 	INJ_REGSLEEP,				/* as SLEEP, then poll for cancel, REG_CANCEL (PG14/15) */
+	INJ_RACESLEEP,				/* SLEEP, the deadline due as it is put off */
+	INJ_RACEREGSLEEP,			/* REGSLEEP, the deadline due as it is put off */
 	INJ_STALL,					/* CFI loop, sleeping (descheduled, no CPU) */
 	INJ_REGSTALL,				/* cancel poll, sleeping; REG_CANCEL */
 	INJ_LATEINT,				/* deadline, then a real SIGINT, then CFI */
@@ -331,24 +333,73 @@ cpu_ms(void)
  * been used after BUSY_WALL_LIMIT_MS of wall-clock time (a starved host),
  * the injection gives up with a WARNING (the test then fails visibly) and
  * lets the deadline expire.
+ *
+ * With race (racesleep / raceregsleep) the deadline is made due right
+ * between seeing no cancel pending and putting it off, which SIGALRM being
+ * blocked there must survive.
  */
 #define BUSY_WALL_LIMIT_MS 5000
 
+/*
+ * Test hook for the racesleep / raceregsleep injections: makes the deadline
+ * due right after busy_past_limit() saw no cancel pending, before it puts
+ * the deadline off. Returns once the deadline's SIGALRM has been handled
+ * (QueryCancelPending) or is held pending by the signal mask, or after
+ * BUSY_WALL_LIMIT_MS.
+ */
 static void
-busy_past_limit(void)
+deadline_due_now(void (*expire) (int))
+{
+	expire(1);
+	for (int i = 0; i < BUSY_WALL_LIMIT_MS && !QueryCancelPending; i++)
+	{
+#ifndef WIN32
+		sigset_t	pending;
+
+		if (sigpending(&pending) == 0 && sigismember(&pending, SIGALRM))
+			return;
+#endif
+		pg_usleep(1000L);
+	}
+}
+
+static void
+busy_past_limit(bool race)
 {
 	int			limit = *(int *) main_sym("pssc_regex_compile_limit_ms");
 	void		(*expire) (int) = (void (*) (int)) main_sym("pssc_regex_test_expire_in");
-	bool		was_pending = QueryCancelPending;
+	bool		was_pending;
 	double		start = cpu_ms();
 	instr_time	wstart;
 	instr_time	now;
+#ifndef WIN32
+	sigset_t	block;
+	sigset_t	old;
+#endif
 
 	if (limit <= 0)
 		return;
 	INSTR_TIME_SET_CURRENT(wstart);
+
+	/*
+	 * The deadline (SIGALRM) must not fire between seeing no cancel pending
+	 * and putting it off, or its cancel would be taken for a genuine one. If
+	 * it falls due meanwhile, the signal stays pending until it is put off;
+	 * the timeout handler then finds nothing due.
+	 */
+#ifndef WIN32
+	sigemptyset(&block);
+	sigaddset(&block, SIGALRM);
+	sigprocmask(SIG_BLOCK, &block, &old);
+#endif
+	was_pending = QueryCancelPending;
+	if (race && !was_pending)
+		deadline_due_now(expire);
 	if (!was_pending)
 		expire(60000);
+#ifndef WIN32
+	sigprocmask(SIG_SETMASK, &old, NULL);
+#endif
 	while (cpu_ms() - start < limit)
 	{
 		if (ProcDiePending || (!was_pending && QueryCancelPending))
@@ -404,15 +455,19 @@ inject_hook(int phase, int index)
 			return PSSC_TEST_REG_CANCEL;
 		case INJ_SLEEP:
 		case INJ_REGSLEEP:
-			busy_past_limit();
+		case INJ_RACESLEEP:
+		case INJ_RACEREGSLEEP:
+			busy_past_limit(inj_action == INJ_RACESLEEP ||
+							inj_action == INJ_RACEREGSLEEP);
 			/* FALLTHROUGH */
 		case INJ_STALL:
 		case INJ_REGSTALL:
 			{
 				/* up to 60 s, using CPU (as a slow compile) or not */
 				TimestampTz end = TimestampTzPlusMilliseconds(GetCurrentTimestamp(), 60000);
-				bool		reg = inj_action == INJ_REGSLEEP || inj_action == INJ_REGSTALL;
-				bool		busy = inj_action == INJ_SLEEP || inj_action == INJ_REGSLEEP;
+				bool		reg = inj_action == INJ_REGSLEEP || inj_action == INJ_RACEREGSLEEP ||
+					inj_action == INJ_REGSTALL;
+				bool		busy = inj_action != INJ_STALL && inj_action != INJ_REGSTALL;
 
 				while (GetCurrentTimestamp() < end)
 				{
@@ -486,7 +541,8 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 		[INJ_NONE] = "none", [INJ_ESPACE] = "espace", [INJ_ETOOBIG] = "etoobig",
 		[INJ_OOM] = "oom", [INJ_ERROR] = "error", [INJ_CANCEL] = "cancel",
 		[INJ_REGCANCEL] = "regcancel", [INJ_SLEEP] = "sleep",
-		[INJ_REGSLEEP] = "regsleep", [INJ_STALL] = "stall",
+		[INJ_REGSLEEP] = "regsleep", [INJ_RACESLEEP] = "racesleep",
+		[INJ_RACEREGSLEEP] = "raceregsleep", [INJ_STALL] = "stall",
 		[INJ_REGSTALL] = "regstall", [INJ_LATEINT] = "lateint",
 		[INJ_LATEREGINT] = "lateregint", [INJ_LATEWAIT] = "latewait",
 		[INJ_LATECONFLICT] = "lateconflict", [INJ_LATEREGCONFLICT] = "lateregconflict",
