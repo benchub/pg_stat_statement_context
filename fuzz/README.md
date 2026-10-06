@@ -134,6 +134,11 @@ rather than predicted:
 * or it may reject them, including by timing out, since compiling is
   interruptible.
 
+A pattern that takes longer than 100 ms to compile in the check hook is
+rejected by the compile time limit (`took longer than 100 ms`). That
+verdict is accepted for any pattern within the length limit, because the
+time limit is checked before the pattern's other compile verdicts.
+
 ## Checking that a harness catches bugs (mutation check)
 
 Never edit `src/` for this. Copy it to `tmp/`, inject the bug into the copy,

@@ -335,6 +335,32 @@ Format-specific parameters:
   - Other errors (e.g. OOM) disable the extractor for the backend: a compile
     error until the next config change, counted in `regex_compile_failures`.
     A match error simply yields no further pairs and is not counted.
+
+  Compile time (item 20261006-021334-1): compiling a pattern (regex extractor
+  or `normalize` rule) is limited to 100 ms (`PSSC_REGEX_COMPILE_LIMIT_MS`, a
+  constant). The fuzzer found patterns such as
+  `((?:(?:$)|\Zda|(?<!1)|\S){0,255}` that take tens of seconds.
+  - The GUC check hooks reject a slower pattern with an errdetail. In a
+    backend (`SET`, `ALTER SYSTEM`) the test compile is aborted at the limit;
+    the postmaster has no timer, so it measures CPU time and runs to
+    completion (a hand-edited `postgresql.conf` can still stall a reload).
+  - A client backend's lazy compile runs under a `USER_TIMEOUT` that raises a
+    cancel internally; the engine notices it (`REG_CANCEL` on PG14/15, a
+    thrown cancel on PG16+). It counts as a compile failure
+    (`regex_compile_failures`, extractor or rule disabled for the backend),
+    never an error for the statement.
+  - Genuine cancels still propagate: while the limit is armed, wrappers on
+    SIGINT and SIGUSR1 (the PG14–16 recovery-conflict path, the only other
+    setter of `QueryCancelPending`) record a foreign cancel; SIGALRM is
+    blocked inside the SIGUSR1 wrapper, and SIGINT/SIGUSR1 while classifying.
+    After our own cancel is consumed `InterruptPending` is set again, so
+    other pending interrupts (`transaction_timeout`, PG17+ recovery
+    conflicts) are not lost.
+  - An attempt that hit the limit but used under half of it in CPU time was a
+    scheduling stall and is retried, up to 3 attempts (≤ ~300 ms per pattern).
+    20261006-080948-1 tracks discarding an interrupted attempt's memory.
+  - With interrupts held off the compile is put off. Processes other than
+    client backends compile without a bound.
 - **appname** (done, item -38): `appname(format=sqlcommenter|marginalia|regex)`
   parses `application_name` instead of comment text, using the named format's
   rules and parameters (`url_decode`; `kv_sep`/`pair_sep`; `pattern`/`keys`

@@ -28,16 +28,32 @@
  * a pending cancel is raised as the usual ERROR. A failed compile that is
  * not an interrupt disables the extractor for this backend until the next
  * generation change and counts in PsscTagsetStats.regex_compile_failures;
- * an interrupted compile is retried next time. A failed match yields no
- * (further) pairs for that comment and is not counted.
+ * an interrupted compile is retried next time.
+ *
+ * Compile time. Each lazy compile runs under the compile time limit
+ * (pssc_regex_compile()): in a client backend a compile still running at
+ * the limit is aborted through the engine's cancel check and counts as a
+ * compile failure, without an error for the statement; a genuine cancel or
+ * timeout during the compile still propagates. A compile that hit the limit
+ * because it was descheduled (little CPU time used) is retried, a few
+ * times. With interrupts held off the compile is put off (retried next
+ * time), since it could not be bounded.
+ *
+ * A failed match yields no (further) pairs for that comment and is not
+ * counted.
  */
 #include "postgres.h"
+
+#include <signal.h>
+#include <time.h>
 
 #include "catalog/pg_collation.h"
 #include "miscadmin.h"
 #include "mb/pg_wchar.h"
+#include "portability/instr_time.h"
 #include "regex/regex.h"
 #include "utils/memutils.h"
+#include "utils/timeout.h"
 
 #include "compat.h"
 #include "extract.h"
@@ -59,6 +75,7 @@ typedef struct Slot
 } Slot;
 
 PsscRegexTestHook pssc_regex_test_hook = NULL;
+int			pssc_regex_compile_limit_ms = PSSC_REGEX_COMPILE_LIMIT_MS;
 
 static Slot slots[PSSC_MAX_EXTRACTORS];
 static Slot norm_slots[PSSC_MAX_NORMALIZE_RULES];
@@ -147,10 +164,330 @@ interrupt_pending(void)
 }
 
 /*
+ * Compile time limit (pssc_regex_compile()). In a client backend the limit
+ * is a USER_TIMEOUT whose handler raises a query cancel, so the engine
+ * aborts the compile at its next interrupt check: PG14/15's engine returns
+ * REG_CANCEL, PG16+'s throws the usual "canceling statement" ERROR from
+ * CHECK_FOR_INTERRUPTS(). While the timeout is armed, SIGINT goes through
+ * compile_sigint_handler(), which notes that a genuine cancel (a client
+ * cancel request, or statement_timeout / lock_timeout, which signal the
+ * backend itself) arrived and then runs the regular handler. The only other
+ * source of QueryCancelPending is a recovery conflict on PG14-16, set by
+ * the SIGUSR1 (procsignal) handler; compile_sigusr1_handler() detects it.
+ * On disarm the cancel is ours, and is consumed, only if the deadline fired
+ * and nothing else requested a cancel; otherwise it is left to propagate as
+ * usual. Consuming it re-arms InterruptPending: ProcessInterrupts() clears
+ * it before raising the cancel, and other interrupts processed after the
+ * cancel (recovery conflicts on PG17+, transaction_timeout, ...) may still
+ * be pending.
+ */
+typedef enum DeadlineResult
+{
+	DEADLINE_NOT_FIRED,			/* the limit did not expire */
+	DEADLINE_OWN,				/* expired; its cancel was the only one */
+	DEADLINE_SHARED				/* expired, and a genuine cancel came too */
+} DeadlineResult;
+
+#ifndef WIN32
+static TimeoutId compile_timeout_id;
+static bool compile_timeout_registered = false;
+static volatile sig_atomic_t deadline_armed = false;
+static volatile sig_atomic_t deadline_fired = false;
+static volatile sig_atomic_t foreign_cancel = false;
+static struct sigaction saved_sigint;
+static struct sigaction saved_sigusr1;
+
+static void
+compile_deadline_handler(void)
+{
+	if (!deadline_armed)
+		return;
+	deadline_fired = true;
+	if (QueryCancelPending)
+		foreign_cancel = true;
+	else
+		QueryCancelPending = true;
+	InterruptPending = true;
+}
+
+static void
+compile_sigint_handler(int signo)
+{
+	foreign_cancel = true;
+	saved_sigint.sa_handler(signo);
+}
+
+/*
+ * Hides QueryCancelPending from the regular handler, so that one it sets
+ * (a PG14-16 recovery conflict) is seen even after the deadline set it.
+ */
+static void
+compile_sigusr1_handler(int signo)
+{
+	bool		was_pending = QueryCancelPending;
+
+	QueryCancelPending = false;
+	saved_sigusr1.sa_handler(signo);
+	if (QueryCancelPending)
+		foreign_cancel = true;
+	else if (was_pending)
+		QueryCancelPending = true;
+}
+
+static bool
+plain_handler(int signo, struct sigaction *sa)
+{
+	return sigaction(signo, NULL, sa) == 0 && !(sa->sa_flags & SA_SIGINFO) &&
+		sa->sa_handler != SIG_IGN && sa->sa_handler != SIG_DFL;
+}
+
+/*
+ * Arms the limit, if this process can: a regular client backend past its
+ * startup (InitializeTimeouts() would forget the registration) with
+ * interrupts not held off and plain SIGINT and SIGUSR1 handlers. Returns
+ * false if not.
+ */
+static bool
+compile_deadline_arm(int limit_ms)
+{
+	struct sigaction act;
+
+	if (!IsUnderPostmaster || MyBackendType != B_BACKEND ||
+		!IsNormalProcessingMode())
+		return false;
+	if (!plain_handler(SIGINT, &saved_sigint) ||
+		!plain_handler(SIGUSR1, &saved_sigusr1))
+		return false;
+	if (!compile_timeout_registered)
+	{
+		compile_timeout_id = RegisterTimeout(USER_TIMEOUT, compile_deadline_handler);
+		compile_timeout_registered = true;
+	}
+	deadline_fired = false;
+	foreign_cancel = false;
+	act = saved_sigint;
+	act.sa_handler = compile_sigint_handler;
+	if (sigaction(SIGINT, &act, NULL) != 0)
+		return false;
+	act = saved_sigusr1;
+	act.sa_handler = compile_sigusr1_handler;
+	/*
+	 * The deadline (SIGALRM) must not fire while the wrapper has hidden
+	 * QueryCancelPending, or its cancel would be taken for a foreign one.
+	 */
+	sigaddset(&act.sa_mask, SIGALRM);
+	if (sigaction(SIGUSR1, &act, NULL) != 0)
+	{
+		sigaction(SIGINT, &saved_sigint, NULL);
+		return false;
+	}
+	deadline_armed = true;
+	enable_timeout_after(compile_timeout_id, limit_ms);
+	return true;
+}
+
+/*
+ * Disarms the limit. With DEADLINE_OWN its cancel is no longer pending.
+ * SIGINT and SIGUSR1 are blocked while deciding and restoring their
+ * handlers, so a genuine cancel is never lost.
+ */
+static DeadlineResult
+compile_deadline_disarm(void)
+{
+	sigset_t	block;
+	sigset_t	old;
+	DeadlineResult res;
+
+	disable_timeout(compile_timeout_id, false);
+	deadline_armed = false;
+	sigemptyset(&block);
+	sigaddset(&block, SIGINT);
+	sigaddset(&block, SIGUSR1);
+	sigprocmask(SIG_BLOCK, &block, &old);
+	res = !deadline_fired ? DEADLINE_NOT_FIRED
+		: foreign_cancel ? DEADLINE_SHARED : DEADLINE_OWN;
+	if (res == DEADLINE_OWN)
+	{
+		QueryCancelPending = false;
+		InterruptPending = true;
+	}
+	sigaction(SIGINT, &saved_sigint, NULL);
+	sigaction(SIGUSR1, &saved_sigusr1, NULL);
+	sigprocmask(SIG_SETMASK, &old, NULL);
+	return res;
+}
+#else
+static bool
+compile_deadline_arm(int limit_ms)
+{
+	return false;
+}
+
+static DeadlineResult
+compile_deadline_disarm(void)
+{
+	return DEADLINE_NOT_FIRED;
+}
+#endif
+
+/* The test hook for test_phase (if >= 0), then the engine. May throw. */
+static int
+run_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat, size_t len,
+			int test_phase, int test_index)
+{
+	int			rc = REG_OKAY;
+
+	if (test_phase >= 0 && pssc_regex_test_hook != NULL)
+		rc = pssc_regex_test_hook(test_phase, test_index);
+	if (rc == REG_OKAY)
+		rc = pssc_regcomp(cxt, re, pat, len, REG_ADVANCED, C_COLLATION_OID);
+	return rc;
+}
+
+/*
+ * CPU time this process has used, in ms; without a CPU clock, wall time
+ * (then a stall can't be told from a slow compile).
+ */
+static double
+cpu_time_ms(void)
+{
+#ifdef CLOCK_PROCESS_CPUTIME_ID
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0)
+		return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+#endif
+	{
+		instr_time	now;
+
+		INSTR_TIME_SET_CURRENT(now);
+		return INSTR_TIME_GET_MILLISEC(now);
+	}
+}
+
+/*
+ * One attempt of pssc_regex_compile(): the same contract, with the limit
+ * on wall-clock time when a timer can be armed, else on CPU time.
+ */
+static int
+compile_attempt(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
+				size_t len, bool strict, int test_phase, int test_index,
+				int limit, bool *timed)
+{
+	MemoryContext oldcxt = CurrentMemoryContext;
+	uint32		save_holdoff = InterruptHoldoffCount;
+	uint32		save_cancel_holdoff = QueryCancelHoldoffCount;
+	volatile int rc = REG_OKAY;
+	volatile bool aborted = false;
+	bool		held_off;
+	double		start;
+
+	*timed = false;
+	held_off = InterruptHoldoffCount != 0 || QueryCancelHoldoffCount != 0 ||
+		CritSectionCount != 0;
+	if (!held_off && compile_deadline_arm(limit))
+	{
+		*timed = true;
+		PG_TRY();
+		{
+			rc = run_compile(cxt, re, pat, len, test_phase, test_index);
+		}
+		PG_CATCH();
+		{
+			DeadlineResult res;
+
+			MemoryContextSwitchTo(oldcxt);
+			res = compile_deadline_disarm();
+
+			/*
+			 * The cancel raised is ours if only the deadline asked for one.
+			 * If a genuine cancel came too, but after ProcessInterrupts()
+			 * consumed the flag, it is still pending and is raised at the
+			 * next CHECK_FOR_INTERRUPTS(); otherwise this is the genuine
+			 * one.
+			 */
+			if (geterrcode() != ERRCODE_QUERY_CANCELED ||
+				!(res == DEADLINE_OWN ||
+				  (res == DEADLINE_SHARED && QueryCancelPending)))
+				PG_RE_THROW();
+			FlushErrorState();
+			InterruptHoldoffCount = save_holdoff;
+			QueryCancelHoldoffCount = save_cancel_holdoff;
+			InterruptPending = true;
+			aborted = true;
+		}
+		PG_END_TRY();
+		if (aborted)
+			return PSSC_REGEX_COMPILE_TOO_SLOW;
+		if (compile_deadline_disarm() == DEADLINE_OWN)
+		{
+			/* REG_CANCEL from PG14/15, or finished before noticing */
+			if (rc != REG_OKAY)
+				return PSSC_REGEX_COMPILE_TOO_SLOW;
+			if (strict)
+			{
+				pssc_regfree(re);
+				return PSSC_REGEX_COMPILE_TOO_SLOW;
+			}
+		}
+		return rc;
+	}
+
+	/*
+	 * No timer: interrupts are held off (a client backend puts the lazy
+	 * compile off), or not a client backend (e.g. the postmaster checking
+	 * postgresql.conf, a background worker): unbounded.
+	 */
+	if (!strict && held_off && IsUnderPostmaster && MyBackendType == B_BACKEND)
+		return PSSC_REGEX_COMPILE_DEFERRED;
+	start = cpu_time_ms();
+	rc = run_compile(cxt, re, pat, len, test_phase, test_index);
+	if (strict && rc == REG_OKAY && cpu_time_ms() - start > limit)
+	{
+		pssc_regfree(re);
+		return PSSC_REGEX_COMPILE_TOO_SLOW;
+	}
+	return rc;
+}
+
+/*
+ * The limit is wall-clock time where a timer bounds it, so a compile that
+ * was descheduled (a loaded host or VM) could hit it with a normal pattern.
+ * An attempt over the limit is retried, up to PSSC_REGEX_COMPILE_ATTEMPTS
+ * attempts, if it used less than half the limit in CPU time: then most of
+ * the time went to a stall, not to the pattern. Interrupts pending from
+ * the attempt are processed before the next one.
+ */
+int
+pssc_regex_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
+				   size_t len, bool strict, int test_phase, int test_index)
+{
+	int			limit = pssc_regex_compile_limit_ms;
+	int			rc;
+
+	if (limit <= 0)
+		return run_compile(cxt, re, pat, len, test_phase, test_index);
+	for (int attempt = 1;; attempt++)
+	{
+		double		start = cpu_time_ms();
+		bool		timed;
+
+		rc = compile_attempt(cxt, re, pat, len, strict, test_phase,
+							 test_index, limit, &timed);
+		if (rc != PSSC_REGEX_COMPILE_TOO_SLOW || !timed ||
+			attempt >= PSSC_REGEX_COMPILE_ATTEMPTS ||
+			cpu_time_ms() - start >= limit / 2.0)
+			return rc;
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+/*
  * Compiles pat[0, patlen) into slot, for extractor or rule index (test hook
  * phases ctx_phase and comp_phase). The compiled regex must have between
  * nsub_min and nsub_max capture groups and no back-references. On return
- * the slot is READY or FAILED, or still EMPTY if an interrupt is pending.
+ * the slot is READY or FAILED (also when over the compile time limit), or
+ * still EMPTY if an interrupt is pending or interrupts are held off.
  * Interrupts propagate as ERROR (the slot is then EMPTY and its context
  * gone).
  */
@@ -192,11 +529,8 @@ compile_slot(Slot *slot, int index, int ctx_phase, int comp_phase,
 											  ALLOCSET_SMALL_SIZES);
 			wpat = MemoryContextAlloc(exec_cxt, sizeof(pg_wchar) * (patlen + 1));
 			wlen = pg_mb2wchar_with_len(pat, wpat, patlen);
-			if (pssc_regex_test_hook != NULL)
-				rc = pssc_regex_test_hook(comp_phase, index);
-			if (rc == REG_OKAY)
-				rc = pssc_regcomp(slot->cxt, &slot->re, wpat, wlen,
-								  REG_ADVANCED, C_COLLATION_OID);
+			rc = pssc_regex_compile(slot->cxt, &slot->re, wpat, wlen, false,
+									comp_phase, index);
 		}
 	}
 	PG_CATCH();
@@ -231,7 +565,9 @@ compile_slot(Slot *slot, int index, int ctx_phase, int comp_phase,
 	if (slot->cxt != NULL)
 		MemoryContextDelete(slot->cxt);
 	slot->cxt = NULL;
-	if (rc != REG_OKAY && interrupt_pending())
+	if (rc == PSSC_REGEX_COMPILE_DEFERRED ||
+		(rc != REG_OKAY && rc != PSSC_REGEX_COMPILE_TOO_SLOW &&
+		 interrupt_pending()))
 	{
 		transient_failures++;
 		return;					/* held off: retry next time */

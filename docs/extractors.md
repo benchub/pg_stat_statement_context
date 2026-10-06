@@ -205,12 +205,42 @@ A custom format: `regex(pattern='...', keys='k1|k2', position=any)`.
   body. An optional group that didn't match produces no tag. The first value
   for a key wins.
 - Limits: the pattern is at most 1 kB, has at most `max_tags` capture groups,
-  and may not use back-references.
+  may not use back-references, and must compile in at most **100 ms**.
 
-If a regex fails to compile in a backend at run time (for example out of
-memory), that extractor is disabled in that backend until the next
-configuration change, and the failure is counted in
-`_info().regex_compile_failures`. The user's statement never fails.
+Some short patterns take the regex engine seconds or minutes to compile,
+for example a bounded repetition of a group that can match the empty string
+(`((?:(?:$)|\Zda|(?<!1)|\S){0,255})`). The compile time limit keeps such a
+pattern from stalling queries:
+
+- When the value is set or reloaded, a pattern whose test compile takes
+  longer than 100 ms is rejected (`DETAIL: Compiling the pattern of
+  extractor "regex" took longer than 100 ms.`). `ALTER SYSTEM` stops the
+  compile at the limit, so the value is never written. A value added to
+  `postgresql.conf` by hand is still rejected, but the postmaster can't stop
+  its compile early, so a reload can take as long as that compile.
+- Each backend compiles the pattern again on its first tagged statement. In
+  a client backend, a compile still running after 100 ms is stopped and
+  counts as a compile failure (see below). The statement isn't cancelled
+  and doesn't fail. Other processes (for example background workers) have
+  no limit at run time.
+- In a backend the limit is elapsed time. If a compile reaches it while
+  having used less than half of it in CPU time, the backend was mostly
+  waiting for the CPU (a loaded host or VM), so the compile is retried, up
+  to 3 attempts in all. A stall then can't reject or disable a normal
+  pattern, and a statement waits at most about 300 ms for a slow one. The
+  postmaster measures CPU time only.
+- The limit is per pattern. Compile times vary between machines and with
+  load, so a pattern close to the limit may be accepted when it's set and
+  still be stopped in some backends. Keep patterns well below the limit:
+  normal patterns compile in well under 1 ms.
+
+If a regex fails to compile in a backend at run time (out of memory, or
+over the compile time limit), that extractor is disabled in that backend
+until the next configuration change, and the failure is counted in
+`_info().regex_compile_failures`. The user's statement never fails. A
+query cancel, `statement_timeout`, `transaction_timeout`, recovery conflict
+or other interrupt that arrives during the compile is still handled as
+usual.
 
 ### `appname`
 
@@ -286,8 +316,9 @@ value is rejected and the previous one stays in effect. It is rejected for:
 - empty separators, separators longer than 8 bytes, or a `kv_sep` that
   contains `pair_sep`;
 - for `regex`: a missing `pattern` or `keys`, an invalid pattern, a pattern
-  over 1 kB, back-references, more capture groups than `max_tags`, or a number
-  of `keys` different from the number of capture groups;
+  over 1 kB, a pattern that takes longer than 100 ms to compile,
+  back-references, more capture groups than `max_tags`, or a number of `keys`
+  different from the number of capture groups;
 - for `appname`: a missing or unknown `format`, `position`, or a parameter of
   another format (e.g. `kv_sep` with `format=sqlcommenter`); the chosen
   format's own rules then apply (as for `regex` above with `format=regex`).

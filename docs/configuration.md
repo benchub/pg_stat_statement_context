@@ -228,7 +228,8 @@ SELECT pg_reload_conf();
 
 Rules are compiled and fully validated when the value is set or reloaded;
 an invalid rule (syntax, bad pattern, back-reference, reference to a missing
-capture group, unknown escape, over a limit) rejects the whole value and
+capture group, unknown escape, over a limit, a pattern that takes longer
+than 100 ms to compile) rejects the whole value and
 the previous one stays in effect. Test rules with
 [`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract),
 which shows the normalized tags and counts the changed values in
@@ -236,12 +237,13 @@ which shows the normalized tags and counts the changed values in
 
 Rules run on every tagged statement, under the same safety limits as regex
 extractors: each backend compiles a rule once (at first use after a
-configuration change), and the engine's own complexity limits and query
-cancellation apply. If a rule fails at run time (the regex engine runs out of
+configuration change), with the same
+[100 ms compile time limit](extractors.md#regex), and the engine's own
+complexity limits and query cancellation apply. If a rule fails at run time (the regex engine runs out of
 memory or reports an error), the tag is **dropped** rather than stored
 unnormalized, which could create many entries; this is counted in the debug
 function's `normalize_failures`. If a rule fails to compile in a backend at
-run time, it is disabled there until the next configuration change (counted
+run time (including a compile stopped at the time limit), it is disabled there until the next configuration change (counted
 in `_info().regex_compile_failures`), and tags of its key are dropped. The
 user's statement never fails.
 

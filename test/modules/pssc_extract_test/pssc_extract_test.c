@@ -10,6 +10,8 @@
  */
 #include "postgres.h"
 
+#include <signal.h>
+
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -17,9 +19,12 @@
 #include "parser/parser.h"
 #include "miscadmin.h"
 #include "regex/regex.h"
+#include "storage/procsignal.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/timestamp.h"
 
 #include "extract.h"
 #include "guc.h"
@@ -273,7 +278,15 @@ typedef enum InjectAction
 	INJ_ERROR,					/* elog(ERROR) (internal error) */
 	INJ_CANCEL,					/* throw ERRCODE_QUERY_CANCELED */
 	INJ_REGCANCEL,				/* PG14/15 engine: cancel pending, REG_CANCEL */
-	INJ_SLEEP					/* CHECK_FOR_INTERRUPTS loop: real timeout */
+	INJ_SLEEP,					/* busy CHECK_FOR_INTERRUPTS loop: real timeout */
+	INJ_REGSLEEP,				/* PG14/15 engine: busy poll for cancel, REG_CANCEL */
+	INJ_STALL,					/* as SLEEP, but sleeping (descheduled, no CPU) */
+	INJ_REGSTALL,				/* as REGSLEEP, but sleeping */
+	INJ_LATEINT,				/* deadline, then a real SIGINT, then CFI */
+	INJ_LATEREGINT,				/* deadline, then a real SIGINT, REG_CANCEL */
+	INJ_LATEWAIT,				/* deadline, then wait 1 s without CFI, then CFI */
+	INJ_LATECONFLICT,			/* deadline, then a recovery conflict, then CFI */
+	INJ_LATEREGCONFLICT			/* deadline, then a recovery conflict, REG_CANCEL */
 } InjectAction;
 
 static int	inj_phase = -1;
@@ -321,11 +334,62 @@ inject_hook(int phase, int index)
 			InterruptPending = true;
 			return PSSC_TEST_REG_CANCEL;
 		case INJ_SLEEP:
-			for (int i = 0; i < 6000; i++)
+		case INJ_REGSLEEP:
+		case INJ_STALL:
+		case INJ_REGSTALL:
 			{
-				CHECK_FOR_INTERRUPTS();
-				pg_usleep(10000L);
+				/* up to 60 s, using CPU (as a slow compile) or not */
+				TimestampTz end = TimestampTzPlusMilliseconds(GetCurrentTimestamp(), 60000);
+				bool		reg = inj_action == INJ_REGSLEEP || inj_action == INJ_REGSTALL;
+				bool		busy = inj_action == INJ_SLEEP || inj_action == INJ_REGSLEEP;
+
+				while (GetCurrentTimestamp() < end)
+				{
+					/* like the PG14/15 engine's rcancelrequested() polling */
+					if (reg && InterruptPending && (QueryCancelPending || ProcDiePending))
+						return PSSC_TEST_REG_CANCEL;
+					if (!reg)
+						CHECK_FOR_INTERRUPTS();
+					if (!busy)
+						pg_usleep(10000L);
+				}
+				return REG_OKAY;
 			}
+		case INJ_LATEINT:
+		case INJ_LATEREGINT:
+		case INJ_LATEWAIT:
+		case INJ_LATECONFLICT:
+		case INJ_LATEREGCONFLICT:
+
+			/*
+			 * Wait, without processing interrupts, until a cancel is pending
+			 * (the compile time limit sets one), then let a genuine cancel
+			 * arrive: a real SIGINT (as from pg_cancel_backend), or for
+			 * LATEWAIT whatever comes within 1 s (a statement_timeout).
+			 */
+			for (int i = 0; i < 6000 && !QueryCancelPending; i++)
+				pg_usleep(10000L);
+			if (inj_action == INJ_LATEWAIT)
+			{
+				for (int i = 0; i < 100; i++)
+					pg_usleep(10000L);
+			}
+			else if (inj_action == INJ_LATECONFLICT ||
+					 inj_action == INJ_LATEREGCONFLICT)
+			{
+				/*
+				 * A real recovery conflict (SIGUSR1, not SIGINT). It also
+				 * cancels the statement of a primary in a transaction. -1:
+				 * InvalidBackendId / INVALID_PROC_NUMBER (search by pid).
+				 */
+				if (SendProcSignal(MyProcPid, PROCSIG_RECOVERY_CONFLICT_SNAPSHOT, -1) != 0)
+					elog(ERROR, "could not send a recovery conflict signal");
+			}
+			else
+				kill(MyProcPid, SIGINT);
+			if (inj_action == INJ_LATEREGINT || inj_action == INJ_LATEREGCONFLICT)
+				return PSSC_TEST_REG_CANCEL;
+			CHECK_FOR_INTERRUPTS();
 			return REG_OKAY;
 	}
 	return REG_OKAY;
@@ -343,7 +407,11 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 	static const char *const names[] = {
 		[INJ_NONE] = "none", [INJ_ESPACE] = "espace", [INJ_ETOOBIG] = "etoobig",
 		[INJ_OOM] = "oom", [INJ_ERROR] = "error", [INJ_CANCEL] = "cancel",
-		[INJ_REGCANCEL] = "regcancel", [INJ_SLEEP] = "sleep"
+		[INJ_REGCANCEL] = "regcancel", [INJ_SLEEP] = "sleep",
+		[INJ_REGSLEEP] = "regsleep", [INJ_STALL] = "stall",
+		[INJ_REGSTALL] = "regstall", [INJ_LATEINT] = "lateint",
+		[INJ_LATEREGINT] = "lateregint", [INJ_LATEWAIT] = "latewait",
+		[INJ_LATECONFLICT] = "lateconflict", [INJ_LATEREGCONFLICT] = "lateregconflict"
 	};
 	int			a = -1;
 
@@ -364,6 +432,8 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 		inj_phase = PSSC_REGEX_TEST_NORM_COMPILE;
 	else if (strcmp(phase, "norm_exec") == 0)
 		inj_phase = PSSC_REGEX_TEST_NORM_EXEC;
+	else if (strcmp(phase, "check") == 0)
+		inj_phase = PSSC_REGEX_TEST_CHECK;
 	else
 		elog(ERROR, "unknown phase \"%s\"", phase);
 	inj_index = index;
@@ -379,6 +449,29 @@ Datum
 pssc_extract_test_regex_injected(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(inj_fired);
+}
+
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_compile_limit);
+Datum
+pssc_extract_test_regex_compile_limit(PG_FUNCTION_ARGS)
+{
+	int		   *limit = (int *) main_sym("pssc_regex_compile_limit_ms");
+	int			old = *limit;
+
+	*limit = PG_GETARG_INT32(0);
+	PG_RETURN_INT32(old);
+}
+
+PG_FUNCTION_INFO_V1(pssc_extract_test_set_local);
+Datum
+pssc_extract_test_set_local(PG_FUNCTION_ARGS)
+{
+	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *value = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+	(void) set_config_option(name, value, PGC_SIGHUP, PGC_S_SESSION,
+							 GUC_ACTION_SET, true, 0, false);
+	PG_RETURN_VOID();
 }
 
 typedef void (*debug_fn) (PsscRegexDebugStats *);

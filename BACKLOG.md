@@ -51,8 +51,8 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
-| 20261006-021334-1 | Bound regex compile cost (pathological patterns stall first tagged query) | 20261005-091225-10 | no | ready |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | yes | blocked-on-questions |
+| 20261006-080948-1 | Regex compile retry: discard allocations of interrupted attempts | 20261006-021334-1 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | yes | blocked-on-questions |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
@@ -173,24 +173,6 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 - Q2: Should this be combined with 20261005-213120-1, since both change the `_info()` columns?
 **Status:** blocked-on-questions
 
-### 20261006-021334-1: Bound regex compile cost (pathological patterns stall first tagged query)
-
-**Description:** Found by the SQL fuzzer (item -25). The pattern `((?:(?:$)|\Zda|(?<!1)|\S){0,255}` takes over 20 s to compile, both in core `regexp_matches` and in our check hook. Only statement_timeout limited it, by cancelling the `ALTER SYSTEM`. If a superuser sets such a pattern with no statement_timeout, the check hook accepts it. Then every backend compiles it lazily on its first tagged statement (§4.2 regex), stalling a user query for seconds. A cancel or timeout during that compile is re-thrown into the user's query, which is worse than a stall.
-
-The execution-time CPU limits (item -10) don't cover compile. Options (decide and document):
-- Bound compile with a complexity heuristic in the check hook, e.g. reject `{m,n}` with large n around a group that can match empty, or cap pattern length and number of groups.
-- Measure compile time in the check hook and reject patterns over a threshold (e.g. 100 ms). The check hook runs in the postmaster at reload, which is acceptable because the hook already compiles there.
-- Use the engine's cancel mechanism (`rcancelrequested` callback) to abort a compile after N ms in backends, and treat it as a compile failure (counted in `regex_compile_failures`, extractor disabled for the backend) instead of re-throwing into the user's query.
-
-**Acceptance criteria:**
-- The fuzzer's pathological pattern is rejected at SET/reload, or, if it is accepted, a backend never spends more than the documented bound compiling it on the hot path and never fails the user's query because of it.
-- Normal patterns from docs/extractors.md are unaffected.
-- A test covers the case (TAP or pg_regress).
-
-**Depends on:** 20261005-091225-10
-**Open questions:** none
-**Status:** ready
-
 ### 20261006-075124-1: Fewer eviction passes under sustained churn (adaptive batch or compact scan)
 
 **Description:** Follow-up to 20261006-043919-1. Partial selection made a pass ~40% faster, but under the `evict` benchmark at `max_entries=10000` p99 is still ~2.15× pgss alone (target ~1.5×). The remaining cost is the single scan of ~10,000 entries (~870 B each, ~8.7 MB) under the exclusive lock. Options:
@@ -203,6 +185,19 @@ The execution-time CPU limits (item -10) don't cover compile. Options (decide an
 **Open questions:**
 - Q1: Is changing the eviction batch size adaptively (option 1, simpler, alters §5.3 semantics) acceptable, or should we keep the fixed ~5% and do option 2 (compact scan array)?
 **Status:** blocked-on-questions
+
+### 20261006-080948-1: Regex compile retry: discard allocations of interrupted attempts
+
+**Description:** Found in the round-2 review of 20261006-021334-1. On PG16–18 a compile stopped by the 100 ms limit throws out of `pg_regcomp()` before its cleanup runs. The retry (an attempt that used < half the limit in CPU time is retried, up to 3 attempts) reuses the same slot memory context, so the interrupted attempt's allocations stay there, and the next compile overwrites the regex's ownership pointers. If a retry succeeds, the slot keeps the abandoned allocations until its configuration generation is released. Reviewer reproduced on PG18 with the real `{0,13}` pathological pattern and a test-only 1000 ms limit: ~4 MB abandoned (5,956,832 vs 1,796,472 bytes used). Existing stall injections miss it because they interrupt before the engine allocates. See `src/regex_runtime.c` compile_slot / run_compile.
+
+**Acceptance criteria:**
+- Each attempt compiles in its own disposable context; an interrupted attempt's context is deleted before retrying; only the successful attempt's context is kept.
+- A failing-first test (e.g. a test-module injection that interrupts after the engine has allocated, then checks the slot context's size or that a retry's context equals a clean compile's) turns green.
+- Full harness passes on PG 14–18.
+
+**Depends on:** 20261006-021334-1
+**Open questions:** none
+**Status:** ready
 
 ### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
 

@@ -19,15 +19,18 @@
  * regex pair based on its value), and matching stops once every key has a
  * value, so a comment yields at most one pair per key.
  *
- * Never fails the statement: compile failures disable the extractor for this
- * backend until the next config generation (counted in the backend's
- * PsscTagsetStats.regex_compile_failures); match errors yield no pairs for
- * that comment. Query cancel and other interrupts are still honored (they
- * propagate as the usual ERROR / FATAL).
+ * Never fails the statement: compile failures, including a compile aborted
+ * at the compile time limit (PSSC_REGEX_COMPILE_LIMIT_MS), disable the
+ * extractor for this backend until the next config generation (counted in
+ * the backend's PsscTagsetStats.regex_compile_failures); match errors yield
+ * no pairs for that comment. Query cancel and other interrupts are still
+ * honored (they propagate as the usual ERROR / FATAL).
  */
 #ifndef PSSC_REGEX_RUNTIME_H
 #define PSSC_REGEX_RUNTIME_H
 
+#include "mb/pg_wchar.h"
+#include "regex/regex.h"
 #include "tagset.h"
 
 /* Creates the memory contexts and installs the hook; called by _PG_init. */
@@ -89,7 +92,9 @@ extern uint64 pssc_regex_transient_failures(void);
  * (PSSC_REGEX_TEST_COMPILE) and before each pg_regexec (PSSC_REGEX_TEST_EXEC)
  * of extractor index, inside the same error handling as the engine call;
  * the PSSC_REGEX_TEST_NORM_* phases are the same for normalize rule index.
- * Returning REG_OKAY lets the engine run;
+ * PSSC_REGEX_TEST_CHECK is the check hooks' test compile. The *COMPILE and
+ * CHECK phases run inside the compile time limit. Returning REG_OKAY lets
+ * the engine run;
  * any other value is used as if the engine had returned it. It may also
  * throw (ereport), as the engine can.
  */
@@ -99,8 +104,49 @@ extern uint64 pssc_regex_transient_failures(void);
 #define PSSC_REGEX_TEST_NORM_CONTEXT	3
 #define PSSC_REGEX_TEST_NORM_COMPILE	4
 #define PSSC_REGEX_TEST_NORM_EXEC		5
+#define PSSC_REGEX_TEST_CHECK	6	/* check hook test compile; index -1 */
 typedef int (*PsscRegexTestHook) (int phase, int index);
 extern PGDLLEXPORT PsscRegexTestHook pssc_regex_test_hook;
+
+/*
+ * Compile time limit per pattern, in milliseconds (backlog
+ * 20261006-021334-1): some patterns take seconds or minutes to compile
+ * (e.g. ((?:(?:$)|\Zda|(?<!1)|\S){0,255}) ). pssc_regex_compile_limit_ms
+ * is the limit in effect: PSSC_REGEX_COMPILE_LIMIT_MS, changed only by
+ * tests (<= 0: no limit). In a client backend the limit is wall-clock
+ * time per attempt, and an attempt that used less than half of it in CPU
+ * time (it was descheduled: a stall, not a slow pattern) is retried, up to
+ * PSSC_REGEX_COMPILE_ATTEMPTS attempts; elsewhere it is CPU time.
+ */
+#define PSSC_REGEX_COMPILE_LIMIT_MS 100
+#define PSSC_REGEX_COMPILE_ATTEMPTS 3
+extern PGDLLEXPORT int pssc_regex_compile_limit_ms;
+
+/* pssc_regex_compile() results besides the engine's return codes. */
+#define PSSC_REGEX_COMPILE_TOO_SLOW	(-1)
+#define PSSC_REGEX_COMPILE_DEFERRED	(-2)
+
+/*
+ * Compiles pat[0, len) into re (REG_ADVANCED, C collation; with
+ * pssc_regcomp() in cxt), under the compile time limit, after calling the
+ * test hook for test_phase (if >= 0) with test_index. Returns REG_OKAY,
+ * an engine error code (re not compiled), or:
+ *	PSSC_REGEX_COMPILE_TOO_SLOW  the compile took longer than the limit (re
+ *		not compiled). In a client backend the compile is aborted at the
+ *		limit (and retried after a stall, see above); in other processes
+ *		(no timer) it runs to completion, and only strict callers get this
+ *		result, by CPU time (non-strict ones keep the regex).
+ *		A non-strict compile that completes just after the limit is kept.
+ *	PSSC_REGEX_COMPILE_DEFERRED  (!strict only) a client backend with
+ *		interrupts held off cannot bound the compile; try again later.
+ * strict is for the GUC check hooks, which reject over-limit patterns.
+ * A genuine cancel, statement_timeout or other interrupt arriving during
+ * the compile propagates as usual (ERROR, or REG_CANCEL on PG14/15 with
+ * the interrupt still pending); other errors are thrown too.
+ */
+extern int	pssc_regex_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
+							   size_t len, bool strict, int test_phase,
+							   int test_index);
 
 /* Backend-local bookkeeping, for tests. */
 typedef struct PsscRegexDebugStats

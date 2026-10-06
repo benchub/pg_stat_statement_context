@@ -68,10 +68,32 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 -- (-1: always): 'espace' / 'etoobig' (as if the engine returned that code),
 -- 'oom' (throw out of memory), 'error' (elog ERROR), 'cancel' (throw query
 -- canceled), 'regcancel' (as the PG14/15 engine on a pending cancel: set
--- QueryCancelPending, return REG_CANCEL), 'sleep' (wait up to 60 s in a
--- CHECK_FOR_INTERRUPTS loop, for a real statement_timeout), 'none' (off).
+-- QueryCancelPending, return REG_CANCEL), 'sleep' (spin, using CPU like a
+-- slow compile, up to 60 s in a CHECK_FOR_INTERRUPTS loop, for a real
+-- statement_timeout or the compile time limit), 'regsleep' (the same as the
+-- PG14/15 engine does it: poll for a pending cancel for up to 60 s, then
+-- return REG_CANCEL), 'stall' / 'regstall' (the same, but sleeping: a
+-- compile that is descheduled rather than slow), 'lateint' /
+-- 'lateregint' (wait up to 60 s, without processing interrupts, for a
+-- pending cancel such as the compile time limit's, then send this backend a
+-- real SIGINT, then CHECK_FOR_INTERRUPTS / return REG_CANCEL), 'latewait'
+-- (the same, but wait another 1 s instead of sending SIGINT, so that a
+-- statement_timeout or transaction_timeout can fire), 'lateconflict' /
+-- 'lateregconflict' (the same, but send this backend a real recovery
+-- conflict signal (SIGUSR1) instead of SIGINT), 'none' (off). Phase 'check' is the check
+-- hooks' test compile of any pattern (idx -1).
 CREATE FUNCTION pssc_extract_test_regex_inject(phase text, idx int, action text,
                                                count int DEFAULT 1) RETURNS void
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Set this backend's regex compile time limit in ms (<= 0: none; the
+-- default is PSSC_REGEX_COMPILE_LIMIT_MS); returns the previous one.
+CREATE FUNCTION pssc_extract_test_regex_compile_limit(ms int) RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Set a sighup parameter in this backend only (session source), running
+-- its check hook here.
+CREATE FUNCTION pssc_extract_test_set_local(name text, value text) RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
 -- How many times the injection fired since it was set.

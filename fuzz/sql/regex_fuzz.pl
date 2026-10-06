@@ -723,13 +723,16 @@ sub rejection_verdict
 	  : $state eq '57014' && $msg =~ /statement timeout/ ? 'timeout'
 	  : $state ne '22023' ? "other: SQLSTATE $state: $msg; $detail"
 	  : $detail =~ /longer than \d+ bytes/ ? 'long'
+	  : $detail =~ /took longer than \d+ ms/ ? 'slow'
 	  : $detail =~ /is invalid:/ ? 'invalid'
 	  : $detail =~ /back-references/ ? 'backref'
 	  : $detail =~ /more than max_tags/ ? 'max_tags'
 	  : $detail =~ /has \d+ keys? but its pattern has (\d+) capture/ ? "nkeys($1)"
 	  : "other: $msg; $detail";
+	# the compile time limit applies before every other compile verdict
 	my $ok = $reason eq $want || ($fuzzy && $want ne 'long' && $reason !~ /^other/)
-	  || ($want eq 'resource' && $reason ne 'long' && $reason !~ /^other/);
+	  || ($want eq 'resource' && $reason ne 'long' && $reason !~ /^other/)
+	  || ($reason eq 'slow' && $want ne 'long');
 	# a pattern whose compile outlasts statement_timeout in core regexp_matches
 	# may also outlast it in the check hook (compiling is interruptible)
 	$ok = 0 if $reason eq 'timeout' && !($want eq 'resource' && $inv =~ /statement timeout/);
@@ -799,6 +802,12 @@ if ($opt{self_test})
 			['22023', $gucmsg, 'Pattern of extractor "regex" is invalid: x.'], 'invalid', 0, 1],
 		['check-hook DETAIL with the wrong SQLSTATE', '', '',
 			['XX000', $gucmsg, 'Pattern of extractor "regex" is longer than 1024 bytes.'], 'long', 0, 0],
+		['compile time limit, valid pattern', '', '',
+			['22023', $gucmsg, 'Compiling the pattern of extractor "regex" took longer than 100 ms.'], 'accept', 0, 1],
+		['compile time limit, resource-limited pattern', $inv_to, $pre_to,
+			['22023', $gucmsg, 'Compiling the pattern of extractor "regex" took longer than 100 ms.'], 'resource', 0, 1],
+		['compile time limit on a pattern over the length limit', '', '',
+			['22023', $gucmsg, 'Compiling the pattern of extractor "regex" took longer than 100 ms.'], 'long', 0, 0],
 	);
 	for my $t (@vcases)
 	{

@@ -12,7 +12,6 @@
  */
 #include "postgres.h"
 
-#include "catalog/pg_collation.h"
 #include "mb/pg_wchar.h"
 #include "regex/regex.h"
 #include "utils/builtins.h"
@@ -22,6 +21,7 @@
 #include "compat.h"
 #include "guc.h"
 #include "pairs.h"
+#include "regex_runtime.h"
 #include "scan.h"
 
 /* Bounds (DESIGN.md §4.1). */
@@ -785,8 +785,8 @@ dsl_apply(DslExtractor *e, DslParam param, DslStr v)
 }
 
 /*
- * Test-compile a regex extractor's pattern with the core engine and check
- * the v1 limits (§4.2, §6.11). The compiled regex is freed right away;
+ * Test-compile a regex extractor's pattern with the core engine, under the
+ * compile time limit, and check the v1 limits (§4.2, §6.11). The compiled regex is freed right away;
  * backends compile their own copies lazily.
  */
 static bool
@@ -814,7 +814,13 @@ dsl_check_regex(const DslExtractor *e, MemoryContext cxt)
 	wpat = palloc(sizeof(pg_wchar) * (e->pattern.len + 1));
 	wlen = pg_mb2wchar_with_len(e->pattern.s, wpat, (int) e->pattern.len);
 
-	rc = pssc_regcomp(cxt, &re, wpat, wlen, REG_ADVANCED, C_COLLATION_OID);
+	rc = pssc_regex_compile(cxt, &re, wpat, wlen, true, PSSC_REGEX_TEST_CHECK, -1);
+	if (rc == PSSC_REGEX_COMPILE_TOO_SLOW)
+	{
+		GUC_check_errdetail("Compiling the pattern of extractor \"%s\" took longer than %d ms.",
+							e->name, pssc_regex_compile_limit_ms);
+		return false;
+	}
 	if (rc != REG_OKAY)
 	{
 		char		msg[128];
@@ -1369,7 +1375,8 @@ norm_check_key(DslStr k, int ruleno)
 
 /*
  * Validate the pattern (as for a regex extractor: length, encoding, compiles
- * as an advanced regex with the C collation, no back-references) and the
+ * as an advanced regex with the C collation within the compile time limit,
+ * no back-references) and the
  * replacement (length, encoding, escapes \1..\9 within the pattern's
  * groups, \& and \\ only); sets r->max_ref.
  */
@@ -1416,7 +1423,13 @@ norm_check_rule(NormRule *r, int ruleno, MemoryContext cxt)
 
 	wpat = palloc(sizeof(pg_wchar) * (r->pattern.len + 1));
 	wlen = pg_mb2wchar_with_len(r->pattern.s, wpat, (int) r->pattern.len);
-	rc = pssc_regcomp(cxt, &re, wpat, wlen, REG_ADVANCED, C_COLLATION_OID);
+	rc = pssc_regex_compile(cxt, &re, wpat, wlen, true, PSSC_REGEX_TEST_CHECK, -1);
+	if (rc == PSSC_REGEX_COMPILE_TOO_SLOW)
+	{
+		GUC_check_errdetail("Compiling the pattern of rule %d took longer than %d ms.",
+							ruleno, pssc_regex_compile_limit_ms);
+		return false;
+	}
 	if (rc != REG_OKAY)
 	{
 		char		msg[128];

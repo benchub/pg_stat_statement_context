@@ -15,7 +15,7 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
-use Time::HiRes qw(usleep);
+use Time::HiRes qw(usleep time);
 
 my $P = 'pg_stat_statement_context';
 
@@ -333,7 +333,9 @@ for my $pa ((map { [ 'compile', $_ ] } qw(espace etoobig oom error)),
 # Interrupts during compilation are honored and are not compile failures.
 for my $c ([ 'regcancel', 'SELECT 1', qr/canceling statement due to user request/ ],
 	[ 'cancel', 'SELECT 1', qr/canceling statement due to user request/ ],
-	[ 'sleep', "SET statement_timeout = '300ms'", qr/canceling statement due to statement timeout/ ],
+	# without the compile time limit, which would expire first
+	[ 'sleep', "SELECT pssc_extract_test_regex_compile_limit(0); SET statement_timeout = '300ms'",
+		qr/canceling statement due to statement timeout/ ],
 	[ 'context cancel', 'SELECT 1', qr/canceling statement due to user request/ ])
 {
 	my ($action, $pre, $re) = @$c;
@@ -350,6 +352,215 @@ for my $c ([ 'regcancel', 'SELECT 1', qr/canceling statement due to user request
 	is(rstats($s), '2|0|2|0', "compile interrupted ($action): not counted as failed");
 	session_close($s);
 }
+
+# ---------------------------------------------------------------------------
+# Compile time limit (backlog 20261006-021334-1): a lazy compile that outlasts
+# PSSC_REGEX_COMPILE_LIMIT_MS (100 ms) is aborted and counted as a compile
+# failure, without failing the statement or leaving a cancel pending, on
+# either engine behavior (PG16+ raise the pending cancel, simulated by
+# 'sleep'; PG14/15 return REG_CANCEL, simulated by 'regsleep'). A genuine
+# cancel or statement_timeout that arrives after the limit expired still
+# cancels the statement.
+# ---------------------------------------------------------------------------
+my $LIMIT_MS = 100;
+my $BOUND_S = 10;	# generous: without the limit these take 50-60 s
+for my $action (qw(sleep regsleep))
+{
+	my $s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, '$action', 1)");
+	my $t0 = time;
+	my $r = sex($s, $Q);
+	my $dt = time - $t0;
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o 1',
+		"compile over the time limit ($action): extractor disabled, counted, statement succeeds");
+	cmp_ok($dt, '<', $BOUND_S, "compile over the time limit ($action): aborted (${dt}s)");
+	cmp_ok($dt, '>=', 0.9 * $LIMIT_MS / 1000, "compile over the time limit ($action): not before the limit");
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "compile over the time limit ($action): one attempt");
+	is(rstats($s), '1|0|1|1', "compile over the time limit ($action): one compiled, one failed");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42',
+		"compile over the time limit ($action): no cancel left pending");
+	$r = sex($s, $Q);
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o 0',
+		"compile over the time limit ($action): stays disabled, not retried or recounted");
+	session_close($s);
+}
+# The limit is wall-clock, but a compile that was descheduled (a stall:
+# little CPU time used, e.g. a loaded host or VM) is retried, up to
+# $ATTEMPTS attempts, so a normal pattern is not disabled by a stall. 'stall'
+# / 'regstall' sleep instead of spinning; the injection fires once (then the
+# real engine compiles) or on every attempt.
+my $ATTEMPTS = 3;
+for my $action (qw(stall regstall))
+{
+	my $s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, '$action', 1)");
+	my $r = sex($s, $Q);
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o,service=s 0',
+		"compile stalled past the time limit ($action): retried, compiled, not counted");
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "compile stalled past the time limit ($action): stalled once");
+	is(rstats($s), '2|0|2|0', "compile stalled past the time limit ($action): both compiled");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', "compile stalled past the time limit ($action): no cancel left pending");
+	session_close($s);
+
+	$s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, '$action', -1)");
+	my $t0 = time;
+	$r = sex($s, $Q);
+	my $dt = time - $t0;
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o 1',
+		"compile stalled on every attempt ($action): disabled, counted, statement succeeds");
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), $ATTEMPTS,
+		"compile stalled on every attempt ($action): $ATTEMPTS attempts");
+	cmp_ok($dt, '>=', 0.9 * $ATTEMPTS * $LIMIT_MS / 1000, "compile stalled on every attempt ($action): each up to the limit (${dt}s)");
+	cmp_ok($dt, '<', $BOUND_S, "compile stalled on every attempt ($action): bounded (${dt}s)");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', "compile stalled on every attempt ($action): no cancel left pending");
+	session_close($s);
+}
+{
+	my $val = sqlq(q{regex(pattern='zz=(\w+)', keys=zz)});
+	my $s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'stall', 1)");
+	my (undef, $err) = sq_err($s, "SELECT pssc_extract_test_set_local('$P.extractors', $val)");
+	is($err, '', 'check hook, compile stalled once: accepted');
+	is(sq($s, "SHOW $P.extractors"), q{regex(pattern='zz=(\w+)', keys=zz)}, 'check hook, compile stalled once: set');
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'stall', -1)");
+	(undef, $err) = sq_err($s, "SELECT pssc_extract_test_set_local('$P.extractors', " . sqlq(q{regex(pattern='yy=(\w+)', keys=yy)}) . ')');
+	like($err, qr/DETAIL:  Compiling the pattern of extractor "regex" took longer than $LIMIT_MS ms\./,
+		'check hook, compile stalled on every attempt: rejected');
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), $ATTEMPTS, "check hook, compile stalled on every attempt: $ATTEMPTS attempts");
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'none')");
+	session_close($s);
+}
+for my $c ([ 'lateint', 'SELECT 1', qr/canceling statement due to user request/ ],
+	[ 'lateregint', 'SELECT 1', qr/canceling statement due to user request/ ],
+	[ 'latewait', "SET statement_timeout = '500ms'", qr/canceling statement due to statement timeout/ ])
+{
+	my ($action, $pre, $re) = @$c;
+	my $s = session_open();
+	sq($s, $pre);
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, '$action', 1)");
+	my $t0 = time;
+	my (undef, $err) = sq_err($s, ex_sql($Q));
+	my $dt = time - $t0;
+	like($err, $re, "cancel after the compile time limit expired ($action): the statement is canceled");
+	cmp_ok($dt, '<', $BOUND_S, "cancel after the compile time limit expired ($action): promptly (${dt}s)");
+	sq($s, 'RESET statement_timeout');
+	my $r = sex($s, $Q);
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o,service=s 0',
+		"cancel after the compile time limit expired ($action): not disabled, compiled on next use");
+	is(rstats($s), '2|0|2|0', "cancel after the compile time limit expired ($action): not counted as failed");
+	session_close($s);
+}
+# Interrupts that don't arrive as SIGINT, pending when the limit's own cancel
+# is consumed, must still be delivered: a recovery conflict (SIGUSR1; it sets
+# QueryCancelPending itself on PG14-16 and only its own flags on PG17+) and,
+# on PG17+, transaction_timeout (processed after the cancel).
+for my $action (qw(lateconflict lateregconflict))
+{
+	my $s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, '$action', 1)");
+	my $t0 = time;
+	my (undef, $err) = sq_err($s, ex_sql($Q));
+	my (undef, $err2) = sq_err($s, 'SELECT pg_sleep(0.2), 42');
+	my $dt = time - $t0;
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "recovery conflict after the compile time limit ($action): injected");
+	like("$err$err2", qr/canceling statement due to conflict with recovery/,
+		"recovery conflict after the compile time limit ($action): not lost");
+	cmp_ok($dt, '<', $BOUND_S, "recovery conflict after the compile time limit ($action): promptly (${dt}s)");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', "recovery conflict after the compile time limit ($action): nothing left pending");
+	session_close($s);
+}
+SKIP:
+{
+	skip 'transaction_timeout needs PostgreSQL 17+', 2
+	  unless $node->safe_psql('postgres', "SELECT count(*) FROM pg_settings WHERE name = 'transaction_timeout'");
+	my ($out, $err) = ('', '');
+	$node->psql('u8',
+		"SELECT pssc_extract_test_regex_inject('compile', 0, 'latewait', 1);\n"
+		  . "SET transaction_timeout = '500ms';\nBEGIN;\n" . ex_sql($Q) . ";\n"
+		  . "SELECT pg_sleep(2), 42;\nCOMMIT;\n",
+		stdout => \$out, stderr => \$err, on_error_stop => 0);
+	like($err, qr/terminating connection due to transaction timeout/,
+		'transaction_timeout after the compile time limit: not lost');
+	unlike($out, qr/\|42/, 'transaction_timeout after the compile time limit: the transaction does not go on');
+}
+{
+	# normalize rules share the compile path
+	alter_and_reload("SET $P.normalize = " . sqlq(q{service: 's' => 'S'}));
+	my $s = session_open();
+	is(sex($s, $Q)->{tags}, 'a=x,operation=o,service=S', 'normalize rule applies');
+	session_close($s);
+	$s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('norm_compile', 0, 'sleep', 1)");
+	my $t0 = time;
+	my $r = sex($s, $Q);
+	my $dt = time - $t0;
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o 1',
+		'normalize rule over the compile time limit: disabled, counted, its key dropped, statement succeeds');
+	cmp_ok($dt, '<', $BOUND_S, "normalize rule over the compile time limit: aborted (${dt}s)");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', 'normalize rule over the compile time limit: no cancel left pending');
+	session_close($s);
+	alter_and_reload("RESET $P.normalize");
+}
+
+# The real engine on pathological patterns (found by the SQL fuzzer):
+# exponential NFA work from a bounded repetition of a group with
+# empty-matching branches. $SLOW compiles in seconds, $HUGE runs for about a
+# minute and then fails as "too complex".
+my $SLOW = q{((?:(?:$)|\Zda|(?<!1)|\S){0,15})};
+my $HUGE = q{((?:(?:$)|\Zda|(?<!1)|\S){0,255})};
+{
+	my $s = session_open();
+	is(sq($s, "SELECT pssc_extract_test_regex_compile_limit(0)"), $LIMIT_MS,
+		"the compile time limit is $LIMIT_MS ms");
+	my $t0 = time;
+	sq($s, "SELECT pssc_extract_test_set_local('$P.extractors', "
+		  . sqlq("regex(pattern='$SLOW', keys=slow), sqlcommenter(position=any, merge=on)") . ')');
+	my $t_full = time - $t0;
+	cmp_ok($t_full, '>', 0.5, "slow pattern: takes long to compile without the limit (${t_full}s)");
+	sq($s, "SELECT pssc_extract_test_regex_compile_limit($LIMIT_MS)");
+	$t0 = time;
+	my $r = sex($s, sqlq(q{SELECT 1 /* x */ /*a='x'*/}));
+	my $dt = time - $t0;
+	is("$r->{tags} $r->{regex_fail}", 'a=x 1',
+		'slow pattern, real engine: lazy compile aborted at the limit, counted, statement succeeds');
+	cmp_ok($dt, '<', $t_full / 2, "slow pattern, real engine: aborted early (${dt}s vs ${t_full}s)");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', 'slow pattern, real engine: no cancel left pending');
+	session_close($s);
+}
+# The check hooks reject patterns that outlast the limit, promptly.
+for my $c ([ 'extractors', "regex(pattern='$HUGE', keys=a)", 'extractor "regex"' ],
+	[ 'extractors', "regex(pattern='$SLOW', keys=a)", 'extractor "regex"' ],
+	[ 'normalize', "a: '$SLOW' => 'x'", 'rule 1' ])
+{
+	my ($name, $val, $what) = @$c;
+	my $t0 = time;
+	my ($ret, undef, $err) = $node->psql('postgres', "ALTER SYSTEM SET $P.$name = " . sqlq($val));
+	my $dt = time - $t0;
+	isnt($ret, 0, "check hook: $name with a pathological pattern rejected");
+	like($err, qr/DETAIL:  Compiling the pattern of \Q$what\E took longer than $LIMIT_MS ms\./,
+		"check hook: $name: the detail names the compile time limit");
+	cmp_ok($dt, '<', $BOUND_S, "check hook: $name: rejected promptly (${dt}s)");
+}
+for my $action (qw(sleep regsleep))
+{
+	my $s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, '$action', 1)");
+	my $t0 = time;
+	my (undef, $err) = sq_err($s, "ALTER SYSTEM SET $P.extractors = " . sqlq(q{regex(pattern='zz=(\w+)', keys=zz)}));
+	my $dt = time - $t0;
+	like($err, qr/DETAIL:  Compiling the pattern of extractor "regex" took longer than $LIMIT_MS ms\./,
+		"check hook, compile over the time limit ($action): rejected");
+	cmp_ok($dt, '<', $BOUND_S, "check hook, compile over the time limit ($action): promptly (${dt}s)");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', "check hook ($action): no cancel left pending");
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'none')");
+	session_close($s);
+}
+unlike($node->safe_psql('postgres', "SELECT pg_read_file('postgresql.auto.conf')"), qr/zz=|\{0,15\}|\{0,255\}/,
+	'rejected patterns were not written by ALTER SYSTEM');
+is($node->safe_psql('postgres', "SHOW $P.extractors"),
+	q{regex(pattern='svc=(\w+)', keys=service), regex(pattern='op=(\w+)', keys=operation, merge=on), sqlcommenter(position=any, merge=on)},
+	'the configuration is unchanged');
 
 # ---------------------------------------------------------------------------
 # Match errors: no pairs from that comment, statement succeeds, extractor

@@ -236,7 +236,7 @@ SELECT * FROM pg_stat_statement_context_info();
 | `invalid_tags` | `bigint` | Tags rejected as malformed: NUL bytes, invalid encoding, keys over 63 bytes, malformed pairs (see [the tag pipeline](extractors.md#the-tag-pipeline)). |
 | `dropped_tags` | `bigint` | Valid tags dropped because the tag set would exceed `max_tags` or `max_tagset_bytes`. |
 | `heuristic_scans` | `bigint` | Statements whose comments were found with the heuristic tail scan (`position=append` on statements longer than `scan_window`). |
-| `regex_compile_failures` | `bigint` | Regex extractors and [`normalize`](configuration.md#normalize) rules that failed to compile in some backend at run time and were disabled there. |
+| `regex_compile_failures` | `bigint` | Regex extractors and [`normalize`](configuration.md#normalize) rules that failed to compile in some backend at run time (including compiles stopped at the [100 ms compile time limit](extractors.md#regex)) and were disabled there. |
 | `utility_missing_queryid` | `bigint` | Tracked utility statements that arrived without a query ID and were not recorded; normally a sign of the wrong `shared_preload_libraries` order (see the [README](../README.md#load-order)). It also rises, in the correct order, when a utility statement is re-executed from a plan cache (for example a named prepared `SET` over the extended protocol): pg_stat_statements clears its query ID after the first execution, so neither extension counts the re-executions. |
 | `stats_reset` | `timestamptz` | Time of the last `pg_stat_statement_context_reset()`, or of server start. |
 
