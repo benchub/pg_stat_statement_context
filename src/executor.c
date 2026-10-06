@@ -5,7 +5,9 @@
  * ExecutorStart chains first, then, if the extension is enabled, this is
  * not a parallel worker (the leader's time covers the workers, §6.8) and
  * queryId != 0, creates the executor frame (src/context.h), which resolves
- * the tags eagerly so nested statements can inherit them. Like pgss, it
+ * the tags eagerly so nested statements can inherit them. A statement that
+ * gets no frame still advances the PG18 statement-boundary cache
+ * (pssc_context_note_stmt_boundary()). Like pgss, it
  * then sets up queryDesc->totaltime (InstrAlloc(1, INSTRUMENT_ALL, false)
  * in es_query_cxt, the same on PG14-18) if nobody did and the statement is
  * tracked at the current nesting level. INSTRUMENT_ALL, not just a timer:
@@ -28,7 +30,7 @@
  * work in either order: pgss never changes plannedstmt->queryId in the
  * executor, both read the same queryDesc->totaltime (whichever hook runs
  * first allocates it with pgss's options; InstrEndLoop is idempotent), and
- * each counts its own nesting level. Only the utility hook (item -18)
+ * each counts its own nesting level. Only the utility hook (src/utility.c)
  * depends on the order.
  */
 #include "postgres.h"
@@ -70,13 +72,17 @@ pssc_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	else
 		standard_ExecutorStart(queryDesc, eflags);
 
-	if (!pssc_enabled || IsParallelWorker() ||
-		queryDesc->plannedstmt->queryId == 0)
-		return;
-
-	frame = pssc_frame_create(queryDesc);
+	frame = NULL;
+	if (pssc_enabled && !IsParallelWorker() &&
+		queryDesc->plannedstmt->queryId != 0)
+		frame = pssc_frame_create(queryDesc);
 	if (frame == NULL)
+	{
+		pssc_context_note_stmt_boundary(queryDesc->sourceText,
+										queryDesc->plannedstmt->stmt_location,
+										queryDesc->plannedstmt->stmt_len);
 		return;
+	}
 
 	if (queryDesc->totaltime == NULL && tracked_at_level(pssc_nesting_level))
 	{
@@ -143,8 +149,8 @@ record_frame(QueryDesc *queryDesc, PsscFrame *frame)
 							 pssc_exec_ms_from_totaltime(queryDesc->totaltime));
 }
 
-static void
-flush_extract_stats(void)
+void
+pssc_flush_extract_stats(void)
 {
 	PsscTagsetStats stats;
 
@@ -166,7 +172,7 @@ pssc_ExecutorEnd(QueryDesc *queryDesc)
 		if (frame->recordable && queryDesc->totaltime != NULL)
 			record_frame(queryDesc, frame);
 	}
-	flush_extract_stats();
+	pssc_flush_extract_stats();
 
 	if (prev_ExecutorEnd)
 		prev_ExecutorEnd(queryDesc);

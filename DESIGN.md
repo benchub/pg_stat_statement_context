@@ -169,9 +169,8 @@ Executor hooks (item -17):
   shared header on every `ExecutorEnd`, before chaining.
 - **Load order:** the executor hooks work with pgss loaded before or after
   this extension; only the utility hook (-18) depends on the order.
-- **Until -18 lands:** the inner statement of a plain `EXPLAIN` (no ANALYZE) is
-  recorded as top level here, while pgss counts it as nested under the
-  `EXPLAIN` utility.
+- **Plain `EXPLAIN`:** the inner statement is nested under the `EXPLAIN`
+  utility (item -18), matching pgss.
 
 **Why the executor hooks, not `post_parse_analyze`?** Parse analysis is skipped
 when a cached plan or prepared statement is re-executed, but the executor hooks
@@ -710,11 +709,25 @@ prepared plan. Recording eligibility and nesting are separate decisions:
   `DEALLOCATE` runs no plan.
 - **Nesting:** `EXECUTE` and `PREPARE` do **not** increment `nesting_level`, so
   the plan run by `EXECUTE` still counts as top-level and `track = top` records
-  it. All other utilities increment nesting and activate a frame, even when
-  `track_utility = off`. This matches pgss on PG17+. pgss on PG14–16 does not
-  bump nesting for untracked utilities, so with pgss `track_utility = off` there,
-  nested statements under `CALL`/`DO` may have a different `toplevel` value in
-  the two views.
+  it. All other utilities always activate a frame, even when
+  `track_utility = off`, so `CALL`/`DO` children inherit tags. Nesting is a
+  separate decision that mirrors pgss, so `toplevel` matches on every version:
+  - PG17+: every other utility increments nesting.
+  - PG14–16: nesting is incremented only when pgss itself would track the
+    utility (its `track_utility`, its `track` at this level, its exclusion
+    list, not in a parallel worker). pgss's GUCs
+    (`pg_stat_statements.track_utility`, `pg_stat_statements.track`) are read by
+    name on each utility statement. When pgss isn't loaded, or its GUCs are only
+    placeholders, this extension's own `track`/`track_utility` are used instead
+    (decided 2026-10-05, item -18).
+  - Recording eligibility always follows this extension's own settings.
+- A tracked utility that arrives with `queryId = 0` (wrong load order)
+  increments `utility_missing_queryid`, regardless of the `untagged` policy.
+- **PG18 boundary cache (§6.5):** every top-level statement of the client
+  string that gets no frame (`PREPARE`, `EXECUTE`, untracked utilities, or
+  statements skipped at `ExecutorStart`) still advances the boundary cache via
+  `pssc_context_note_stmt_boundary()`, so later statements keep their leading
+  comments (item 181131-1).
 - `ProcessUtility` copies everything it needs before chaining and never reads
   `pstmt` afterwards, because `ROLLBACK` can free it.
 
@@ -741,6 +754,7 @@ rejected (decided 2026-10-05): they are out of scope for a pgss companion, so
 | `ProcessUtility` signature | `readOnlyTree` parameter (PG14+). Check each major version for further changes. |
 | `queryId` jumbling | PG16 moved to node-generated jumbling (utility statements are jumbled by node from PG16). PG18 squashes constant lists. |
 | pgss utility handling | PG14–16 exclude `EXECUTE`/`PREPARE`/`DEALLOCATE` and bump nesting only for tracked utilities. PG17+ exclude only `EXECUTE`/`PREPARE` and bump nesting for all other utilities (§6.7). |
+| compat macros | `PSSC_PGSS_RECORDS_DEALLOCATE` (1 on PG17+), `PSSC_PGSS_NESTS_ONLY_TRACKED_UTILITIES` (1 on PG14–16). |
 | GUC `extra` allocation | PG14/15: `malloc`, freed with `free()` (`guc_malloc` is static there). PG16+: `guc_malloc` in the GUC memory context (§4.2). |
 | Regex allocator | PG14/15 `malloc`, PG16+ `palloc` in `CurrentMemoryContext` (§4.2). |
 

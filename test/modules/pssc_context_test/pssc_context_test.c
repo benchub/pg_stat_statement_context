@@ -3,16 +3,13 @@
  *		TEST-ONLY driver for the execution frames of pg_stat_statement_context
  *		(src/context.h). See test/t/010_context.pl.
  *
- The main library's executor hooks (src/executor.c) create, look up and
- * activate executor frames. When preloaded after pg_stat_statement_context,
- * this module adds:
- *	- an ExecutorEnd hook that only observes: it runs before the main
- *	  library's (it is outer) and logs the frame it finds, refreshed as the
- *	  recording hook refreshes it;
- *	- a ProcessUtility hook that snapshots and activates utility frames as
- *	  DESIGN.md §3.2 and §6.7 describe, but records nothing (until the main
- *	  library's utility hook, backlog item -18, replaces it).
- * SQL functions expose the active frame, the frame registry and the frames
+ * The main library's executor hooks (src/executor.c) create, look up and
+ * activate executor frames, and its ProcessUtility hook (src/utility.c)
+ * snapshots and activates utility frames. When preloaded after
+ * pg_stat_statement_context, this module adds an ExecutorEnd hook that only
+ * observes: it runs before the main library's (it is outer) and logs the
+ * frame it finds, refreshed as the recording hook refreshes it. SQL
+ * functions expose the active frame, the frame registry and the frames
  * found at ExecutorEnd.
  *
  * The main library is reached through load_external_function() (its
@@ -23,7 +20,6 @@
 #include "access/parallel.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
-#include "nodes/parsenodes.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
@@ -40,18 +36,12 @@ void		_PG_init(void);
 
 typedef PsscFrame *(*create_fn) (QueryDesc *);
 typedef PsscFrame *(*lookup_fn) (const QueryDesc *);
-typedef void (*uinit_fn) (PsscUtilityFrame *, const PlannedStmt *, const char *);
-typedef void (*enter_fn) (PsscFrameSave *, PsscFrame *, bool);
-typedef void (*leave_fn) (const PsscFrameSave *);
 typedef void (*refresh_fn) (PsscFrame *);
 typedef int (*count_fn) (void);
 typedef void (*xstats_fn) (PsscFrameXactStats *);
 
 static create_fn f_create;
 static lookup_fn f_lookup;
-static uinit_fn f_uinit;
-static enter_fn f_enter;
-static leave_fn f_leave;
 static refresh_fn f_refresh;
 static count_fn f_count;
 static xstats_fn f_xstats;
@@ -61,7 +51,6 @@ static bool *p_enabled;
 static bool hooks_installed = false;
 
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
-static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
 typedef struct EndedEntry
 {
@@ -92,9 +81,6 @@ resolve_main(void)
 	if (f_create != NULL)
 		return;
 	f_lookup = (lookup_fn) main_sym("pssc_frame_lookup");
-	f_uinit = (uinit_fn) main_sym("pssc_utility_frame_init");
-	f_enter = (enter_fn) main_sym("pssc_frame_enter");
-	f_leave = (leave_fn) main_sym("pssc_frame_leave");
 	f_refresh = (refresh_fn) main_sym("pssc_frame_refresh");
 	f_count = (count_fn) main_sym("pssc_frame_count");
 	f_xstats = (xstats_fn) main_sym("pssc_frame_xact_stats");
@@ -168,45 +154,6 @@ t_ExecutorEnd(QueryDesc *queryDesc)
 		standard_ExecutorEnd(queryDesc);
 }
 
-/*
- * As DESIGN.md §6.7: EXECUTE and PREPARE neither bump the nesting level
- * nor activate a frame (the executor of the prepared plan gets its own
- * frame from the saved source, §6.3); every other utility does, before
- * chaining, from a snapshot that never references pstmt afterwards.
- */
-static void
-t_ProcessUtility(PSSC_PROCESS_UTILITY_PARAMS)
-{
-	Node	   *parsetree = pstmt->utilityStmt;
-	PsscUtilityFrame uf;
-	PsscFrameSave save;
-
-	if (!*p_enabled || IsA(parsetree, ExecuteStmt) ||
-		IsA(parsetree, PrepareStmt))
-	{
-		if (prev_ProcessUtility)
-			prev_ProcessUtility(PSSC_PROCESS_UTILITY_ARGS);
-		else
-			standard_ProcessUtility(PSSC_PROCESS_UTILITY_ARGS);
-		return;
-	}
-
-	f_uinit(&uf, pstmt, queryString);
-	f_enter(&save, &uf.frame, true);
-	PG_TRY();
-	{
-		if (prev_ProcessUtility)
-			prev_ProcessUtility(PSSC_PROCESS_UTILITY_ARGS);
-		else
-			standard_ProcessUtility(PSSC_PROCESS_UTILITY_ARGS);
-	}
-	PG_FINALLY();
-	{
-		f_leave(&save);
-	}
-	PG_END_TRY();
-}
-
 void
 _PG_init(void)
 {
@@ -216,8 +163,6 @@ _PG_init(void)
 
 	prev_ExecutorEnd = ExecutorEnd_hook;
 	ExecutorEnd_hook = t_ExecutorEnd;
-	prev_ProcessUtility = ProcessUtility_hook;
-	ProcessUtility_hook = t_ProcessUtility;
 	hooks_installed = true;
 }
 

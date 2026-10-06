@@ -1,8 +1,8 @@
 # Execution frames and active-frame tracking (DESIGN.md §3.1 item 3, §3.2
 # "Frame lifetime", §6.4, §6.5, §6.9; backlog 20261005-091225-16):
-# src/context.c, driven by the main library's executor hooks (src/executor.c)
-# and the ProcessUtility hook of the TEST-ONLY module
-# test/modules/pssc_context_test, which also observes the frames found at
+# src/context.c, driven by the main library's executor and ProcessUtility
+# hooks (src/executor.c, src/utility.c) and observed through the TEST-ONLY
+# module test/modules/pssc_context_test, which also logs the frames found at
 # ExecutorEnd (make install-test-modules).
 #
 # Covers: the frame registry is empty at every transaction end (counted by
@@ -15,8 +15,9 @@
 # and nesting level; nested_tags inherit/scan/none for PL/pgSQL, BEFORE
 # and AFTER triggers and DO; constant-folded functions getting their own
 # tags; the PG18 owned start of later statements in a multi-statement
-# string, also with plan-time SQL (constant folding) and EXECUTE between
-# them; planning counted as a nesting level on PG17+ only, as pgss does
+# string, also with plan-time SQL (constant folding), EXECUTE, and long
+# frameless utilities (PREPARE, EXECUTE, utilities run while disabled;
+# backlog 20261005-181131-1) between them; planning counted as a nesting level on PG17+ only, as pgss does
 # (inner SQL of folded functions is then not top level); the user of a frame refreshed at End; parity with
 # pg_stat_statements where its library is installed.
 use strict;
@@ -508,6 +509,33 @@ SELECT string_agg(userid::regrole::text, ',') FROM pg_stat_statements
 	is($l[-1], '{controller=second}',
 		'past scan_window, after an EXECUTE of a prepared statement');
 	is($err, '', 'multi-statement with EXECUTE: no error');
+
+	# Utilities that get no frame (PREPARE, EXECUTE) still advance the
+	# statement boundary (backlog 20261005-181131-1): a long one before the
+	# commented statement must not push its comment out of scan_window.
+	($out, $err) = run(
+		"SELECT 1 \\; PREPARE plong AS SELECT length('$pad') \\; /*controller='second'*/ SELECT pssc_context_test_tags();\n");
+	@l = split /\n/, $out;
+	is($l[-1], '{controller=second}',
+		'past scan_window, after a long PREPARE (no frame)');
+	is($err, '', 'multi-statement with long PREPARE: no error');
+
+	($out, $err) = run(
+		"PREPARE pt(text) AS SELECT length(\$1);\n"
+		  . "SELECT 1 \\; EXECUTE pt('$pad') \\; /*controller='third'*/ SELECT pssc_context_test_tags();\n");
+	@l = split /\n/, $out;
+	is($l[-1], '{controller=third}',
+		'past scan_window, after a long EXECUTE (no frame)');
+	is($err, '', 'multi-statement with long EXECUTE: no error');
+
+	# The same with the extension disabled for the long statement: enabled
+	# is re-enabled by a utility before the commented statement.
+	($out, $err) = run(
+		"SELECT 1 \\; SET $P.enabled = off \\; PREPARE poff AS SELECT length('$pad') \\; RESET $P.enabled \\; /*controller='fourth'*/ SELECT pssc_context_test_tags();\n");
+	@l = split /\n/, $out;
+	is($l[-1], '{controller=fourth}',
+		'past scan_window, after utilities run while disabled');
+	is($err, '', 'multi-statement with enabled toggled: no error');
 
 	($out, $err) = run(
 		"SELECT /*controller='first'*/ 1 \\; SELECT pssc_context_test_tags() \\; SELECT 3 /*controller='third'*/;\n"

@@ -472,6 +472,58 @@ A statement planned without an active frame gets only its own tags.
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-18: `ProcessUtility` hook
+
+**Description:** Implement utility handling (§3.2, §6.6, §6.7).
+
+Before chaining, snapshot `queryId`, `stmt_location`/`stmt_len`, and tags into a utility frame.
+
+Recording follows pgss, so rows join one-to-one:
+- Record only when `track_utility` is on and `track` allows the nesting level.
+- Never record `EXECUTE` or `PREPARE`.
+- Exclude `DEALLOCATE` on PG14–16 and record it on PG17+.
+- A recordable utility that arrives with `queryId == 0` increments `utility_missing_queryid` instead of being recorded.
+
+Nesting:
+- `EXECUTE` and `PREPARE` don't bump `nesting_level`.
+- Every other utility bumps nesting and activates its frame, even when it isn't recorded, so `CALL`/`DO` children inherit tags.
+
+Measurement:
+- Measure elapsed time around the chained call, as pgss does for `total_exec_time`. No rows, buffer, or WAL counters are collected.
+- Never read `pstmt` after chaining.
+- Record from the snapshot, and restore state in `PG_FINALLY`.
+- Never modify `pstmt->queryId`.
+
+*Note (from -17):* until this hook exists, the inner statement of a plain `EXPLAIN` (no ANALYZE) is recorded as top level, while pgss counts it as nested under the `EXPLAIN` utility. This hook must add the utility nesting level so `toplevel` matches pgss; add a parity test.
+
+**Acceptance criteria:**
+- DDL is recorded with its tags.
+- `EXECUTE` of a prepared statement records the plan as top-level and doesn't record the utility.
+- `DEALLOCATE` follows the per-version rule.
+- With `track_utility=off`, children of `CALL`/`DO` still inherit tags.
+- `ROLLBACK` and `COMMIT` inside procedures don't crash and are Valgrind-clean.
+- Utility `queryid` matches pgss on every version.
+
+**Depends on:** 20261005-091225-17
+**Open questions:** none
+**Status:** done
+
+### 20261005-181131-1: PG18 boundary cache: advance for skipped utilities (PREPARE/EXECUTE)
+
+**Description:** Split from 20261005-091225-16 (round 2 review finding). The PG18 statement-boundary cache in `src/context.c` (used by `pssc_stmt_owned_start` to keep leading comments of later statements in a multi-statement simple-protocol string) only advances when a frame is initialized. `PREPARE` (and possibly `EXECUTE`, other skipped utilities) bypasses frame initialization, so the cache keeps the end of an earlier statement. If the skipped utility is longer than `scan_window`, the next statement's leading comment is outside the window and its tags are lost (with `untagged=skip`, the statement becomes unrecordable).
+
+Repro (one simple-protocol query, PG18): `SELECT 1; PREPARE p AS SELECT length('<3000 chars>'); /*controller='second'*/ SELECT pssc_context_test_tags();` → empty tags.
+
+Fix: advance the client statement-boundary state for every top-level statement of the client query string (including `PREPARE`/`EXECUTE` and other utilities that skip frames/recording), independently of frame activation or recording. Coordinate with the real `ProcessUtility` hook (20261005-091225-18) — if -18 lands first, do it there; otherwise expose a `pssc_context_note_stmt_boundary()` helper that -18 must call.
+
+**Acceptance criteria:**
+- A PG18 test with a skipped utility (`PREPARE`) longer than `scan_window` between statements keeps the following statement's leading-comment tags.
+- Existing 010 tests still pass on PG14–18.
+
+**Depends on:** 20261005-091225-16
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

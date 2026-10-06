@@ -87,6 +87,30 @@
 #endif
 
 /*
+ * Whether pg_stat_statements records DEALLOCATE as a utility statement
+ * (EXECUTE and PREPARE are never recorded, on any version).
+ */
+/* PG17+: yes (PGSS_HANDLED_UTILITY dropped DeallocateStmt); PG14-16: no, excluded like EXECUTE/PREPARE. */
+#if PG_VERSION_NUM >= 170000
+#define PSSC_PGSS_RECORDS_DEALLOCATE 1
+#else
+#define PSSC_PGSS_RECORDS_DEALLOCATE 0
+#endif
+
+/*
+ * Whether pg_stat_statements counts a utility (other than EXECUTE/PREPARE)
+ * as a nesting level only when it tracks that utility under its own
+ * settings (pg_stat_statements.track_utility, pgss_enabled(level) and
+ * PGSS_HANDLED_UTILITY), rather than always.
+ */
+/* PG14-16: only when tracked (exec_nested_level++ inside the tracking branch); PG17+: always (nesting_level++ in both branches). */
+#if PG_VERSION_NUM >= 170000
+#define PSSC_PGSS_NESTS_ONLY_TRACKED_UTILITIES 0
+#else
+#define PSSC_PGSS_NESTS_ONLY_TRACKED_UTILITIES 1
+#endif
+
+/*
  * Shared-memory requests (RequestAddinShmemSpace, RequestNamedLWLockTranche).
  * Write a request function that first calls the saved previous hook (if any),
  * then makes the requests, and register it from _PG_init (while

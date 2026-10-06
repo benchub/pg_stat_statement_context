@@ -17,6 +17,7 @@ OBJS = \
 	src/regex_runtime.o \
 	src/context.o \
 	src/executor.o \
+	src/utility.o \
 	src/counters.o \
 	src/store.o
 PGFILEDESC = "pg_stat_statement_context - per-tag statement statistics from SQL comments"
@@ -54,11 +55,12 @@ include $(PGXS)
 # of src/extract.h on given text and injects faults into the regex runtime
 # (test/t/005_extract.pl, test/t/006_regex.pl); pssc_store_test drives the
 # shared store of src/store.h (test/t/007_store.pl, 008_buckets.pl,
-# 009_eviction.pl, and reads recorded entries in 011_executor.pl).
+# 009_eviction.pl, and reads recorded entries in 011_executor.pl and
+# 012_utility.pl).
 # pssc_context_test exposes the execution frames of src/context.h (frame
-# registry, active frame, frames seen at ExecutorEnd) to SQL and, until the
-# main library's utility hook exists, drives utility frames
-# (test/t/010_context.pl).
+# registry, active frame, frames seen at ExecutorEnd) to SQL
+# (test/t/010_context.pl, 012_utility.pl, which also reads recorded entries
+# through pssc_store_test).
 TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test \
 	test/modules/pssc_extract_test test/modules/pssc_store_test \
 	test/modules/pssc_context_test

@@ -148,6 +148,19 @@ extern PGDLLEXPORT void pssc_utility_frame_init(PsscUtilityFrame *uf,
 												const char *queryString);
 
 /*
+ * Advances the PG18 client statement-boundary cache (DESIGN.md §3.2, §6.5)
+ * past a statement that gets no frame (EXECUTE, PREPARE, a statement run
+ * while disabled or without a queryId), so the leading comment of the next
+ * statement of the client's query string stays in reach. Does nothing
+ * unless src is the client's query string (debug_query_string) at nesting
+ * level 0 with no active frame, the same condition under which making a
+ * frame advances it. Never fails.
+ */
+extern PGDLLEXPORT void pssc_context_note_stmt_boundary(const char *src,
+														int stmt_location,
+														int stmt_len);
+
+/*
  * Saves the active frame and nesting level in *save, then makes frame the
  * active frame (frame NULL: keep the current one, e.g. for an executor
  * without a frame) and, if nest, increments the nesting level. Pair every

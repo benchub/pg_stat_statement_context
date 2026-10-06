@@ -79,6 +79,18 @@ is_trivia_start(const char *s)
 }
 
 /*
+ * Whether a statement with source text src is a statement of the client's
+ * query string itself, which uses and advances the owned-start cache (see
+ * owned_start()).
+ */
+static bool
+is_client_stmt(const char *src)
+{
+	return src != NULL && src == debug_query_string &&
+		pssc_active_frame == NULL && pssc_nesting_level == 0;
+}
+
+/*
  * The owned start of statement r of src (pssc_stmt_owned_start), lexing
  * back at most scan_window bytes. A statement that starts within the first
  * scan_window bytes is always lexed from the string start (exact). Later
@@ -97,7 +109,10 @@ is_trivia_start(const char *s)
  * cached boundary. A new query string may reuse the address of the last
  * one, so the cached end must also lie before this statement and start
  * with ';', whitespace or a comment, as it does in the same string; a
- * stale hit can only shift the start of the leading trivia.
+ * stale hit can only shift the start of the leading trivia. Statements of
+ * the client string that get no frame (PREPARE, EXECUTE, statements run
+ * while disabled) advance the cache through
+ * pssc_context_note_stmt_boundary().
  */
 static size_t
 owned_start(const char *src, PsscStmtRange r, bool top)
@@ -165,9 +180,7 @@ resolve_tags(PsscFrame *frame, char *buf, size_t bufsize, const char *src,
 	}
 
 	r = pssc_stmt_range(src, stmt_location, stmt_len);
-	r.start = owned_start(src, r,
-						  active == NULL && pssc_nesting_level == 0 &&
-						  src == debug_query_string);
+	r.start = owned_start(src, r, is_client_stmt(src));
 	pssc_extract_tags(src, r.start, r.end, buf, bufsize, &res);
 	frame->tags = buf;
 	frame->tags_len = (uint32) res.len;
@@ -266,6 +279,16 @@ pssc_utility_frame_init(PsscUtilityFrame *uf, const PlannedStmt *pstmt,
 				 pstmt->stmt_location, pstmt->stmt_len);
 	set_metadata(frame, pstmt->queryId);
 	pssc_frame_refresh(frame);
+}
+
+void
+pssc_context_note_stmt_boundary(const char *src, int stmt_location,
+								int stmt_len)
+{
+	if (!is_client_stmt(src))
+		return;
+	owned_src = src;
+	owned_end = pssc_stmt_range(src, stmt_location, stmt_len).end;
 }
 
 void

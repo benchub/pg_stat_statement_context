@@ -53,9 +53,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | ready |
-| 20261005-091225-18 | `ProcessUtility` hook | 20261005-091225-17 | no | ready |
-| 20261005-181131-1 | PG18 boundary cache: advance for skipped utilities (PREPARE/EXECUTE) | 20261005-091225-16 | no | ready |
-| 20261005-091225-19 | `shared_preload_libraries` load-order detection and policy | 20261005-091225-18 | no | blocked-on-deps |
+| 20261005-091225-19 | `shared_preload_libraries` load-order detection and policy | 20261005-091225-18 | no | ready |
 | 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | no | ready |
 | 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
@@ -66,7 +64,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-28 | User documentation | 20261005-091225-10, 20261005-091225-19, 20261005-091225-21, 20261005-091225-27 | no | blocked-on-deps |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
 | 20261005-103941-1 | Trim unused counter-availability shims from `compat.h` | 20261005-091225-17 | no | ready |
-| 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | blocked-on-deps |
+| 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
@@ -225,58 +223,6 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 **Open questions:** none
 **Status:** ready
 
-### 20261005-181131-1: PG18 boundary cache: advance for skipped utilities (PREPARE/EXECUTE)
-
-**Description:** Split from 20261005-091225-16 (round 2 review finding). The PG18 statement-boundary cache in `src/context.c` (used by `pssc_stmt_owned_start` to keep leading comments of later statements in a multi-statement simple-protocol string) only advances when a frame is initialized. `PREPARE` (and possibly `EXECUTE`, other skipped utilities) bypasses frame initialization, so the cache keeps the end of an earlier statement. If the skipped utility is longer than `scan_window`, the next statement's leading comment is outside the window and its tags are lost (with `untagged=skip`, the statement becomes unrecordable).
-
-Repro (one simple-protocol query, PG18): `SELECT 1; PREPARE p AS SELECT length('<3000 chars>'); /*controller='second'*/ SELECT pssc_context_test_tags();` → empty tags.
-
-Fix: advance the client statement-boundary state for every top-level statement of the client query string (including `PREPARE`/`EXECUTE` and other utilities that skip frames/recording), independently of frame activation or recording. Coordinate with the real `ProcessUtility` hook (20261005-091225-18) — if -18 lands first, do it there; otherwise expose a `pssc_context_note_stmt_boundary()` helper that -18 must call.
-
-**Acceptance criteria:**
-- A PG18 test with a skipped utility (`PREPARE`) longer than `scan_window` between statements keeps the following statement's leading-comment tags.
-- Existing 010 tests still pass on PG14–18.
-
-**Depends on:** 20261005-091225-16
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-18: `ProcessUtility` hook
-
-**Description:** Implement utility handling (§3.2, §6.6, §6.7).
-
-Before chaining, snapshot `queryId`, `stmt_location`/`stmt_len`, and tags into a utility frame.
-
-Recording follows pgss, so rows join one-to-one:
-- Record only when `track_utility` is on and `track` allows the nesting level.
-- Never record `EXECUTE` or `PREPARE`.
-- Exclude `DEALLOCATE` on PG14–16 and record it on PG17+.
-- A recordable utility that arrives with `queryId == 0` increments `utility_missing_queryid` instead of being recorded.
-
-Nesting:
-- `EXECUTE` and `PREPARE` don't bump `nesting_level`.
-- Every other utility bumps nesting and activates its frame, even when it isn't recorded, so `CALL`/`DO` children inherit tags.
-
-Measurement:
-- Measure elapsed time around the chained call, as pgss does for `total_exec_time`. No rows, buffer, or WAL counters are collected.
-- Never read `pstmt` after chaining.
-- Record from the snapshot, and restore state in `PG_FINALLY`.
-- Never modify `pstmt->queryId`.
-
-*Note (from -17):* until this hook exists, the inner statement of a plain `EXPLAIN` (no ANALYZE) is recorded as top level, while pgss counts it as nested under the `EXPLAIN` utility. This hook must add the utility nesting level so `toplevel` matches pgss; add a parity test.
-
-**Acceptance criteria:**
-- DDL is recorded with its tags.
-- `EXECUTE` of a prepared statement records the plan as top-level and doesn't record the utility.
-- `DEALLOCATE` follows the per-version rule.
-- With `track_utility=off`, children of `CALL`/`DO` still inherit tags.
-- `ROLLBACK` and `COMMIT` inside procedures don't crash and are Valgrind-clean.
-- Utility `queryid` matches pgss on every version.
-
-**Depends on:** 20261005-091225-17
-**Open questions:** none
-**Status:** ready
-
 ### 20261005-091225-19: `shared_preload_libraries` load-order detection and policy
 
 **Description:** In `_PG_init`, parse `shared_preload_libraries` and detect when `pg_stat_statements` is loaded **after** this extension. In that order, pgss's hook runs outside ours and zeroes `pstmt->queryId` before our hook sees it (§3.2, §6.12). Log a `WARNING` that explains the required order. Take no other action: utility tracking stays enabled. The runtime counter `utility_missing_queryid` already exists (task 20261005-091225-18).
@@ -291,7 +237,7 @@ Measurement:
 
 **Depends on:** 20261005-091225-18
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-20: Stats SRF and views
 
@@ -555,7 +501,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Depends on:** 20261005-091225-18, 20261005-091225-27
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-32: Roadmap: per-key cardinality caps (overflow → JSON `null`)
 
