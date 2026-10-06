@@ -55,7 +55,8 @@ CREATE FUNCTION pssc_store_test_counters(OUT entries bigint, OUT max_entries big
                                          OUT entrysize bigint, OUT bucket_count int,
                                          OUT max_tagset_bytes int,
                                          OUT force_collisions bool,
-                                         OUT hash_entries bigint)
+                                         OUT hash_entries bigint,
+                                         OUT reclaimed_entries bigint)
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
 CREATE FUNCTION pssc_store_test_reset() RETURNS void
@@ -89,6 +90,12 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 -- between adding invalid_tags and the other counters, until release_file
 -- exists (at most two minutes).
 CREATE FUNCTION pssc_store_test_stall_next_flush(release_file text) RETURNS void
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- One-shot (this backend): the next _info() scan stalls under the shared
+-- store lock, after judging the first entry's slots, until release_file
+-- exists (at most two minutes).
+CREATE FUNCTION pssc_store_test_stall_next_info_scan(release_file text) RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
 -- One-shot (this backend): the next pssc_store_record() switches forced

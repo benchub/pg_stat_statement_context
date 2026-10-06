@@ -480,7 +480,8 @@ application user, need about 4,000 entries.
 
 Shared memory is preallocated at startup. With the defaults an entry takes
 about 0.9 kB (the tag set, `max_tagset_bytes`, dominates; each bucket adds
-24 bytes), so 10,000 entries use about 8.4 MB.
+24 bytes, and the entry's own counters 48 bytes), so 10,000 entries use about
+8.6 MB.
 `SELECT shmem_bytes FROM pg_stat_statement_context_info();` reports the exact
 size.
 
@@ -521,43 +522,48 @@ system whose tag combinations change over time, `entries` therefore normally
 climbs to `max_entries` and stays there, and passes run regularly even when
 no live history is lost.
 
-`pg_stat_statement_context_info()` reports:
+`pg_stat_statement_context_info()` reports what the passes did, with each
+outcome counted separately:
 
 - `dealloc`: the number of eviction passes;
-- `evicted_entries`: the entries those passes removed, **dead or live
-  combined**;
+- `reclaimed_entries`: **dead** entries the passes reclaimed. This is normal
+  housekeeping: their buckets had all expired, so no visible history was
+  lost;
+- `evicted_entries`: **live** entries the passes evicted because reclaiming
+  dead ones did not free 5%. Their history disappears from the views early:
+  the sign that `max_entries` is too small;
+- `dropped_records`: calls that were not recorded at all, because a pass
+  freed nothing (no entry was dead and the pass could not allocate the
+  memory it needs to pick live victims), or the shared hash table refused the
+  insert;
 - `entries`: allocated entries, including dead ones not yet reclaimed.
 
-None of these counters separates the cleanup of expired entries from the
-eviction of live ones. A rising `evicted_entries` is therefore not by itself a
-sign of undersizing. For example, if 100 combinations expire, the next new
-combination triggers a pass that adds 100 to `evicted_entries`, yet no
-visible history is lost.
+How to read them:
 
-In v1, `_info()` cannot tell you for certain whether live entries are being
-evicted. As a capacity-pressure indicator, count the live entries.
-`pg_stat_statement_context_totals` has exactly one row per live entry,
-visible to every role:
+- **`reclaimed_entries` grows, `evicted_entries` stays at 0:** the table is
+  sized correctly. Combinations come and go, and the expired ones are
+  recycled.
+- **`evicted_entries` grows:** live history is being lost. Raise
+  `max_entries` (see [above](#max_entries)), or look for a tag with
+  unexpectedly high cardinality (see
+  [Cardinality](extractors.md#allowlist-denylist-and-cardinality)) and
+  [cap](#cardinality_cap) or exclude it. Compare its rate with that of
+  `reclaimed_entries`: the larger its share, the more undersized the table.
+- **`dropped_records` is ever non-zero:** calls were lost outright. This
+  only happens when the table is full of live entries *and* a pass could
+  free nothing (in practice, the backend ran out of memory); treat it as
+  severe undersizing, or memory pressure, and act on it.
 
 ```sql
-SELECT (SELECT count(*) FROM pg_stat_statement_context_totals) AS live_entries,
-       max_entries, entries, dealloc, evicted_entries, oldest_bucket
+SELECT max_entries, entries, dealloc, reclaimed_entries, evicted_entries,
+       dropped_records, oldest_bucket
   FROM pg_stat_statement_context_info();
 ```
 
-- If `live_entries` stays well below `max_entries` (below about 95%), passes
-  only reclaim expired entries and nothing visible is lost.
-- If `live_entries` stays near `max_entries` while `dealloc` keeps rising, the
-  table is under pressure. Passes *may* be evicting live entries, but a
-  workload that keeps the table full of live entries while a steady 5% expire
-  produces the same signals with no history lost. Treat it as a reason to
-  raise `max_entries`, or to look for a tag with unexpectedly high cardinality
-  (see [Cardinality](extractors.md#allowlist-denylist-and-cardinality)), not
-  as proof of loss.
-- Live eviction removes the least recently written entries first, so it
-  mostly loses the history of rare combinations.
+Live eviction removes the least recently written entries first, so it mostly
+loses the history of rare combinations.
 
 An eviction pass scans the whole table once (choosing the live victims by
 partial selection rather than sorting every entry), which costs time while the
 table is full. In the rare case that a pass can free nothing at all, the call is
-dropped rather than failing the statement.
+dropped (and counted in `dropped_records`) rather than failing the statement.

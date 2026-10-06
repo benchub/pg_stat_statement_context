@@ -8,11 +8,17 @@
 # that drives it, through real statements: invalid_tags (malformed tags),
 # dropped_tags (a tag set over max_tagset_bytes), heuristic_scans (append
 # scan of a statement longer than scan_window), dealloc and evicted_entries
-# (churn over max_entries), regex_compile_failures (an injected lazy-compile
+# (churn over max_entries); the eviction outcomes kept apart: dead entries
+# reclaimed (reclaimed_entries), live entries evicted (evicted_entries) and
+# records lost because a pass freed nothing (dropped_records); the bucket
+# metadata (bucket_seconds, current_bucket_start, last_closed_bucket_start)
+# and stats_reset_epoch; regex_compile_failures (an injected lazy-compile
 # failure, read from another session) and utility_missing_queryid (wrong
 # shared_preload_libraries order); _info() sees the calling statement's own
 # extraction counters; oldest_bucket is the start of the oldest live slot
-# of any entry (NULL when there is none); reset clears entries and counters
+# of any entry (NULL when there is none), judged against the watermark the
+# row reports even if it moves during the scan (the scan is stalled by a
+# test hook while another reader advances it); reset clears entries and counters
 # (including the caller's pending counters, and without re-counting a regex
 # extractor that stays disabled in a backend) and sets stats_reset; a reset
 # never splits a concurrent flush of diagnostic counters (a flush stalled
@@ -49,9 +55,10 @@ sql("CREATE EXTENSION $P; CREATE EXTENSION pssc_store_test; "
 	  . 'CREATE EXTENSION pssc_extract_test');
 sql('CREATE ROLE alice');
 
-my @cols = qw(entries max_entries dealloc evicted_entries buckets oldest_bucket
+my @cols = qw(entries max_entries dealloc reclaimed_entries evicted_entries dropped_records
+  buckets bucket_seconds oldest_bucket current_bucket_start last_closed_bucket_start
   shmem_bytes cap_shmem_bytes invalid_tags dropped_tags heuristic_scans regex_compile_failures
-  utility_missing_queryid stats_reset);
+  utility_missing_queryid stats_reset stats_reset_epoch);
 
 # The one row of _info() as a hash; NULLs as 'NULL'. $suffix (e.g. a
 # tagged comment) is appended to the statement that calls _info().
@@ -75,11 +82,12 @@ sub diag_counters
 		  regex_compile_failures utility_missing_queryid)});
 }
 
-# "entries dealloc evicted_entries"
+# "entries dealloc reclaimed_entries evicted_entries dropped_records"
 sub churn_counters
 {
 	my $i = info();
-	return join(' ', @$i{qw(entries dealloc evicted_entries)});
+	return join(' ', @$i{qw(entries dealloc reclaimed_entries evicted_entries
+		  dropped_records)});
 }
 
 sub set_conf
@@ -104,13 +112,17 @@ sub pin
 	          || ' ' || concat_ws(' ', provolatile, proretset)
 	          FROM pg_proc p WHERE proname = '${P}_info'}),
 		'OUT entries bigint, OUT max_entries bigint, OUT dealloc bigint, '
-		  . 'OUT evicted_entries bigint, OUT buckets integer, '
-		  . 'OUT oldest_bucket timestamp with time zone, OUT shmem_bytes bigint, '
+		  . 'OUT reclaimed_entries bigint, OUT evicted_entries bigint, '
+		  . 'OUT dropped_records bigint, OUT buckets integer, OUT bucket_seconds integer, '
+		  . 'OUT oldest_bucket timestamp with time zone, '
+		  . 'OUT current_bucket_start timestamp with time zone, '
+		  . 'OUT last_closed_bucket_start timestamp with time zone, OUT shmem_bytes bigint, '
 		  . 'OUT cap_shmem_bytes bigint, OUT invalid_tags bigint, OUT dropped_tags bigint, '
 		  . 'OUT heuristic_scans bigint, OUT regex_compile_failures bigint, '
 		  . 'OUT utility_missing_queryid bigint, '
 		  . 'OUT capped_tags bigint, OUT cap_table_full bigint, '
-		  . 'OUT stats_reset timestamp with time zone -> record v f',
+		  . 'OUT stats_reset timestamp with time zone, OUT stats_reset_epoch bigint '
+		  . '-> record v f',
 		'_info(): exactly the §7 columns, one row, VOLATILE');
 	is(sql(qq{SELECT pg_get_function_arguments(p.oid) || ' -> ' || pg_get_function_result(p.oid)
 	          || ' ' || provolatile::text FROM pg_proc p WHERE proname = '${P}_reset'}),
@@ -145,7 +157,7 @@ sub pin
 		"cap_shmem_bytes ($i->{cap_shmem_bytes}) is the default table's words plus a small header");
 	is(sql(qq{SELECT stats_reset <= now() AND stats_reset > now() - interval '1 hour'
 	          FROM ${P}_info()}), 't', 'stats_reset is set at startup');
-	is(diag_counters() . ' ' . churn_counters(), '0 0 0 0 0 0 0 0',
+	is(diag_counters() . ' ' . churn_counters(), '0 0 0 0 0 0 0 0 0 0',
 		'all counters start at zero');
 }
 
@@ -182,19 +194,118 @@ my $big = q{'SELECT 2 /*' || (SELECT string_agg('k' || i || '=''' || repeat('v',
 # ----------------------------------------------- churn: dealloc, evicted
 {
 	sql("SELECT ${P}_reset()");
-	is(churn_counters(), '0 0 0', 'reset: no entries, no passes');
+	is(churn_counters(), '0 0 0 0 0', 'reset: no entries, no passes');
 	sql(q{SELECT format('SELECT 1 /*k=''%s''*/', i) FROM generate_series(1, 100) i \gexec});
-	is(churn_counters(), '100 0 0', '100 distinct tag sets fill the table, no pass yet');
+	is(churn_counters(), '100 0 0 0 0', '100 distinct tag sets fill the table, no pass yet');
 	is(info()->{entries},
 		sql(q{SELECT count(*) FROM (SELECT DISTINCT dbid, userid, queryid, toplevel, tags
 		      FROM pssc_store_test_entries()) e}),
 		'entries equals the number of entries in the table');
 	sql(q{SELECT format('SELECT 1 /*k=''x%s''*/', i) FROM generate_series(1, 10) i \gexec});
-	my ($n, $d, $e) = split / /, churn_counters();
+	my ($n, $d, $r, $e, $x) = split / /, churn_counters();
 	ok($d >= 2, "churn: dealloc counts eviction passes ($d)");
 	ok($e >= 10 && $e >= $d * 5, "churn: evicted_entries counts evicted entries ($e)");
+	is("$r $x", '0 0', 'churn of live entries: nothing reclaimed, nothing dropped');
 	ok($n <= 100 && $n == 100 + 10 - $e,
 		"churn: entries ($n) = 110 inserted - $e evicted, within max_entries");
+}
+
+# ------------------- eviction outcomes: reclaimed vs evicted vs dropped
+# Driven at a pinned clock with pssc_store_test_record() (max_entries 100,
+# bucket_count 4, so a pass aims to free 5 entries).
+{
+	my $fill = sub {
+		my ($from, $to) = @_;
+		sql("SELECT count(*) FROM generate_series($from, $to) q, pssc_store_test_record(q)");
+	};
+	my $b = sql('SELECT reader_bucket + 10 FROM pssc_store_test_buckets()');
+
+	# Expired-only reclamation: every entry dead, the pass frees them all.
+	sql("SELECT ${P}_reset()");
+	pin($b);
+	$fill->(1, 100);
+	is(churn_counters(), '100 0 0 0 0', 'reclaim: 100 live entries, no pass yet');
+	pin($b + 4);    # window [b+1, b+4]: every entry is dead
+	is(sql(q{SELECT pssc_store_test_record(1001)}), 'inserted', 'reclaim: the insert succeeds');
+	is(churn_counters(), '1 1 100 0 0',
+		'dead entries only: reclaimed_entries moves, evicted_entries does not');
+
+	# Undersized churn: every entry live, the pass evicts live ones.
+	sql("SELECT ${P}_reset()");
+	pin($b + 10);
+	$fill->(1, 100);
+	is(sql(q{SELECT pssc_store_test_record(1001)}), 'inserted', 'evict: the insert succeeds');
+	is(churn_counters(), '96 1 0 5 0',
+		'live entries only: evicted_entries moves, reclaimed_entries does not');
+
+	# Both in one pass: 2 dead entries fall short of the target of 5.
+	sql("SELECT ${P}_reset()");
+	pin($b + 20);
+	$fill->(1, 2);
+	pin($b + 24);    # entries 1, 2 dead
+	$fill->(3, 100);
+	is(sql(q{SELECT pssc_store_test_record(1001)}), 'inserted', 'mixed: the insert succeeds');
+	is(churn_counters(), '96 1 2 3 0',
+		'a pass that reclaims 2 dead and evicts 3 live entries counts each apart');
+
+	# Dropped: a full table of live entries and a pass that frees nothing
+	# (its candidate buffer cannot be allocated).
+	sql("SELECT ${P}_reset()");
+	pin($b + 30);
+	$fill->(1, 100);
+	is(sql(q{SELECT pssc_store_test_fail_next_eviction_alloc(),
+	                pssc_store_test_record(1001)}), '|full', 'drop: the record is lost');
+	is(churn_counters(), '100 1 0 0 1',
+		'a pass that frees nothing: dropped_records moves, nothing reclaimed or evicted');
+	is(info()->{dropped_records}, sql('SELECT dropped_records FROM pssc_store_test_counters()'),
+		'dropped_records is the store\'s own counter');
+	sql("SELECT ${P}_reset()");
+	is(churn_counters(), '0 0 0 0 0', 'reset zeroes all three');
+	sql('SELECT pssc_store_test_set_clock_offset(0)');
+}
+
+# ------------------------------------- bucket metadata, stats_reset_epoch
+{
+	sql("SELECT ${P}_reset()");
+	my $i = info();
+	is($i->{bucket_seconds}, sql('SELECT interval_us / 1000000 FROM pssc_store_test_buckets()'),
+		'bucket_seconds is bucket_interval in seconds');
+	is($i->{bucket_seconds}, sql("SELECT setting FROM pg_settings WHERE name = '$P.bucket_interval'"),
+		'bucket_seconds equals the bucket_interval setting');
+
+	my $b = sql('SELECT reader_bucket + 50 FROM pssc_store_test_buckets()');
+	my $start = sub { sql("SELECT pssc_store_test_bucket_start($_[0])") };
+	pin($b);
+	$i = info();
+	is($i->{current_bucket_start}, $start->($b),
+		'current_bucket_start: the start of the current bucket');
+	is($i->{last_closed_bucket_start}, $start->($b - 1),
+		'last_closed_bucket_start: the start of the bucket before it');
+	is(sql(qq{SELECT current_bucket_start - last_closed_bucket_start
+	              = make_interval(secs => bucket_seconds)
+	          FROM ${P}_info()}), 't', 'they are one bucket apart');
+	is(sql(qq{SELECT current_bucket_start = (SELECT pssc_store_test_bucket_start(current_bucket)
+	                                         FROM pssc_store_test_buckets())
+	          FROM ${P}_info()}), 't', 'current_bucket_start follows the store watermark');
+
+	# The watermark never moves back: after a backward clock step the
+	# current bucket stays the newest one observed.
+	pin($b - 3);
+	$i = info();
+	is("$i->{current_bucket_start} $i->{last_closed_bucket_start}",
+		$start->($b) . ' ' . $start->($b - 1),
+		'a backward clock step does not move the current or last closed bucket back');
+	pin($b + 2);
+	$i = info();
+	is("$i->{current_bucket_start} $i->{last_closed_bucket_start}",
+		$start->($b + 2) . ' ' . $start->($b + 1), 'they advance with the clock');
+	sql('SELECT pssc_store_test_set_clock_offset(0)');
+
+	is(sql(qq{SELECT stats_reset_epoch = floor(extract(epoch FROM stats_reset))::bigint
+	          FROM ${P}_info()}), 't',
+		'stats_reset_epoch is stats_reset in whole Unix epoch seconds');
+	ok(sql(qq{SELECT stats_reset_epoch FROM ${P}_info()}) > 1700000000,
+		'stats_reset_epoch is a Unix time');
 }
 
 # ---------------------------------------------- regex_compile_failures
@@ -241,7 +352,7 @@ my $big = q{'SELECT 2 /*' || (SELECT string_agg('k' || i || '=''' || repeat('v',
 
 	my $ts = sql(qq{SELECT statement_timestamp() FROM ${P}_reset()});
 	my $after = info();
-	is(diag_counters() . ' ' . churn_counters(), '0 0 0 0 0 0 0 0',
+	is(diag_counters() . ' ' . churn_counters(), '0 0 0 0 0 0 0 0 0 0',
 		'reset zeroes entries and every counter');
 	is($after->{oldest_bucket}, 'NULL', 'reset: oldest_bucket NULL');
 	is(sql(qq{SELECT stats_reset >= '$ts' AND stats_reset > '$before->{stats_reset}'
@@ -334,6 +445,33 @@ my $big = q{'SELECT 2 /*' || (SELECT string_agg('k' || i || '=''' || repeat('v',
 		is(diag_counters(), '0 0 0 0 0',
 			"$name: the reset came wholly after the flush (nothing split)");
 	}
+
+	# _info() vs a concurrent watermark advance: the one entry's only slot
+	# (bucket b) is judged live in the window ending at b + 3; while the
+	# scan is stalled after it, another reader moves the watermark to b + 4,
+	# which expires b. The row must still be self-consistent: oldest_bucket
+	# judged against the watermark it reports (NULL here), never a slot
+	# that has expired at current_bucket_start.
+	unlink $release;
+	sql("SELECT ${P}_reset()");
+	my $b = sql('SELECT reader_bucket + 10 FROM pssc_store_test_buckets()');
+	pin($b);
+	sql('SELECT pssc_store_test_record(1)');
+	pin($b + 3);
+	my $a = $bg->('pssc_info_scan', "SELECT pssc_store_test_stall_next_info_scan('$release')",
+		qq{SELECT coalesce(oldest_bucket::text, 'NULL') || '|' || current_bucket_start
+		   FROM ${P}_info()});
+	ok($waiting->('pssc_info_scan', q{wait_event = 'PgSleep'}),
+		'_info() scan stalls after judging the entry');
+	pin($b + 4);
+	is(sql("SELECT count(*) FROM $P"), '0', 'another reader moves the watermark: b expired');
+	open(my $fh, '>', $release) or die "cannot create $release: $!";
+	close($fh);
+	$a->{h}->finish;
+	is($a->{err}, '', 'the stalled _info() succeeds');
+	is($a->{out} =~ s/^\s+|\s+$//gr, 'NULL|' . sql("SELECT pssc_store_test_bucket_start($b + 4)"),
+		'_info() row is self-consistent: oldest_bucket judged at its own current_bucket_start');
+	sql('SELECT pssc_store_test_set_clock_offset(0)');
 	unlink $release;
 }
 
@@ -390,7 +528,7 @@ unlike(slurp_file($node->logfile), qr/TRAP|PANIC|terminated by signal/, 'no cras
 	$np->start;
 	$np->safe_psql('postgres', "CREATE EXTENSION $P");
 	for my $q ("SELECT * FROM ${P}_info()", "SELECT ${P}_reset()",
-		"SELECT * FROM $P", "SELECT * FROM ${P}_totals")
+		"SELECT * FROM $P", "SELECT * FROM ${P}_totals", "SELECT * FROM ${P}_last_bucket")
 	{
 		my ($ret, $out, $err) = $np->psql('postgres', $q);
 		like($err, qr/ERROR:  $P must be loaded via "shared_preload_libraries"/,

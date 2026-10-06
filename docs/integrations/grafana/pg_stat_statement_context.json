@@ -1114,7 +1114,7 @@
       "type": "timeseries",
       "id": 20,
       "title": "Eviction",
-      "description": "Eviction passes and entries removed per second. evicted_entries counts dead (expired) entries too, so it is not by itself a sign of undersizing; compare with Live entries.",
+      "description": "Per second: eviction passes; expired entries reclaimed (normal housekeeping); live entries evicted (a sign that max_entries is too small); calls dropped because a pass freed nothing (should always be 0).",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1175,7 +1175,29 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (instance) (rate(pssc_info_evicted_entries_total{job=\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "evicted entries/s {{instance}}",
+          "legendFormat": "live entries evicted/s {{instance}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (instance) (rate(pssc_info_reclaimed_entries_total{job=\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "expired entries reclaimed/s {{instance}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (instance) (rate(pssc_info_dropped_records_total{job=\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "calls dropped/s {{instance}}",
           "range": true,
           "instant": false
         }

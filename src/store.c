@@ -39,6 +39,10 @@ typedef struct PsscEntryHeader
 	int			encoding;		/* of tags[] (that of key.dbid) */
 	int64		last_bucket;	/* newest bucket_id written */
 	double		usage;			/* pgss-style, for eviction (§5.3) */
+	/* monotonic since stats_since, whatever bucket each call landed in */
+	int64		calls_total;
+	double		exec_time_total;	/* ms */
+	TimestampTz stats_since;	/* when the entry was created */
 } PsscEntryHeader;
 
 /* Shared header. */
@@ -82,7 +86,8 @@ typedef struct PsscSharedState
 	/* under the lock (exclusive to change) */
 	int64		entries;
 	int64		dealloc;		/* eviction passes (§5.3) */
-	int64		evicted_entries;	/* entries removed by them, dead or live */
+	int64		reclaimed_entries;	/* dead entries they reclaimed */
+	int64		evicted_entries;	/* live entries they evicted */
 	TimestampTz stats_reset;
 
 	/* updated without the lock */
@@ -112,6 +117,8 @@ static PsscStoreRecordTestHook record_test_hook = NULL;
 static void *record_test_hook_arg = NULL;
 static PsscStoreRecordTestHook flush_test_hook = NULL;
 static void *flush_test_hook_arg = NULL;
+static PsscStoreRecordTestHook info_scan_test_hook = NULL;
+static void *info_scan_test_hook_arg = NULL;
 
 /* Testing aid: the next eviction pass in this backend gets no candidate buffer. */
 static bool debug_fail_next_eviction_alloc = false;
@@ -315,6 +322,7 @@ store_shmem_startup(void)
 		state->force_collisions = false;
 		state->entries = 0;
 		state->dealloc = 0;
+		state->reclaimed_entries = 0;
 		state->evicted_entries = 0;
 		state->stats_reset = GetCurrentTimestamp();
 
@@ -478,6 +486,9 @@ entry_init(void *entry)
 	hdr->encoding = GetDatabaseEncoding();
 	hdr->last_bucket = PSSC_BUCKET_NONE;
 	hdr->usage = pssc_usage_init();
+	hdr->calls_total = 0;
+	hdr->exec_time_total = 0.0;
+	hdr->stats_since = GetCurrentTimestamp();
 	for (int i = 0; i < store_state->bucket_count; i++)
 		pssc_slot_init(&slots[i]);
 }
@@ -510,6 +521,8 @@ entry_accum(void *entry, double elapsed_ms)
 		pssc_slot_accum(slot, elapsed_ms);
 	}
 	hdr->last_bucket = bucket_id;
+	hdr->calls_total++;
+	hdr->exec_time_total += elapsed_ms;
 	pssc_usage_exec(&hdr->usage);
 
 #ifdef USE_ASSERT_CHECKING
@@ -598,7 +611,9 @@ evict_buffer(size_t cap, bool *transient)
  *	   full sort of every live entry (pssc_evict_sort()), at O(n) cost
  *	   instead of O(n log n), in one scan, with a buffer of target entries
  *	   (not nlive) that is reused across passes.
- *	3. dealloc += 1; evicted_entries += every entry removed, dead or live.
+ *	3. dealloc += 1; reclaimed_entries += the dead entries removed,
+ *	   evicted_entries += the live ones (a sign that max_entries is too
+ *	   small, where reclaiming dead entries is normal housekeeping).
  *
  * The entry fields are read and written without the entry spinlocks: those
  * are only ever taken by a backend holding the table lock (writers and
@@ -624,7 +639,7 @@ store_evict(void)
 	int64		dead = 0;
 	int64		nlive = 0;
 	int64		nvictims;
-	int64		evicted = 0;
+	int64		evicted = 0;	/* live entries */
 	PsscEvictCandidate *cands = NULL;
 	PsscEvictSelect sel;
 	bool		transient = false;
@@ -662,8 +677,6 @@ store_evict(void)
 				pssc_evict_select_offer(&sel, hdr->last_bucket, hdr->usage, entry);
 		}
 	}
-	evicted = dead;
-
 	nvictims = pssc_evict_live_count(target, dead, nlive);
 	if (nvictims > 0 && cands != NULL)
 	{
@@ -672,16 +685,17 @@ store_evict(void)
 		Assert(n == (size_t) nvictims);
 		for (size_t i = 0; i < n; i++)
 			hash_search(store_htab, cands[i].entry, HASH_REMOVE, NULL);
-		evicted += (int64) n;
+		evicted = (int64) n;
 	}
 	if (transient && cands != NULL)
 		pfree(cands);
 
-	store_state->entries -= evicted;
+	store_state->entries -= dead + evicted;
 	store_state->dealloc++;
+	store_state->reclaimed_entries += dead;
 	store_state->evicted_entries += evicted;
 	Assert(store_state->entries == hash_get_num_entries(store_htab));
-	return evicted;
+	return dead + evicted;
 }
 
 static inline bool
@@ -861,7 +875,7 @@ pssc_store_foreach(PsscStoreVisitor fn, void *arg)
 	LWLockAcquire(store_state->lock, LW_SHARED);
 
 	/* readers advance the watermark to the clock: no dependence on writers */
-	(void) observe_current_bucket(PSSC_BUCKET_NONE);
+	view.scan_bucket = observe_current_bucket(PSSC_BUCKET_NONE);
 	hash_seq_init(&seq, store_htab);
 	while ((entry = hash_seq_search(&seq)) != NULL)
 	{
@@ -885,6 +899,9 @@ pssc_store_foreach(PsscStoreVisitor fn, void *arg)
 		view.encoding = chdr->encoding;
 		view.last_bucket = chdr->last_bucket;
 		view.usage = chdr->usage;
+		view.calls_total = chdr->calls_total;
+		view.exec_time_total = chdr->exec_time_total;
+		view.stats_since = chdr->stats_since;
 		view.bucket_count = store_state->bucket_count;
 		view.slots = entry_slots(copy);
 		fn(&view, arg);
@@ -909,6 +926,7 @@ pssc_store_reset(void)
 		hash_search(store_htab, entry, HASH_REMOVE, NULL);
 	store_state->entries = 0;
 	store_state->dealloc = 0;
+	store_state->reclaimed_entries = 0;
 	store_state->evicted_entries = 0;
 	pg_atomic_write_u64(&store_state->invalid_tags, 0);
 	pg_atomic_write_u64(&store_state->dropped_tags, 0);
@@ -937,6 +955,7 @@ read_counters_locked(PsscStoreCounters *c)
 	c->entries = store_state->entries;
 	c->hash_entries = (int64) hash_get_num_entries(store_htab);
 	c->dealloc = store_state->dealloc;
+	c->reclaimed_entries = store_state->reclaimed_entries;
 	c->evicted_entries = store_state->evicted_entries;
 	c->stats_reset = store_state->stats_reset;
 	c->force_collisions = store_state->force_collisions;
@@ -955,6 +974,7 @@ read_counters_locked(PsscStoreCounters *c)
 	c->keysize = store_state->keysize;
 	c->entrysize = store_state->entrysize;
 	c->bucket_count = store_state->bucket_count;
+	c->interval_us = store_state->interval_us;
 	c->max_tagset_bytes = store_state->max_tagset_bytes;
 }
 
@@ -979,6 +999,7 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 	int			count;
 	int64	   *ids;
 	int64		oldest = PSSC_BUCKET_NONE;
+	int64		current;
 
 	memset(c, 0, sizeof(*c));
 	*oldest_bucket = PSSC_BUCKET_NONE;
@@ -991,26 +1012,44 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 	read_counters_locked(c);
 
 	/* as every reader (§5.2): advance the watermark to the clock first */
-	(void) observe_current_bucket(PSSC_BUCKET_NONE);
-	hash_seq_init(&seq, store_htab);
-	while ((entry = hash_seq_search(&seq)) != NULL)
+	current = observe_current_bucket(PSSC_BUCKET_NONE);
+
+	/*
+	 * Judge every slot against one watermark, the one returned as
+	 * current_bucket, so the row is self-consistent; if a writer or reader
+	 * moved it during the scan, scan again (it moves at most once per
+	 * bucket_interval, so this is rare and settles quickly).
+	 */
+	for (;;)
 	{
-		PsscEntryHeader *hdr = entry_header(entry);
-		PsscSlot   *slots = entry_slots(entry);
-		int64		current;
+		int64		after;
 
-		SpinLockAcquire(&hdr->mutex);
-		for (int i = 0; i < count; i++)
-			ids[i] = slots[i].bucket_id;
-		SpinLockRelease(&hdr->mutex);
+		oldest = PSSC_BUCKET_NONE;
+		hash_seq_init(&seq, store_htab);
+		while ((entry = hash_seq_search(&seq)) != NULL)
+		{
+			PsscEntryHeader *hdr = entry_header(entry);
+			PsscSlot   *slots = entry_slots(entry);
 
-		/* read after the copy, as in pssc_store_foreach() */
-		current = watermark_read();
-		for (int i = 0; i < count; i++)
-			if (pssc_bucket_is_live(ids[i], current, count) &&
-				(oldest == PSSC_BUCKET_NONE || ids[i] < oldest))
-				oldest = ids[i];
+			SpinLockAcquire(&hdr->mutex);
+			for (int i = 0; i < count; i++)
+				ids[i] = slots[i].bucket_id;
+			SpinLockRelease(&hdr->mutex);
+
+			for (int i = 0; i < count; i++)
+				if (pssc_bucket_is_live(ids[i], current, count) &&
+					(oldest == PSSC_BUCKET_NONE || ids[i] < oldest))
+					oldest = ids[i];
+
+			if (unlikely(info_scan_test_hook != NULL))
+				info_scan_test_hook(info_scan_test_hook_arg);
+		}
+		after = watermark_read();
+		if (after == current)
+			break;
+		current = after;
 	}
+	c->current_bucket = current;
 	LWLockRelease(store_state->lock);
 
 	pfree(ids);
@@ -1089,6 +1128,13 @@ pssc_store_set_flush_test_hook(PsscStoreRecordTestHook hook, void *arg)
 {
 	flush_test_hook = hook;
 	flush_test_hook_arg = arg;
+}
+
+void
+pssc_store_set_info_scan_test_hook(PsscStoreRecordTestHook hook, void *arg)
+{
+	info_scan_test_hook = hook;
+	info_scan_test_hook_arg = arg;
 }
 
 

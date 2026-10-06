@@ -46,17 +46,19 @@ sub counters
 	my @cols = qw(entries max_entries dealloc evicted_entries invalid_tags
 	  dropped_tags regex_compile_failures heuristic_scans
 	  utility_missing_queryid dropped_records stats_reset shmem_bytes keysize
-	  entrysize bucket_count max_tagset_bytes force_collisions hash_entries);
+	  entrysize bucket_count max_tagset_bytes force_collisions hash_entries
+	  reclaimed_entries);
 	my @v = split /\|/, sql('SELECT * FROM pssc_store_test_counters()'), -1;
 	my %c;
 	@c{@cols} = @v;
 	return \%c;
 }
-# "entries dealloc evicted_entries dropped_records"
+# "entries dealloc reclaimed_entries evicted_entries dropped_records"
 sub evict_state
 {
 	my $c = counters();
-	return "$c->{entries} $c->{dealloc} $c->{evicted_entries} $c->{dropped_records}";
+	return "$c->{entries} $c->{dealloc} $c->{reclaimed_entries} $c->{evicted_entries} "
+	  . $c->{dropped_records};
 }
 # Reset, then pin the debug clock in the middle of a bucket beyond any
 # bucket seen so far (current_bucket never decreases); returns that bucket.
@@ -126,7 +128,7 @@ configure(max_entries => 100);
 # ----------------------------------------------- sequential churn, limits
 {
 	fresh();
-	is(evict_state(), '0 0 0 0', 'starts empty, no passes');
+	is(evict_state(), '0 0 0 0 0', 'starts empty, no passes');
 	# Every insert must succeed and the entry count may never exceed the limit.
 	is(sql(q{DO $$
 	DECLARE r text; c record;
@@ -146,7 +148,7 @@ configure(max_entries => 100);
 		'1000 distinct keys into max_entries=100: every insert succeeds, never above the limit');
 	# target = max(1, 100 * 5 / 100) = 5: each pass frees 5, then 5 inserts
 	# refill the table, so inserts 101, 106, ..., 996 each trigger a pass.
-	is(evict_state(), '100 180 900 0',
+	is(evict_state(), '100 180 0 900 0',
 		'180 passes evicted 900 entries (5 each); nothing dropped');
 	is(rec(q{1000}), 'updated', 'the newest entry survived and is updated in place');
 	is(keys_present(), ids(901 .. 1000),
@@ -163,7 +165,7 @@ configure(max_entries => 100);
 	is(sql('SELECT count(DISTINCT queryid) FROM pssc_store_test_entries() WHERE dead'), 30,
 		'30 dead entries (usage 11) and 70 live ones (usage 2)');
 	is(rec(q{999}), 'inserted', 'insert into a full table succeeds');
-	is(evict_state(), '71 1 30 0',
+	is(evict_state(), '71 1 30 0 0',
 		'one pass reclaimed all 30 dead entries (more than the target of 5) and no live one');
 	is(keys_present(), ids(101 .. 170, 999), 'every live entry survived');
 	is(sql(q{SELECT string_agg(DISTINCT usage::text, ',') FROM pssc_store_test_entries()
@@ -181,7 +183,7 @@ configure(max_entries => 100);
 	fill(104, 198, 2);		# usage 3
 	is(counters()->{entries}, 100, 'full: 2 dead + 98 live');
 	is(rec(q{999}), 'inserted', 'insert into a full table succeeds');
-	is(evict_state(), '96 1 5 0', 'one pass evicted 5: the 2 dead ones and 3 live ones');
+	is(evict_state(), '96 1 2 3 0', 'one pass freed 5: the 2 dead ones (reclaimed) and 3 live ones (evicted)');
 	is(keys_present(), ids(104 .. 198, 999),
 		'the dead entries and the 3 lowest-usage live entries were evicted');
 	is(sql('SELECT pssc_store_test_check_invariants()'), 96, 'invariants hold');
@@ -197,7 +199,7 @@ configure(max_entries => 100);
 	is(sql('SELECT count(*) FROM pssc_store_test_entries() WHERE dead'), 0,
 		'all 100 entries are live');
 	is(rec(q{999}), 'inserted', 'insert into a full table succeeds');
-	is(evict_state(), '96 1 5 0', 'one pass evicted 5 live entries');
+	is(evict_state(), '96 1 0 5 0', 'one pass evicted 5 live entries');
 	is(keys_present('queryid <= 5'), '',
 		'the 5 least recently written entries were evicted despite the highest usage');
 
@@ -211,7 +213,7 @@ configure(max_entries => 100);
 		rec($q) unless $low{$q};	# usage 3, the five low ones usage 2
 	}
 	is(rec(q{999}), 'inserted', 'insert into a full table succeeds');
-	is(evict_state(), '96 1 5 0', 'one pass evicted 5 live entries');
+	is(evict_state(), '96 1 0 5 0', 'one pass evicted 5 live entries');
 	is(keys_present('queryid IN (' . ids(@low) . ')'), '',
 		'within one bucket the 5 lowest-usage entries were evicted');
 	is(sql(q{SELECT string_agg(DISTINCT usage::text, ',') FROM pssc_store_test_entries()
@@ -224,7 +226,7 @@ configure(max_entries => 100);
 	fill(1000, 1003);
 	is(counters()->{entries}, 100, 'full again');
 	is(rec(q{1004}), 'inserted', 'second triggering insert succeeds');
-	is(evict_state(), '96 2 10 0', 'second pass: dealloc 2, evicted_entries 10');
+	is(evict_state(), '96 2 0 10 0', 'second pass: dealloc 2, evicted_entries 10');
 	is(keys_present('queryid >= 999'), '1004',
 		'the second pass evicted the low-usage newcomers 999..1003');
 }
@@ -235,7 +237,7 @@ configure(max_entries => 100);
 	sql('SELECT pssc_store_test_force_collisions(true)');
 	fresh();
 	fill(1, 300);
-	is(evict_state(), '100 40 200 0', 'one dynahash chain: churn evicts correctly');
+	is(evict_state(), '100 40 0 200 0', 'one dynahash chain: churn evicts correctly');
 	is(keys_present(), ids(201 .. 300), 'the 100 newest keys remain');
 	is(rec(q{250}), 'updated', 'surviving colliding keys are still found');
 	is(sql('SELECT pssc_store_test_check_invariants()'), 100, 'invariants hold');
@@ -252,11 +254,11 @@ configure(max_entries => 100);
 	is(sql(q{SELECT pssc_store_test_fail_next_eviction_alloc(),
 	                pssc_store_test_record(999)}), '|full',
 		'allocation failure with no dead entries: the record is dropped');
-	is(evict_state(), '100 1 0 1', 'counted in dropped_records; nothing evicted');
+	is(evict_state(), '100 1 0 0 1', 'counted in dropped_records; nothing evicted');
 	is(keys_present(), ids(1 .. 100), 'the table is unchanged');
 	is(sql('SELECT pssc_store_test_check_invariants()'), 100, 'invariants hold');
 	is(rec(q{999}), 'inserted', 'the next insert evicts normally');
-	is(evict_state(), '96 2 5 1', 'second pass evicted 5');
+	is(evict_state(), '96 2 0 5 1', 'second pass evicted 5');
 
 	# Dead entries are reclaimed without allocating, so the insert succeeds.
 	my $b = fresh();
@@ -266,7 +268,7 @@ configure(max_entries => 100);
 	is(sql(q{SELECT pssc_store_test_fail_next_eviction_alloc(),
 	                pssc_store_test_record(999)}), '|inserted',
 		'allocation failure with 3 dead entries: the insert still succeeds');
-	is(evict_state(), '98 1 3 0', 'the dead entries were reclaimed; no live one');
+	is(evict_state(), '98 1 3 0 0', 'the dead entries were reclaimed; no live one');
 	is(keys_present(), ids(101 .. 197, 999), 'every live entry survived');
 	is(sql('SELECT pssc_store_test_check_invariants()'), 98, 'invariants hold');
 }
@@ -286,7 +288,7 @@ configure(max_entries => 100);
 	                pssc_store_test_record(1004), pssc_store_test_record(1005)}),
 		'inserted|inserted|inserted|inserted|inserted||full|inserted',
 		'one backend: pass, refill, failed pass (buffer held), normal pass');
-	is(evict_state(), '96 3 10 1', 'three passes; only the failed one dropped');
+	is(evict_state(), '96 3 0 10 1', 'three passes; only the failed one dropped');
 	is(sql('SELECT pssc_store_test_check_invariants()'), 96, 'invariants hold');
 }
 
@@ -300,7 +302,7 @@ configure(max_entries => 50000);
 	is(sql(q{SELECT count(*) FROM generate_series(50001, 52501) q
 	          WHERE pssc_store_test_record(q) <> 'inserted'}), 0,
 		'max_entries 50000: 2501 inserts in one backend succeed');
-	is(evict_state(), '47501 2 5000 0', 'two passes of 2500 each');
+	is(evict_state(), '47501 2 0 5000 0', 'two passes of 2500 each');
 	is(sql(q{SELECT count(*) FROM pssc_store_test_entries() WHERE queryid <= 2500}),
 		0, 'the first pass evicted the 2500 lowest-usage entries');
 	is(sql(q{SELECT count(*) FROM pssc_store_test_entries()
@@ -319,7 +321,7 @@ configure(max_entries => 50000);
 	                pssc_store_test_record(60000), pssc_store_test_record(60001)}),
 		'|full|inserted',
 		'max_entries 50000: failed per-pass allocation, then a normal pass');
-	is(evict_state(), '47501 2 2500 1', 'the failed pass dropped; the next evicted 2500');
+	is(evict_state(), '47501 2 0 2500 1', 'the failed pass dropped; the next evicted 2500');
 	is(sql('SELECT pssc_store_test_check_invariants()'), 47501, 'invariants hold');
 }
 configure(max_entries => 100);
@@ -349,16 +351,17 @@ INSERT INTO results SELECT pssc_store_test_record(:q, '{}', NULL, 0.5);
 	ok($c->{entries} > 0 && $c->{entries} <= 100 && $c->{entries} == $c->{hash_entries},
 		"collisions=$collide: entries ($c->{entries}) within max_entries, matching the hash table");
 	is($c->{dropped_records}, 0, "collisions=$collide: no record was dropped");
-	ok($c->{dealloc} > 0 && $c->{evicted_entries} >= 5 * $c->{dealloc},
+	my $freed = $c->{reclaimed_entries} + $c->{evicted_entries};
+	ok($c->{dealloc} > 0 && $freed >= 5 * $c->{dealloc},
 		"collisions=$collide: passes ran ($c->{dealloc}), each freeing at least the "
-		  . "target of 5 ($c->{evicted_entries} evicted)");
-	ok($c->{evicted_entries} > 5 * $c->{dealloc},
+		  . "target of 5 ($c->{reclaimed_entries} reclaimed, $c->{evicted_entries} evicted)");
+	ok($freed > 5 * $c->{dealloc} && $c->{reclaimed_entries} > 0,
 		"collisions=$collide: some passes reclaimed more dead entries than the target");
 	my ($records, $inserted, $full) = split /\|/, sql(q{SELECT count(*),
 	    count(*) FILTER (WHERE r = 'inserted'), count(*) FILTER (WHERE r = 'full')
 	    FROM results});
 	is($full, 0, "collisions=$collide: every record succeeded");
-	is($inserted - $c->{evicted_entries}, $c->{entries},
+	is($inserted - $freed, $c->{entries},
 		"collisions=$collide: inserted ($inserted) - evicted = entries");
 	my $calls = sql('SELECT coalesce(sum(calls), 0) FROM pssc_store_test_entries()');
 	ok($calls >= $c->{entries} && $calls <= $records,

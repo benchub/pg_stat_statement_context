@@ -6,11 +6,20 @@
  * _info() returns one row from a consistent snapshot of the shared header
  * (pssc_store_get_info(): one acquisition of the shared lock, so it is
  * wholly before or wholly after any reset):
- *	entries, max_entries, dealloc, evicted_entries	the table (§5.1, §5.3)
+ *	entries, max_entries	the table (§5.1)
+ *	dealloc, reclaimed_entries, evicted_entries, dropped_records
+ *					eviction passes, the dead entries they reclaimed, the
+ *					live entries they evicted, and the records lost because
+ *					a pass freed nothing (§5.3)
  *	buckets			bucket_count, the ring size (§4.1)
+ *	bucket_seconds	bucket_interval, in seconds
  *	oldest_bucket	start of the oldest live slot of any entry, i.e. the
  *					oldest bucket_start the stats view can show; NULL if no
  *					slot is live (empty table, or every entry expired)
+ *	current_bucket_start, last_closed_bucket_start
+ *					start of the current_bucket watermark (§5.2) and of the
+ *					bucket before it, the newest one no write can land in
+ *					any more (what the _last_bucket view shows)
  *	shmem_bytes		exactly the size requested at startup (§5.1)
  *	cap_shmem_bytes	exactly the size requested for the separate cardinality
  *					caps table (cardinality_cap_slots; allocated even
@@ -20,7 +29,7 @@
  *	capped_tags, cap_table_full	values collapsed to null by the cardinality
  *					caps (§6.11 step 8), and of those the ones collapsed
  *					because the tracking table was full
- *	stats_reset
+ *	stats_reset, stats_reset_epoch	the latter in whole Unix epoch seconds
  * Finding oldest_bucket scans the whole table under the shared lock, as the
  * stats SRF does. Like every reader, _info() first raises current_bucket to
  * the clock.
@@ -67,7 +76,7 @@
 #include "extract.h"
 #include "store.h"
 
-#define INFO_COLS	16
+#define INFO_COLS	22
 
 static void
 require_preloaded(void)
@@ -104,12 +113,17 @@ pg_stat_statement_context_info(PG_FUNCTION_ARGS)
 	values[i++] = Int64GetDatum(c.entries);
 	values[i++] = Int64GetDatum(c.max_entries);
 	values[i++] = Int64GetDatum(c.dealloc);
+	values[i++] = Int64GetDatum(c.reclaimed_entries);
 	values[i++] = Int64GetDatum(c.evicted_entries);
+	values[i++] = Int64GetDatum(c.dropped_records);
 	values[i++] = Int32GetDatum(c.bucket_count);
+	values[i++] = Int32GetDatum((int32) (c.interval_us / USECS_PER_SEC));
 	if (oldest == PSSC_BUCKET_NONE)
 		nulls[i++] = true;
 	else
 		values[i++] = TimestampTzGetDatum(pssc_store_bucket_start(oldest));
+	values[i++] = TimestampTzGetDatum(pssc_store_bucket_start(c.current_bucket));
+	values[i++] = TimestampTzGetDatum(pssc_store_bucket_start(c.current_bucket - 1));
 	values[i++] = Int64GetDatum((int64) c.shmem_bytes);
 	values[i++] = Int64GetDatum((int64) pssc_cap_shmem_bytes());
 	values[i++] = Int64GetDatum(c.invalid_tags);
@@ -120,6 +134,8 @@ pg_stat_statement_context_info(PG_FUNCTION_ARGS)
 	values[i++] = Int64GetDatum(c.capped_tags);
 	values[i++] = Int64GetDatum(c.cap_table_full);
 	values[i++] = TimestampTzGetDatum(c.stats_reset);
+	values[i++] = Int64GetDatum(pssc_bucket_floor_div(c.stats_reset, USECS_PER_SEC) +
+								(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY);
 	Assert(i == INFO_COLS);
 
 	tupdesc = BlessTupleDesc(tupdesc);

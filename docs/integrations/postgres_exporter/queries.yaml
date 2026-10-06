@@ -10,12 +10,10 @@
 # See docs/integrations/README.md for the metric semantics. In short:
 #
 # * Every *_per_second metric is a GAUGE: the average rate over the most
-#   recent CLOSED bucket (bucket_interval, 5 min by default). Plot it as is;
-#   never apply rate()/increase() to it. The extension keeps no counter that
-#   only grows (buckets expire, entries are evicted), so there is nothing that
-#   rate() could be applied to. While the system clock is behind the store's
-#   current bucket (after a backward step), the first two queries return no
-#   rows rather than an older bucket.
+#   recent CLOSED bucket (bucket_interval, 5 min by default), read from the
+#   pg_stat_statement_context_last_bucket view. Plot it as is; never apply
+#   rate()/increase() to it. (The per-entry calls_total / exec_time_total
+#   columns are counters, but entries come and go; see the README.)
 # * The pssc_info_*_total metrics are real counters (reset only by
 #   pg_stat_statement_context_reset() or a restart): use rate()/increase().
 # * Tags become labels named tag_<key>. Only the keys listed in the queries
@@ -33,34 +31,28 @@
 pssc_tag:
   master: true
   query: |
-    WITH c AS MATERIALIZED (
-      SELECT * FROM pg_stat_statement_context
-    ), s AS (
-      SELECT width, date_bin(width, now(), timestamptz '2000-01-01 00:00:00+00') AS clock_bucket,
-             (SELECT max(bucket_start) FROM c) AS newest
-        FROM (SELECT current_setting('pg_stat_statement_context.bucket_interval')::interval AS width) g
-    ), w AS (
-      -- The last closed bucket is the one before the store's current bucket.
-      -- That never moves backwards, and the newest bucket with data is a lower
-      -- bound for it, so a clock step back can't select an older bucket. If
-      -- the newest bucket is more than one bucket ahead of now(), the clock
-      -- was stepped back: no bucket closes until it catches up, so no rows.
-      SELECT greatest(clock_bucket, newest) - width AS closed,
-             extract(epoch FROM width)::float8 AS secs
-        FROM s
-       WHERE newest IS NULL OR newest <= clock_bucket + width
+    WITH i AS (
+      SELECT bucket_seconds::float8 AS secs FROM pg_stat_statement_context_info()
+    ), c AS (
+      -- The last closed bucket, as chosen by the store: the one before its
+      -- current bucket, which never moves backwards, so a backward clock step
+      -- can't select an older bucket ...
+      SELECT dbid, toplevel, tags, calls, total_exec_time
+        FROM pg_stat_statement_context_last_bucket
+      UNION ALL
+      -- ... and 0 for every live tag set without calls in it.
+      SELECT dbid, toplevel, tags, 0, 0
+        FROM pg_stat_statement_context_totals
     )
     SELECT coalesce(d.datname, c.dbid::text) AS datname,
            c.toplevel::text AS toplevel,
            coalesce(c.tags ->> 'controller', '') AS tag_controller,
            coalesce(c.tags ->> 'action', '') AS tag_action,
            coalesce(c.tags ->> 'job', '') AS tag_job,
-           coalesce(sum(c.calls) FILTER (WHERE c.bucket_start = w.closed), 0)::float8
-             / min(w.secs) AS calls_per_second,
-           coalesce(sum(c.total_exec_time) FILTER (WHERE c.bucket_start = w.closed), 0)
-             / 1000 / min(w.secs) AS exec_seconds_per_second
+           sum(c.calls)::float8 / min(i.secs) AS calls_per_second,
+           sum(c.total_exec_time) / 1000 / min(i.secs) AS exec_seconds_per_second
       FROM c
-     CROSS JOIN w
+     CROSS JOIN i
       LEFT JOIN pg_database d ON d.oid = c.dbid
      WHERE c.tags IS NOT NULL
      GROUP BY 1, 2, 3, 4, 5
@@ -92,22 +84,8 @@ pssc_tag:
 pssc_query:
   master: true
   query: |
-    WITH c AS MATERIALIZED (
-      SELECT * FROM pg_stat_statement_context
-    ), s AS (
-      SELECT width, date_bin(width, now(), timestamptz '2000-01-01 00:00:00+00') AS clock_bucket,
-             (SELECT max(bucket_start) FROM c) AS newest
-        FROM (SELECT current_setting('pg_stat_statement_context.bucket_interval')::interval AS width) g
-    ), w AS (
-      -- The last closed bucket is the one before the store's current bucket.
-      -- That never moves backwards, and the newest bucket with data is a lower
-      -- bound for it, so a clock step back can't select an older bucket. If
-      -- the newest bucket is more than one bucket ahead of now(), the clock
-      -- was stepped back: no bucket closes until it catches up, so no rows.
-      SELECT greatest(clock_bucket, newest) - width AS closed,
-             extract(epoch FROM width)::float8 AS secs
-        FROM s
-       WHERE newest IS NULL OR newest <= clock_bucket + width
+    WITH i AS (
+      SELECT bucket_seconds::float8 AS secs FROM pg_stat_statement_context_info()
     ), q AS (
       SELECT coalesce(d.datname, c.dbid::text) AS datname,
              c.toplevel::text AS toplevel,
@@ -115,10 +93,10 @@ pssc_query:
              coalesce(c.tags ->> 'controller', '') AS tag_controller,
              coalesce(c.tags ->> 'action', '') AS tag_action,
              coalesce(c.tags ->> 'job', '') AS tag_job,
-             sum(c.calls)::float8 / min(w.secs) AS calls_per_second,
-             sum(c.total_exec_time) / 1000 / min(w.secs) AS exec_seconds_per_second
-        FROM c
-        JOIN w ON c.bucket_start = w.closed
+             sum(c.calls)::float8 / min(i.secs) AS calls_per_second,
+             sum(c.total_exec_time) / 1000 / min(i.secs) AS exec_seconds_per_second
+        FROM pg_stat_statement_context_last_bucket c
+       CROSS JOIN i
         LEFT JOIN pg_database d ON d.oid = c.dbid
        WHERE c.tags IS NOT NULL
        GROUP BY 1, 2, 3, 4, 5, 6
@@ -166,13 +144,15 @@ pssc_info:
            i.max_entries::float8 AS max_entries,
            (SELECT count(*) FROM pg_stat_statement_context(false, true))::float8 AS live_entries,
            i.buckets::float8 AS buckets,
-           extract(epoch FROM current_setting('pg_stat_statement_context.bucket_interval')::interval)::float8
-             AS bucket_interval_seconds,
+           i.bucket_seconds::float8 AS bucket_interval_seconds,
            coalesce(extract(epoch FROM now() - i.oldest_bucket), 0)::float8 AS oldest_bucket_age_seconds,
+           extract(epoch FROM i.last_closed_bucket_start)::float8 AS last_closed_bucket_timestamp_seconds,
            i.shmem_bytes::float8 AS shmem_bytes,
-           extract(epoch FROM i.stats_reset)::float8 AS stats_reset_timestamp_seconds,
+           i.stats_reset_epoch::float8 AS stats_reset_timestamp_seconds,
            i.dealloc::float8 AS dealloc_total,
+           i.reclaimed_entries::float8 AS reclaimed_entries_total,
            i.evicted_entries::float8 AS evicted_entries_total,
+           i.dropped_records::float8 AS dropped_records_total,
            i.invalid_tags::float8 AS invalid_tags_total,
            i.dropped_tags::float8 AS dropped_tags_total,
            i.heuristic_scans::float8 AS heuristic_scans_total,
@@ -198,6 +178,9 @@ pssc_info:
     - oldest_bucket_age_seconds:
         usage: "GAUGE"
         description: "Age of the oldest live bucket (0 if none)"
+    - last_closed_bucket_timestamp_seconds:
+        usage: "GAUGE"
+        description: "Start of the last closed bucket, which the per_second metrics come from, Unix seconds"
     - shmem_bytes:
         usage: "GAUGE"
         description: "Shared memory requested at startup"
@@ -207,9 +190,15 @@ pssc_info:
     - dealloc_total:
         usage: "COUNTER"
         description: "Eviction passes"
+    - reclaimed_entries_total:
+        usage: "COUNTER"
+        description: "Dead (expired) entries reclaimed by eviction passes: normal housekeeping"
     - evicted_entries_total:
         usage: "COUNTER"
-        description: "Entries removed by eviction passes, dead or live"
+        description: "Live entries evicted by eviction passes: max_entries is too small"
+    - dropped_records_total:
+        usage: "COUNTER"
+        description: "Calls not recorded because an eviction pass freed nothing"
     - invalid_tags_total:
         usage: "COUNTER"
         description: "Tags rejected as malformed"

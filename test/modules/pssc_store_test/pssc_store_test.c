@@ -257,8 +257,8 @@ pssc_store_test_counters(PG_FUNCTION_ARGS)
 	counters_fn get = (counters_fn) main_sym("pssc_store_get_counters");
 	PsscStoreCounters c;
 	TupleDesc	desc;
-	Datum		v[18];
-	bool		nulls[18] = {0};
+	Datum		v[19];
+	bool		nulls[19] = {0};
 
 	if (get_call_result_type(fcinfo, NULL, &desc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
@@ -282,6 +282,7 @@ pssc_store_test_counters(PG_FUNCTION_ARGS)
 	v[15] = Int32GetDatum(c.max_tagset_bytes);
 	v[16] = BoolGetDatum(c.force_collisions);
 	v[17] = Int64GetDatum(c.hash_entries);
+	v[18] = Int64GetDatum(c.reclaimed_entries);
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(desc, v, nulls)));
 }
 
@@ -409,6 +410,32 @@ pssc_store_test_stall_next_flush(PG_FUNCTION_ARGS)
 {
 	strlcpy(stall_release_file, text_to_cstring(PG_GETARG_TEXT_PP(0)), MAXPGPATH);
 	((set_hook_fn) main_sym("pssc_store_set_flush_test_hook")) (stall_flush_hook, NULL);
+	PG_RETURN_VOID();
+}
+
+/*
+ * One-shot: runs inside the next _info() scan, under the shared store lock,
+ * after the first entry has been judged, and sleeps (wait event PgSleep)
+ * until the release file exists or two minutes have passed.
+ */
+static void
+stall_info_scan_hook(void *arg)
+{
+	struct stat st;
+	int			i;
+
+	((set_hook_fn) main_sym("pssc_store_set_info_scan_test_hook")) (NULL, NULL);
+	for (i = 0; i < 12000 && stat(stall_release_file, &st) != 0; i++)
+		(void) WaitLatch(MyLatch, WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 10L,
+						 WAIT_EVENT_PG_SLEEP);
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_stall_next_info_scan);
+Datum
+pssc_store_test_stall_next_info_scan(PG_FUNCTION_ARGS)
+{
+	strlcpy(stall_release_file, text_to_cstring(PG_GETARG_TEXT_PP(0)), MAXPGPATH);
+	((set_hook_fn) main_sym("pssc_store_set_info_scan_test_hook")) (stall_info_scan_hook, NULL);
 	PG_RETURN_VOID();
 }
 

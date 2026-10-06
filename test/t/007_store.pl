@@ -33,7 +33,8 @@ sub counters
 	my @cols = qw(entries max_entries dealloc evicted_entries invalid_tags
 	  dropped_tags regex_compile_failures heuristic_scans
 	  utility_missing_queryid dropped_records stats_reset shmem_bytes keysize
-	  entrysize bucket_count max_tagset_bytes force_collisions hash_entries);
+	  entrysize bucket_count max_tagset_bytes force_collisions hash_entries
+	  reclaimed_entries);
 	my @v = split /\|/, sql('SELECT * FROM pssc_store_test_counters()'), -1;
 	my %c;
 	@c{@cols} = @v;
@@ -272,8 +273,8 @@ configure(max_entries => undef);
 	is("$c->{entries} $c->{hash_entries} $c->{invalid_tags} $c->{dropped_tags} "
 		  . "$c->{heuristic_scans} $c->{regex_compile_failures} "
 		  . "$c->{utility_missing_queryid} $c->{dropped_records} $c->{dealloc} "
-		  . "$c->{evicted_entries}",
-		'0 0 0 0 0 0 0 0 0 0', 'reset zeroes entries and counters');
+		  . "$c->{evicted_entries} $c->{reclaimed_entries}",
+		'0 0 0 0 0 0 0 0 0 0 0', 'reset zeroes entries and counters');
 	is(sql('SELECT count(*) FROM pssc_store_test_entries()'), 0, 'reset removes all entries');
 	is(sql(qq{SELECT '$c->{stats_reset}'::timestamptz > '$before->{stats_reset}'::timestamptz}),
 		't', 'reset advances stats_reset');

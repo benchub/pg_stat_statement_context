@@ -503,7 +503,9 @@ can fill the table within seconds, evicting the useful entries.
   [`normalize`](configuration.md#normalize) rules, for example
   `route: '/\d+' => '/:id'` turns `/users/123/posts/4` into
   `/users/:id/posts/:id`. Watch
-  `_info().evicted_entries` and look for keys with many distinct values:
+  `_info().evicted_entries` (live entries lost to a full table; see
+  [Eviction](configuration.md#eviction)) and look for keys with many distinct
+  values:
 
   ```sql
   SELECT t.key, count(DISTINCT t.value) AS distinct_values

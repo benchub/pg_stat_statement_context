@@ -12,7 +12,11 @@
 -- false makes tags NULL in every row. Tags are converted from the encoding
 -- of the database that recorded them; tags from a SQL_ASCII database, and
 -- tag sets that cannot be converted to this database's encoding, are
--- escaped instead (bytes >= 0x80 as \xHH, '\' as \\).
+-- escaped instead (bytes >= 0x80 as \xHH, '\' as \\). calls_total,
+-- exec_time_total and stats_since are per entry, not per bucket: they only
+-- grow from the entry's creation (stats_since) until it is evicted or reset,
+-- whatever bucket the calls landed in, and repeat on every bucket row of the
+-- entry.
 CREATE FUNCTION pg_stat_statement_context(
     IN showtags boolean DEFAULT true,
     IN merge_buckets boolean DEFAULT false,
@@ -23,7 +27,10 @@ CREATE FUNCTION pg_stat_statement_context(
     OUT toplevel bool,
     OUT tags jsonb,
     OUT calls bigint,
-    OUT total_exec_time float8
+    OUT total_exec_time float8,
+    OUT calls_total bigint,
+    OUT exec_time_total float8,
+    OUT stats_since timestamptz
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stat_statement_context_1_0'
@@ -37,8 +44,33 @@ CREATE VIEW pg_stat_statement_context AS
 CREATE VIEW pg_stat_statement_context_totals AS
     SELECT * FROM pg_stat_statement_context(true, true);
 
+-- The same columns for the last closed bucket only: the bucket before the
+-- store's current one (_info().last_closed_bucket_start), in which no call
+-- can be recorded any more. One row per entry with a live slot in it.
+CREATE FUNCTION pg_stat_statement_context_last_bucket(
+    IN showtags boolean DEFAULT true,
+    OUT bucket_start timestamptz,
+    OUT userid oid,
+    OUT dbid oid,
+    OUT queryid bigint,
+    OUT toplevel bool,
+    OUT tags jsonb,
+    OUT calls bigint,
+    OUT total_exec_time float8,
+    OUT calls_total bigint,
+    OUT exec_time_total float8,
+    OUT stats_since timestamptz
+)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_stat_statement_context_last_bucket_1_0'
+LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
+
+CREATE VIEW pg_stat_statement_context_last_bucket AS
+    SELECT * FROM pg_stat_statement_context_last_bucket(true);
+
 GRANT SELECT ON pg_stat_statement_context TO PUBLIC;
 GRANT SELECT ON pg_stat_statement_context_totals TO PUBLIC;
+GRANT SELECT ON pg_stat_statement_context_last_bucket TO PUBLIC;
 
 -- Current tags of each backend, a companion to pg_stat_activity (join on
 -- pid): one row per backend whose last top-level statement had a frame,
@@ -91,22 +123,30 @@ LANGUAGE C VOLATILE STRICT PARALLEL RESTRICTED;
 REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PUBLIC;
 
 -- Store and diagnostic counters (DESIGN.md §7), one row: entries,
--- max_entries, eviction passes (dealloc) and the entries they removed
--- (evicted_entries), buckets (= bucket_count), oldest_bucket (start of the
--- oldest live bucket of any entry; NULL if none), the exact shared memory
+-- max_entries, eviction passes (dealloc), the dead entries they reclaimed
+-- (reclaimed_entries) and the live ones they evicted (evicted_entries),
+-- records lost because a pass freed nothing (dropped_records), buckets
+-- (= bucket_count), bucket_seconds (= bucket_interval), oldest_bucket
+-- (start of the oldest live bucket of any entry; NULL if none), the start
+-- of the current bucket and of the last closed one, the exact shared memory
 -- size requested at startup (shmem_bytes) and for the separate cardinality
 -- caps table (cap_shmem_bytes), the extraction counters, the
 -- values collapsed to null by the cardinality caps (capped_tags; of which
 -- cap_table_full because the tracking table was full), and the time of the
--- last reset (or of startup). Readable by everyone, like
--- pg_stat_statements_info.
+-- last reset (or of startup), also in Unix epoch seconds. Readable by
+-- everyone, like pg_stat_statements_info.
 CREATE FUNCTION pg_stat_statement_context_info(
     OUT entries bigint,
     OUT max_entries bigint,
     OUT dealloc bigint,
+    OUT reclaimed_entries bigint,
     OUT evicted_entries bigint,
+    OUT dropped_records bigint,
     OUT buckets int,
+    OUT bucket_seconds int,
     OUT oldest_bucket timestamptz,
+    OUT current_bucket_start timestamptz,
+    OUT last_closed_bucket_start timestamptz,
     OUT shmem_bytes bigint,
     OUT cap_shmem_bytes bigint,
     OUT invalid_tags bigint,
@@ -116,7 +156,8 @@ CREATE FUNCTION pg_stat_statement_context_info(
     OUT utility_missing_queryid bigint,
     OUT capped_tags bigint,
     OUT cap_table_full bigint,
-    OUT stats_reset timestamptz
+    OUT stats_reset timestamptz,
+    OUT stats_reset_epoch bigint
 )
 RETURNS record
 AS 'MODULE_PATHNAME', 'pg_stat_statement_context_info'

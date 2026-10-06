@@ -274,11 +274,11 @@ check_run() {
 			[ "${rows:-0}" -gt 0 ] || fail "the activity reader saw no active tagged statement"
 			;;
 		evict)
-			info=$(q "SELECT dealloc || ' ' || evicted_entries || ' ' || entries || ' ' || max_entries FROM ${EXT}_info()")
-			read -r d e n m <<< "$info"
+			info=$(q "SELECT dealloc || ' ' || evicted_entries || ' ' || reclaimed_entries || ' ' || entries || ' ' || max_entries FROM ${EXT}_info()")
+			read -r d e r n m <<< "$info"
 			rows=$(q "SELECT count(DISTINCT tags->>'controller') FROM ${EXT}_totals")
 			add dealloc "$d"; add evicted_entries "$e"; add entries "$n"; add distinct_controllers "$rows"
-			[ "$d" -gt 0 ] && [ "$e" -gt 0 ] || fail "no evictions (dealloc $d, evicted_entries $e)"
+			[ "$d" -gt 0 ] && [ $((e + r)) -gt 0 ] || fail "no evictions (dealloc $d, evicted_entries $e, reclaimed_entries $r)"
 			[ "$n" -le "$m" ] || fail "entries $n > max_entries $m"
 			[ "$rows" -gt 100 ] || fail "only $rows distinct controller values: random tag not substituted?"
 			;;

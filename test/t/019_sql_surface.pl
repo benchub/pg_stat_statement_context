@@ -204,6 +204,12 @@ sql(q{SELECT count(*) FROM t WHERE id < 100000 /*controller='orders',action='ind
 	(my $srf_out = $norm->($srf)) =~ s/^.*?(?=OUT )//;
 	is($view_cols->($P), $srf_out, 'view pg_stat_statement_context: the SRF columns');
 	is($view_cols->("${P}_totals"), $srf_out, 'view _totals: the SRF columns');
+	is($view_cols->("${P}_last_bucket"), $srf_out, 'view _last_bucket: the SRF columns');
+	my ($lb) = $design7 =~ /CREATE FUNCTION ${P}_last_bucket\(\n(.*?)\)\nRETURNS SETOF record/s
+	  or die 'DESIGN.md §7: _last_bucket() definition not found';
+	is($args->("${P}_last_bucket(boolean)"), $norm->($lb),
+		'_last_bucket() arguments and OUT columns as in DESIGN.md §7');
+	is($norm->($lb) =~ s/^.*?(?=OUT )//r, $srf_out, '_last_bucket() has the SRF\'s OUT columns');
 
 	# The docs' column tables.
 	my $table = sub {

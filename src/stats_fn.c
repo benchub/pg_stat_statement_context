@@ -2,7 +2,9 @@
  * stats_fn.c
  *		pg_stat_statement_context(showtags, merge_buckets): the stats SRF of
  *		DESIGN.md §7, read by the views pg_stat_statement_context (true,
- *		false) and pg_stat_statement_context_totals (true, true).
+ *		false) and pg_stat_statement_context_totals (true, true); and
+ *		pg_stat_statement_context_last_bucket(showtags), read by the view of
+ *		the same name: the same columns, for the last closed bucket only.
  *
  * Materialize mode. Reading is in two phases, so the table lock is held only
  * while raw bytes are copied:
@@ -20,7 +22,13 @@
  * Rows: one per live slot (in bucket order) or, with merge_buckets, one per
  * entry holding the sums of its live slots (pssc_slot_merge()), with
  * bucket_start that of the oldest live slot. bucket_start = epoch +
- * bucket_id * bucket_interval.
+ * bucket_id * bucket_interval. _last_bucket() returns, per entry, only the
+ * slot of bucket scan_bucket - 1 (the bucket before the watermark observed
+ * at the start of the scan, the same for every entry, so no write can land
+ * in it any more), if that slot is still live; entries without one yield
+ * nothing. Every row also carries the entry's monotonic counters
+ * calls_total, exec_time_total and stats_since (§5.1), which therefore
+ * repeat on each bucket row of an entry.
  *
  * Visibility (§6.11), mirroring pg_stat_statements: rows of the calling
  * user (GetUserId()) are always complete; for other roles' rows queryid and
@@ -53,7 +61,7 @@
 #include "store.h"
 #include "tagout.h"
 
-#define STATS_COLS	8
+#define STATS_COLS	11
 
 /* What phase 1 copies out of one entry. */
 typedef struct StatsEntry
@@ -66,6 +74,9 @@ typedef struct StatsEntry
 	int			encoding;
 	char	   *tags;			/* NULL: tags are not output */
 	size_t		tags_len;
+	int64		calls_total;
+	double		exec_time_total;
+	TimestampTz stats_since;
 	int			nslots;			/* live slots, >= 1 */
 	PsscSlot	slots[FLEXIBLE_ARRAY_MEMBER];
 } StatsEntry;
@@ -75,10 +86,20 @@ typedef struct StatsCollect
 	Oid			caller;
 	bool		see_all;
 	bool		showtags;
+	bool		last_only;		/* only the slot of scan_bucket - 1 */
 	StatsEntry **entries;
 	int			n;
 	int			cap;
 } StatsCollect;
+
+/* Whether slot s of entry e is output. */
+static inline bool
+slot_wanted(const StatsCollect *c, const PsscStoreEntryView *e, const PsscSlot *s)
+{
+	if (c->last_only && s->bucket_id != e->scan_bucket - 1)
+		return false;
+	return pssc_bucket_is_live(s->bucket_id, e->current_bucket, e->bucket_count);
+}
 
 /* Visitor run under the shared lock: copies only, no conversion. */
 static void
@@ -91,8 +112,7 @@ collect_entry(const PsscStoreEntryView *e, void *arg)
 	if (pssc_bucket_entry_is_dead(e->last_bucket, e->current_bucket, e->bucket_count))
 		return;
 	for (int i = 0; i < e->bucket_count; i++)
-		nlive += pssc_bucket_is_live(e->slots[i].bucket_id, e->current_bucket,
-									 e->bucket_count);
+		nlive += slot_wanted(c, e, &e->slots[i]);
 	if (nlive == 0)
 		return;
 
@@ -103,6 +123,9 @@ collect_entry(const PsscStoreEntryView *e, void *arg)
 	se->toplevel = e->key->toplevel;
 	se->visible = c->see_all || e->key->userid == c->caller;
 	se->encoding = e->encoding;
+	se->calls_total = e->calls_total;
+	se->exec_time_total = e->exec_time_total;
+	se->stats_since = e->stats_since;
 	se->tags = NULL;
 	se->tags_len = 0;
 	if (c->showtags && se->visible)
@@ -113,8 +136,7 @@ collect_entry(const PsscStoreEntryView *e, void *arg)
 	}
 	se->nslots = 0;
 	for (int i = 0; i < e->bucket_count; i++)
-		if (pssc_bucket_is_live(e->slots[i].bucket_id, e->current_bucket,
-								e->bucket_count))
+		if (slot_wanted(c, e, &e->slots[i]))
 			se->slots[se->nslots++] = e->slots[i];
 
 	if (c->n == c->cap)
@@ -155,18 +177,17 @@ put_row(ReturnSetInfo *rsinfo, const StatsEntry *se, const PsscSlot *slot,
 	nulls[i++] = tags_null;
 	values[i++] = Int64GetDatum(slot->calls);
 	values[i++] = Float8GetDatum(slot->total_exec_time);
+	values[i++] = Int64GetDatum(se->calls_total);
+	values[i++] = Float8GetDatum(se->exec_time_total);
+	values[i++] = TimestampTzGetDatum(se->stats_since);
 	Assert(i == STATS_COLS);
 
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 }
 
-PG_FUNCTION_INFO_V1(pg_stat_statement_context_1_0);
-
-Datum
-pg_stat_statement_context_1_0(PG_FUNCTION_ARGS)
+static void
+stats_srf(FunctionCallInfo fcinfo, bool showtags, bool merge, bool last_only)
 {
-	bool		showtags = PG_GETARG_BOOL(0);
-	bool		merge = PG_GETARG_BOOL(1);
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	StatsCollect c;
 	MemoryContext cxt;
@@ -186,6 +207,7 @@ pg_stat_statement_context_1_0(PG_FUNCTION_ARGS)
 	c.caller = GetUserId();
 	c.see_all = has_privs_of_role(c.caller, ROLE_PG_READ_ALL_STATS);
 	c.showtags = showtags;
+	c.last_only = last_only;
 	c.n = 0;
 	c.cap = 64;
 
@@ -236,5 +258,22 @@ pg_stat_statement_context_1_0(PG_FUNCTION_ARGS)
 
 	MemoryContextSwitchTo(oldcxt);
 	MemoryContextDelete(cxt);
+}
+
+PG_FUNCTION_INFO_V1(pg_stat_statement_context_1_0);
+
+Datum
+pg_stat_statement_context_1_0(PG_FUNCTION_ARGS)
+{
+	stats_srf(fcinfo, PG_GETARG_BOOL(0), PG_GETARG_BOOL(1), false);
+	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(pg_stat_statement_context_last_bucket_1_0);
+
+Datum
+pg_stat_statement_context_last_bucket_1_0(PG_FUNCTION_ARGS)
+{
+	stats_srf(fcinfo, PG_GETARG_BOOL(0), false, true);
 	return (Datum) 0;
 }

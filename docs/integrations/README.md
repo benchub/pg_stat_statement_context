@@ -25,9 +25,9 @@ recipe end to end in Docker (see [Testing](#testing)).
 | `pssc_query_calls_per_second` | gauge | as above, plus `queryid` (top 5 per tag set) |
 | `pssc_query_exec_seconds_per_second` | gauge | as above, plus `queryid` |
 | `pssc_info_entries`, `_max_entries`, `_live_entries` | gauge | |
-| `pssc_info_buckets`, `_bucket_interval_seconds`, `_oldest_bucket_age_seconds` | gauge | |
+| `pssc_info_buckets`, `_bucket_interval_seconds`, `_oldest_bucket_age_seconds`, `_last_closed_bucket_timestamp_seconds` | gauge | |
 | `pssc_info_shmem_bytes`, `_stats_reset_timestamp_seconds` | gauge | |
-| `pssc_info_{dealloc,evicted_entries,invalid_tags,dropped_tags,heuristic_scans,regex_compile_failures,utility_missing_queryid}_total` | counter | |
+| `pssc_info_{dealloc,reclaimed_entries,evicted_entries,dropped_records,invalid_tags,dropped_tags,heuristic_scans,regex_compile_failures,utility_missing_queryid}_total` | counter | |
 
 Each exporter adds its own labels: postgres_exporter adds `server`, and the
 OTel Prometheus exporter adds `otel_scope_*`. Example scrape output:
@@ -44,11 +44,10 @@ the average number of statements executing at once. Divide it by
 
 ## Design considerations
 
-### Gauges, not counters: why there is no `rate()`
+### Gauges, not counters: why the recipes don't use `rate()`
 
 The extension stores calls and time **in time buckets**. Buckets expire after
-`bucket_interval × bucket_count`, and an entry can be evicted at any time. No
-view exposes a value that only grows:
+`bucket_interval × bucket_count`, and an entry can be evicted at any time:
 
 * `pg_stat_statement_context_totals` is a **sliding-window** sum over the live
   buckets. It drops whenever the oldest bucket expires, so `rate()` on it is
@@ -56,24 +55,23 @@ view exposes a value that only grows:
 * Per-bucket rows (`pg_stat_statement_context`) are complete only once their
   bucket has closed, and then they expire.
 
-The recipes therefore export **the most recent closed bucket**, divided by
-`bucket_interval`, as a gauge:
+The recipes therefore export **the last closed bucket**, divided by
+`bucket_interval`, as a gauge. The store tells them which bucket that is: the
+[`pg_stat_statement_context_last_bucket`](../sql-interface.md#pg_stat_statement_context_last_bucket)
+view returns just that bucket, and `_info()` reports `bucket_seconds` and
+`last_closed_bucket_start` (exported as
+`pssc_info_last_closed_bucket_timestamp_seconds`):
 
 ```sql
-clock_bucket = date_bin(bucket_interval, now(), '2000-01-01 00:00:00+00')
-newest       = max(bucket_start)            -- over all live rows, one scan
-closed       = greatest(clock_bucket, newest) - bucket_interval
--- no rows at all if newest > clock_bucket + bucket_interval (see below)
+SELECT tags ->> 'controller', sum(calls)::float8 / min(i.bucket_seconds)
+  FROM pg_stat_statement_context_last_bucket,
+       pg_stat_statement_context_info() i
+ GROUP BY 1;
 ```
 
-The extension aligns buckets to multiples of `bucket_interval` since the
-PostgreSQL epoch (2000-01-01 UTC), so `clock_bucket` is the bucket `now()`
-falls in. The store's own current bucket is a monotonic watermark: it
-follows the clock forwards but never moves back, and calls are written into
-it. No SQL function exposes the watermark, but the newest bucket that holds
-data is a lower bound for it, so the recipes take whichever is later. That
-also covers the race where a bucket closes between `now()` (the transaction
-start) and the scan. Consequences:
+The last closed bucket is the one before the store's current bucket, a
+monotonic watermark that follows the clock forwards but never moves back
+(calls are written into it). Consequences:
 
 * **Plot the gauges as they are.** Never use `rate()`/`increase()` on them.
   To aggregate, use `sum by (...)`, which is exact because the values are
@@ -82,31 +80,36 @@ start) and the scan. Consequences:
   per bucket, so scraping faster than that adds freshness but no detail. Use
   a shorter `bucket_interval` (and a larger `bucket_count`) for finer graphs.
 * A tag set that is still live but had no calls in the closed bucket exports
-  `0`, so its series stays continuous for the history window. After the
-  history window it disappears (the series goes stale).
+  `0` (the recipes add a zero row per live entry from `_totals`), so its
+  series stays continuous for the history window. After the history window it
+  disappears (the series goes stale).
 * Calls are counted in the bucket in which they **finish**. A 10-minute
   statement adds all of its time to one bucket.
 * **Clock steps backwards.** After the system clock steps back, the store
   keeps writing into its (now future) current bucket, and no bucket closes
-  until the clock catches up. Selecting by `now()` alone would export an older
-  bucket, either one that was already exported or one that has since expired
-  (zeros). If the newest bucket with data is more than one bucket ahead of
-  `now()`, the recipes therefore return **no rows**: the per-second series go
-  stale (a gap in the graphs) until the clock catches up. The first bucket
-  that closes afterwards holds all the work done during the gap, divided by
-  one `bucket_interval`, so it shows as a spike. Residual cases: during a
-  step back of less than two buckets, or before any statement has been
-  recorded since the step, the recipes can re-export the last closed bucket
-  for up to about one `bucket_interval`. `_info()` exposing the store's
-  current and last-closed bucket (backlog item 20261006-010149-1) would
-  remove the inference. `scripts/test-integrations.sh` simulates a 40 s step
-  back and checks this behaviour.
+  until the clock catches up. The recipes keep exporting the same last closed
+  bucket meanwhile, never an older one, so the gauges hold their value. The
+  first bucket that closes afterwards holds all the work done during the gap,
+  divided by one `bucket_interval`, so it shows as a spike.
+  `scripts/test-integrations.sh` simulates a 40 s step back and checks this
+  behaviour.
+* **Startup.** Bucket boundaries fall on wall-clock multiples of
+  `bucket_interval`, so the bucket in progress at server start began before
+  the server did. Until the first boundary after startup, the last closed
+  bucket predates any data and the gauges read `0`. At that boundary, which
+  can be well under one `bucket_interval` after startup, the startup bucket
+  becomes the last closed one. It holds only the work done since startup
+  but is divided by a whole `bucket_interval`, so the first exported value
+  can read low.
 * A forward clock step skips buckets. The skipped buckets are empty, so the
   gauges read `0` for them.
-* **Eviction** removes an entry's buckets, so the gauges **undercount** but
-  never produce a false counter reset. Watch `pssc_info_live_entries /
-  pssc_info_max_entries` and `rate(pssc_info_evicted_entries_total[...])`. If
-  evictions are frequent, raise `max_entries` or reduce tag cardinality.
+* **Eviction** of live entries removes their buckets, so the gauges
+  **undercount** but never produce a false counter reset. Watch
+  `rate(pssc_info_evicted_entries_total[...])`: it counts only live entries,
+  and if it is not 0, raise `max_entries` or reduce tag cardinality.
+  `pssc_info_reclaimed_entries_total` counts expired entries recycled when
+  the table is full, which is normal. `pssc_info_dropped_records_total` should
+  always be 0 (see [Eviction](../configuration.md#eviction)).
 * **`pg_stat_statement_context_reset()`** (or a restart) clears the buckets.
   The gauges read `0` until the next bucket closes, and the `pssc_info_*_total`
   counters restart from 0, which `rate()` handles as an ordinary counter reset.
@@ -114,6 +117,36 @@ start) and the scan. Consequences:
 
 The `pssc_info_*_total` counters come from `_info()`. They are real cumulative
 counters, so `rate()`/`increase()` is correct for them.
+
+**Per-entry counters.** The views also have `calls_total` and
+`exec_time_total`, which only grow for as long as an entry exists (like
+`pg_stat_statements`' counters, with `stats_since` as their start time).
+Exported per entry (one series per `queryid` × tag set), `rate()` works on
+them and catches every call, at full scrape resolution. The recipes don't
+export them by default, because:
+
+* their series have the cardinality of entries, not of tag sets;
+* an entry that is evicted or reclaimed and comes back starts again from 0,
+  which `rate()` treats as a counter reset; but if you `sum()` them per tag
+  set *before* `rate()`, one entry disappearing looks like a reset of the
+  whole sum and inflates the rate. Always `rate()` per entry first, then
+  `sum by (...)`.
+
+Read them from `_totals` (one row per entry): in the per-bucket view they
+repeat on each of the entry's bucket rows. To export them, add a query like
+this (with `calls_total` and `exec_time_total` as counters, and `stats_since`
+as their start time in the OTel recipe):
+
+```sql
+-- The labels must identify the entry: userid, and every tag key you allow.
+SELECT coalesce(d.datname, c.dbid::text) AS datname, c.userid::text AS userid,
+       c.toplevel::text AS toplevel, c.queryid::text AS queryid,
+       coalesce(c.tags ->> 'controller', '') AS tag_controller,
+       c.calls_total::float8, c.exec_time_total / 1000 AS exec_seconds_total
+  FROM pg_stat_statement_context_totals c
+  LEFT JOIN pg_database d ON d.oid = c.dbid
+ WHERE c.tags IS NOT NULL;
+```
 
 ### `toplevel`: avoid double counting
 

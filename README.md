@@ -151,7 +151,7 @@ SELECT pg_stat_statement_context_extract(
 |---|---|
 | [docs/configuration.md](docs/configuration.md) | Every GUC (including the session/transaction `tags_override`), changing the configuration from SQL, capacity sizing, time buckets, eviction. |
 | [docs/extractors.md](docs/extractors.md) | Where comments are found, the extractor DSL, SQLCommenter / marginalia / regex formats, the tag pipeline, allowlist/denylist and cardinality guidance. |
-| [docs/sql-interface.md](docs/sql-interface.md) | The views, `pg_stat_statement_context()`, the `_activity` view (current tags per backend), `_info()`, `_reset()`, `_extract()`, the join to `pg_stat_statements`, nested statements and `toplevel`, visibility, encodings. |
+| [docs/sql-interface.md](docs/sql-interface.md) | The views (including `_last_bucket`, the last closed bucket), `pg_stat_statement_context()`, the `_activity` view (current tags per backend), `_info()`, `_reset()`, `_extract()`, the join to `pg_stat_statements`, nested statements and `toplevel`, visibility, encodings. |
 | [docs/limitations.md](docs/limitations.md) | Prepared statements, scanner caveats, PG14/15 utility query IDs, failed statements, PII, managed providers. |
 | [docs/integrations/](docs/integrations/README.md) | Recipes for postgres_exporter, sql_exporter and the OpenTelemetry Collector, a Grafana dashboard, a monitoring role, and the metric semantics (gauges, `toplevel`, cardinality). |
 | [docs/benchmarks.md](docs/benchmarks.md) | pgbench overhead and latency measurements against pg_stat_statements alone: the method, results for PG 18 and PG 14, findings (bucket boundaries, IN lists, eviction), and how to re-run them. |

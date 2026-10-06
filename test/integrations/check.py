@@ -11,8 +11,11 @@ Polls until every check passes or --timeout expires:
 
 --phase rollback: the store's clock has been stepped ahead of now() (as after
 a backward clock step); postgres_exporter and sql_exporter, which query on
-every scrape, must export no per-second series. --phase recovered: once the
-clock has caught up, the exporter checks of the main phase pass again.
+every scrape, must keep exporting the per-second series from the store's last
+closed bucket, which is then ahead of the wall clock, never from an older
+bucket chosen by now(): tag controller=rollback must read exactly the 30
+calls seeded into that bucket, not the 7 seeded into a wall-clock bucket. --phase recovered: once the clock has caught up, the
+exporter checks of the main phase pass again.
 --require-running: containers (the workload) that must keep running; the
 checks fail at once if one exits.
 """
@@ -129,7 +132,9 @@ def check_exporter(c, name, url):
     info("pssc_info_entries", lambda v: v > 0, "> 0")
     info("pssc_info_live_entries", lambda v: 0 < v <= pick(m, "pssc_info_entries"), "in (0, entries]")
     info("pssc_info_dealloc_total", lambda v: v >= 0, ">= 0")
-    info("pssc_info_evicted_entries_total", lambda v: v >= 0, ">= 0")
+    info("pssc_info_reclaimed_entries_total", lambda v: v >= 0, ">= 0")
+    info("pssc_info_evicted_entries_total", lambda v: v == 0, "0 (max_entries is ample)")
+    info("pssc_info_dropped_records_total", lambda v: v == 0, "0")
     info("pssc_info_invalid_tags_total", lambda v: v > 0, "> 0 (the workload sends an invalid tag)")
     info("pssc_info_dropped_tags_total", lambda v: v >= 0, ">= 0")
     info("pssc_info_heuristic_scans_total", lambda v: v >= 0, ">= 0")
@@ -138,6 +143,10 @@ def check_exporter(c, name, url):
     info("pssc_info_oldest_bucket_age_seconds", lambda v: 0 <= v <= 70, "in [0, 70]")
     info("pssc_info_stats_reset_timestamp_seconds", lambda v: abs(v - time.time()) < 3600,
          "within the last hour")
+    # 10-second buckets: the last closed one started 10 to 20 s ago (plus
+    # scrape and polling delays).
+    info("pssc_info_last_closed_bucket_timestamp_seconds",
+         lambda v: v % 10 == 0 and -60 <= v - time.time() <= -10, "10 to 60 s ago, on a bucket boundary")
 
 
 def check_rollback(c, name, url):
@@ -146,11 +155,23 @@ def check_rollback(c, name, url):
     except Exception as e:  # noqa: BLE001
         c.ok(False, f"{name}: cannot fetch /metrics: {e}")
         return
-    for metric in ("pssc_tag_calls_per_second", "pssc_query_calls_per_second"):
-        c.ok(not m.get(metric),
-             f"{name}: {metric} is still exported while the clock is behind the store "
-             f"(an older, already exported bucket): {m.get(metric, [])[:3]}")
-    c.ok(pick(m, "pssc_info_entries") is not None, f"{name}: pssc_info_entries missing")
+    # The store is at least 3 buckets ahead of now(), so its last closed
+    # bucket starts in the future: the recipes follow the store.
+    closed = pick(m, "pssc_info_last_closed_bucket_timestamp_seconds")
+    c.ok(closed is not None and closed > time.time(),
+         f"{name}: pssc_info_last_closed_bucket_timestamp_seconds = {closed}, expected "
+         f"after now ({time.time():.0f}): the store's last closed bucket")
+    c.ok(m.get("pssc_tag_calls_per_second"),
+         f"{name}: pssc_tag_calls_per_second is no longer exported while the clock is "
+         f"behind the store (it should stay continuous)")
+    # controller=rollback got 30 calls in the store's last closed bucket and
+    # 7 in an older bucket that the clock could select: only the store's
+    # bucket gives 30 / 10 s (0.7 or 0 would be a clock-chosen bucket, 3.7
+    # several buckets merged).
+    rb = pick(m, "pssc_tag_calls_per_second", tag_controller="rollback", toplevel="true")
+    c.ok(rb is not None and abs(rb - 3.0) < 1e-9,
+         f"{name}: pssc_tag_calls_per_second{{tag_controller=\"rollback\"}} = {rb}, expected "
+         f"3.0 (the 30 calls of the store's last closed bucket)")
 
 
 def check_running(c, containers):
@@ -255,8 +276,8 @@ def main():
             check_rollback(c, "postgres_exporter", a.postgres_exporter)
             check_rollback(c, "sql_exporter", a.sql_exporter)
             if not c.failures:
-                print("OK: postgres_exporter and sql_exporter export no per-second series "
-                      "while the clock is behind the store")
+                print("OK: postgres_exporter and sql_exporter follow the store's last "
+                      "closed bucket while the clock is behind it")
                 return 0
             if time.time() > deadline:
                 return report(c)

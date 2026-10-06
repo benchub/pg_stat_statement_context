@@ -517,13 +517,25 @@ typedef struct ctxSlot {
 
 typedef struct ctxEntry {
     ctxKey   key;          /* keysize fixed at startup */
-    slock_t  mutex;        /* protects slots[], last_bucket, usage */
+    slock_t  mutex;        /* protects everything below */
     int64    last_bucket;  /* newest bucket_id written; drives reclamation */
     double   usage;        /* pgss-style usage for eviction (not exposed) */
     int      encoding;     /* encoding of tags[] (that of dbid) */
+    int64    calls_total;      /* monotonic since stats_since (§7) */
+    double   exec_time_total;  /* ms, monotonic since stats_since */
+    TimestampTz stats_since;   /* entry creation time */
     ctxSlot  slots[FLEXIBLE]; /* bucket_count slots; index = bucket_id mod bucket_count */
 } ctxEntry;
 ```
+
+**Per-entry monotonic counters** (decided 2026-10-06, item
+20261006-010149-1): every recorded call also adds to `calls_total` and
+`exec_time_total`, whatever slot it lands in. Unlike the ring, they are never
+decremented by bucket expiry. They are zeroed, and `stats_since` set to the
+current time (the real clock, like `stats_reset`), when the entry is created,
+which is also what a reset or the entry's reclamation or eviction amounts to.
+They give exporters a counter that `rate()` can use (§7). They add 24 bytes to
+the entry header (24 → 48 bytes after `MAXALIGN` on 64-bit platforms).
 
 `ctxSlot` is implemented as `PsscSlot` in `src/counters.[ch]` (item -12).
 
@@ -545,18 +557,22 @@ the used bytes. Keys are still built by `memset`-ing the whole key to zero first
 
 `keysize` is computed at startup from `max_tagset_bytes` (`MAXALIGN(24 +
 max_tagset_bytes)`; 24 is the fixed key header), and `entrysize` from `keysize`
-and `bucket_count` (`keysize + MAXALIGN(entry header) + bucket_count × 24`). Shared memory is sized as
+and `bucket_count` (`keysize + MAXALIGN(entry header) + bucket_count × 24`;
+the header is 48 bytes on 64-bit platforms). Shared memory is sized as
 `hash_estimate_size(max_entries, entrysize)` plus the header, using
 `add_size`/`mul_size` overflow checks. The table is created with
 `init_size = max_size = max_entries`, so all entries are preallocated.
 `ShmemInitHash`'s `max_size` is only an estimate, not a limit, so the
 `max_entries` cap is enforced by the extension under the exclusive lock.
-With the defaults, an entry is on the order of 1 KB, dominated by the tag set.
+With the defaults, an entry is on the order of 1 KB, dominated by the tag set
+(872 bytes: a 536-byte key, the 48-byte header and 12 × 24-byte slots; the
+monotonic counters made it 24 bytes larger, about 2.8%, and `shmem_bytes` at
+the defaults 9,021,288 bytes, up from 8,781,288).
 `_info()` reports the exact `shmem_bytes` value.
 
-A record is dropped and counted in the header counter `dropped_records` only
-when an eviction pass (§5.3) freed nothing: no entry was dead and the sort
-array could not be allocated. Testing (§9) uses
+A record is dropped and counted in the header counter `dropped_records`
+(exposed by `_info()`) only when an eviction pass (§5.3) freed nothing: no
+entry was dead and the sort array could not be allocated. Testing (§9) uses
 a forced-collision mode, set only through the test module and only while the
 table is empty. The effective hash is chosen under the table lock.
 
@@ -617,9 +633,16 @@ If an insert finds the table at `max_entries`, then under the exclusive lock:
    pgss-style: order by `last_bucket` (least recently written first), then by
    `usage` (lowest first), and evict until ~5% is free. `usage` decays as in
    pgss.
-3. Increment `dealloc` (once per eviction pass) and `evicted_entries` (per
-   entry, live or dead), both exposed by `_info()`, so users can tell that
-   `max_entries` is too small.
+3. Increment `dealloc` (once per eviction pass), `reclaimed_entries` (per
+   dead entry reclaimed in step 1) and `evicted_entries` (per live entry
+   evicted in step 2), all exposed by `_info()` (split decided 2026-10-06,
+   item 20261005-213120-1). Reclaiming dead entries is normal housekeeping on
+   a table whose combinations change over time and loses no visible history;
+   only `evicted_entries` shows that `max_entries` is too small.
+4. If the pass freed nothing (no dead entry, and the candidate buffer could
+   not be allocated), the call is not recorded and `dropped_records` is
+   incremented; any non-zero value means the table is badly undersized (or
+   the backend is short of memory).
 
 An eviction pass scans the whole table once. The live victims are chosen by
 partial selection (a bounded heap of `target` candidates), not by sorting
@@ -642,7 +665,8 @@ Details (decided 2026-10-05, item -15):
 - **Out of memory:** the candidate buffer (`target` entries, kept per backend
   when ≤ 64 kB, otherwise allocated per pass) uses `MCXT_ALLOC_NO_OOM`. If
   that fails, only dead entries are reclaimed. The user's statement never
-  fails, and `dealloc` still counts the pass.
+  fails, and `dealloc` still counts the pass; if nothing was dead either, the
+  record is dropped (step 4).
 
 ### 5.4 Locking
 
@@ -993,7 +1017,9 @@ CREATE FUNCTION pg_stat_statement_context(
     merge_buckets boolean DEFAULT false,
     OUT bucket_start timestamptz, OUT userid oid, OUT dbid oid,
     OUT queryid bigint, OUT toplevel bool, OUT tags jsonb,
-    OUT calls bigint, OUT total_exec_time float8)
+    OUT calls bigint, OUT total_exec_time float8,
+    OUT calls_total bigint, OUT exec_time_total float8,
+    OUT stats_since timestamptz)
 RETURNS SETOF record ...;
 
 CREATE VIEW pg_stat_statement_context AS
@@ -1004,17 +1030,35 @@ CREATE VIEW pg_stat_statement_context AS
 CREATE VIEW pg_stat_statement_context_totals AS
     SELECT * FROM pg_stat_statement_context(true, true);
 
+-- Only the last closed bucket (current_bucket - 1), one row per entry with
+-- calls in it.
+CREATE FUNCTION pg_stat_statement_context_last_bucket(
+    showtags boolean DEFAULT true,
+    OUT bucket_start timestamptz, OUT userid oid, OUT dbid oid,
+    OUT queryid bigint, OUT toplevel bool, OUT tags jsonb,
+    OUT calls bigint, OUT total_exec_time float8,
+    OUT calls_total bigint, OUT exec_time_total float8,
+    OUT stats_since timestamptz)
+RETURNS SETOF record ...;
+
+CREATE VIEW pg_stat_statement_context_last_bucket AS
+    SELECT * FROM pg_stat_statement_context_last_bucket(true);
+
 CREATE FUNCTION pg_stat_statement_context_reset() RETURNS void ...;
 REVOKE ALL ON FUNCTION pg_stat_statement_context_reset() FROM PUBLIC;
 
 CREATE FUNCTION pg_stat_statement_context_info(
     OUT entries bigint, OUT max_entries bigint, OUT dealloc bigint,
-    OUT evicted_entries bigint,
-    OUT buckets int, OUT oldest_bucket timestamptz, OUT shmem_bytes bigint,
+    OUT reclaimed_entries bigint, OUT evicted_entries bigint,
+    OUT dropped_records bigint,
+    OUT buckets int, OUT bucket_seconds int, OUT oldest_bucket timestamptz,
+    OUT current_bucket_start timestamptz,
+    OUT last_closed_bucket_start timestamptz, OUT shmem_bytes bigint,
     OUT cap_shmem_bytes bigint, OUT invalid_tags bigint, OUT dropped_tags bigint,
     OUT heuristic_scans bigint, OUT regex_compile_failures bigint,
     OUT utility_missing_queryid bigint, OUT capped_tags bigint,
-    OUT cap_table_full bigint, OUT stats_reset timestamptz) ...;
+    OUT cap_table_full bigint, OUT stats_reset timestamptz,
+    OUT stats_reset_epoch bigint) ...;
 ```
 
 Debug function (item -11, ships in 1.0):
@@ -1046,7 +1090,7 @@ REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PU
 - Output is escaped in `SQL_ASCII` databases (§6.11).
 
 The column set is deliberately minimal (§5.1, decided 2026-10-05): `calls` and
-`total_exec_time` only. Rows, buffers, WAL, I/O timing, JIT, and
+`total_exec_time` only (plus their per-entry monotonic totals, below). Rows, buffers, WAL, I/O timing, JIT, and
 min/max/mean/stddev come from `pg_stat_statements`, joined on
 `(userid, dbid, queryid, toplevel)`. `tags` is `jsonb` (decided 2026-10-05,
 §11 Q2), with string values (and `null` for values collapsed by the
@@ -1060,7 +1104,45 @@ counter in the header. Added on 2026-10-06 (item -32): `capped_tags` (values
 collapsed to `null` by a cardinality cap) and `cap_table_full` (of those, the
 ones collapsed because the cap-tracking table was full). `shmem_bytes` covers
 the store only; `cap_shmem_bytes` is the exact size of the separate cap table
-(it is allocated even when caps are off).
+(it is allocated even when caps are off). Added on 2026-10-06 (item
+20261005-213120-1): `reclaimed_entries` (dead entries reclaimed) split out of
+`evicted_entries` (now live entries only), and `dropped_records` (§5.1,
+§5.3). Added on 2026-10-06 for exporters (item 20261006-010149-1, below):
+`bucket_seconds`, `current_bucket_start`, `last_closed_bucket_start` and
+`stats_reset_epoch`.
+
+Exporter support (item 20261006-010149-1). Bucket gauges only become final
+once their bucket has closed, and no column used to grow monotonically, so
+Prometheus-style `rate()` was impossible and exporters had to guess the last
+closed bucket from the clock. v1 therefore adds:
+- **Bucket metadata in `_info()`:** `bucket_seconds` (`bucket_interval`),
+  `current_bucket_start` (start of the `current_bucket` watermark that the
+  snapshot judged every slot against) and `last_closed_bucket_start` (the
+  bucket before it, the newest that can no longer receive calls, §5.2).
+  Boundaries fall on wall-clock multiples of the interval, because the epoch
+  is the startup time rounded down. So until the first boundary after
+  startup, the last closed bucket predates any data. The bucket in progress
+  at startup closes at that boundary, which is less than one interval after
+  startup. It is the first bucket with data, and it covers only part of an
+  interval. `stats_reset_epoch`
+  is `stats_reset` in whole Unix seconds (rounded down).
+- **`_last_bucket`:** the SRF restricted to the slot holding
+  `current_bucket - 1`, never merged. It is a separate C entry point
+  (`pg_stat_statement_context_last_bucket_1_0`) sharing the SRF's code rather
+  than a view filtering on `_info()`, so the bucket is chosen from the
+  watermark observed at the start of the same scan: the result is one
+  consistent bucket, and is closed because writers only write to the
+  watermark (§5.2). A slot is shown only if it is still live at the
+  watermark read after copying the entry, as in the SRF, so with
+  `bucket_count = 1` the view is always empty. Visibility rules are the SRF's.
+- **Per-entry monotonic counters** `calls_total`, `exec_time_total`,
+  `stats_since` (§5.1) on every SRF row, so on all three views. They are per
+  entry, so in the per-bucket view they repeat on each of the entry's rows and
+  must not be summed there; `_totals` has them once per entry. They are like
+  pgss's counters and its `stats_since` (PG17): they reset when the entry is
+  created again (reset, reclamation, eviction), never when a bucket expires.
+  An entry whose slots have all expired is hidden but keeps its counters until
+  it is reclaimed.
 
 SRF implementation (item -20): materialize mode, `STRICT VOLATILE PARALLEL
 SAFE`, C symbol `pg_stat_statement_context_1_0`. Under the shared lock only raw
@@ -1074,7 +1156,11 @@ writer rolls them over. Non-merged rows of an entry come out in bucket order.
 - `buckets` is the configured `bucket_count`. `oldest_bucket` is the start of
   the oldest live slot of any entry (it equals `min(bucket_start)` in the
   view), or `NULL` when no slot is live. All values come from one snapshot
-  under the shared lock; `shmem_bytes` is the exact size requested at startup.
+  under the shared lock. Every slot is judged against the one watermark the
+  row reports as `current_bucket_start`. If the watermark moves during the
+  scan, the scan is repeated, so `oldest_bucket` is never a bucket that has
+  already expired at the row's own `current_bucket_start`. `shmem_bytes` is
+  the exact size requested at startup.
 - `_info()` first flushes the caller's pending extraction counters, so a
   session sees its own activity. It is callable by `PUBLIC`, like
   `pg_stat_statements_info`.

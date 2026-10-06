@@ -7,6 +7,7 @@ extension's schema; the extension is relocatable):
 |---|---|---|
 | [`pg_stat_statement_context`](#the-views) | view, one row per entry and live bucket | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context_totals`](#the-views) | view, one row per entry, live buckets summed | `SELECT` granted to `PUBLIC` |
+| [`pg_stat_statement_context_last_bucket`](#pg_stat_statement_context_last_bucket) | view, one row per entry, last closed bucket only; `pg_stat_statement_context_last_bucket(showtags)` is the function behind it | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context(showtags, merge_buckets)`](#pg_stat_statement_contextshowtags-merge_buckets) | set-returning function behind both views | `PUBLIC` |
 | [`pg_stat_statement_context_activity`](#pg_stat_statement_context_activity) | view, current tags of each backend (join `pg_stat_activity` on `pid`); `pg_stat_statement_context_activity()` is the function behind it | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context_info()`](#pg_stat_statement_context_info) | store and diagnostic counters | `PUBLIC` |
@@ -29,6 +30,9 @@ SELECT * FROM pg_stat_statement_context;          -- per bucket
 SELECT * FROM pg_stat_statement_context_totals;   -- per entry, over the whole window
 ```
 
+[`pg_stat_statement_context_last_bucket`](#pg_stat_statement_context_last_bucket)
+has the same columns too.
+
 Both have the same columns:
 
 | Column | Type | Description |
@@ -41,12 +45,32 @@ Both have the same columns:
 | `tags` | `jsonb` | The tag set, an object of string values, e.g. `{"action": "show", "controller": "users"}`; `{}` for statements recorded with `untagged = record`. A value is JSON `null` (never a string) when its key had reached its [cardinality cap](configuration.md#cardinality_cap); client input can't produce `null`. |
 | `calls` | `bigint` | Number of completed executions in the bucket (or window). |
 | `total_exec_time` | `float8` | Total execution time in milliseconds. |
+| `calls_total` | `bigint` | Calls of the **entry** since `stats_since`, whatever bucket they were counted in. Never decreases while the entry exists: expired buckets don't lower it. |
+| `exec_time_total` | `float8` | Execution time of the entry since `stats_since`, in milliseconds, like `calls_total`. |
+| `stats_since` | `timestamptz` | When the entry was created, i.e. when `calls_total` and `exec_time_total` started counting. |
 
 An entry is one (`userid`, `dbid`, `queryid`, `toplevel`, `tags`)
 combination. `pg_stat_statement_context` returns one row per **live** bucket
 of each entry, oldest first within an entry; `_totals` returns one row per
 entry. Expired buckets (older than `bucket_count × bucket_interval`) are
 never shown.
+
+**Per-entry counters.** `calls_total`, `exec_time_total` and `stats_since`
+belong to the entry, not to a bucket, like `pg_stat_statements`' own
+counters and its `stats_since` (PostgreSQL 17):
+
+- They **repeat on every bucket row** of an entry in
+  `pg_stat_statement_context`. Don't `sum()` them over that view; read them
+  from `_totals` (one row per entry), or `DISTINCT ON` the entry.
+- They only grow while the entry exists, so they suit counter-based
+  monitoring (Prometheus `rate()`, see [integrations](integrations/README.md)).
+  They start over, with a new `stats_since`, when the entry is created
+  again: after `pg_stat_statement_context_reset()`, or after the entry was
+  [reclaimed or evicted](configuration.md#eviction). An entry whose buckets
+  have all expired is not shown, but keeps its counters until it is
+  reclaimed; if it is called again before that, they continue.
+- Unlike `calls`, they cover the entry's whole life, not just the live
+  window, so they don't match `sum(calls)` once a bucket has expired.
 
 **Counter semantics.**
 
@@ -77,7 +101,7 @@ SELECT bucket_start, tags->>'controller' AS controller,
 pg_stat_statement_context(showtags boolean DEFAULT true,
                           merge_buckets boolean DEFAULT false)
   RETURNS SETOF (bucket_start, userid, dbid, queryid, toplevel, tags,
-                 calls, total_exec_time)
+                 calls, total_exec_time, calls_total, exec_time_total, stats_since)
 ```
 
 The view `pg_stat_statement_context` is `pg_stat_statement_context(true, false)`
@@ -88,6 +112,39 @@ and `pg_stat_statement_context_totals` is `pg_stat_statement_context(true, true)
   oldest live bucket.
 - `showtags = false` returns `tags` as `NULL` in every row, which is cheaper
   when you only need the counters.
+
+## `pg_stat_statement_context_last_bucket`
+
+```sql
+SELECT * FROM pg_stat_statement_context_last_bucket;
+```
+
+The same columns as [the views](#the-views), for the **last closed bucket**
+only: the bucket just before the store's current one, whose start is
+`pg_stat_statement_context_info().last_closed_bucket_start`. No call can be
+recorded in it any more, so its counts are final. This is the bucket to
+export as a per-interval gauge (see [integrations](integrations/README.md)).
+
+- One row per entry that has calls in that bucket; entries without any are
+  left out. `calls` and `total_exec_time` are that bucket's alone;
+  `calls_total`, `exec_time_total` and `stats_since` are the entry's, as in
+  the other views.
+- The bucket is chosen once per query, from the store's current bucket,
+  which never moves backwards (see
+  [Time buckets](configuration.md#time-buckets)): after a backward clock
+  step it stays the newest bucket that was ever closed. It is empty if no
+  statement finished in it.
+- Bucket boundaries fall on wall-clock multiples of `bucket_interval`, so
+  the bucket in progress at server start began before the server did. Until
+  the first boundary after startup, the last closed bucket predates any
+  data. At that boundary, which can be well under one `bucket_interval`
+  after startup, the startup bucket becomes the last closed bucket. It holds
+  only the calls since startup, so it is a partial interval.
+- With `bucket_count = 1` it is always empty: only the current bucket is
+  kept.
+- Visibility is the same as for the other views. The function
+  `pg_stat_statement_context_last_bucket(showtags boolean DEFAULT true)` is
+  behind the view; `showtags = false` returns `tags` as `NULL`.
 
 ## Joining to pg_stat_statements
 
@@ -303,9 +360,14 @@ SELECT * FROM pg_stat_statement_context_info();
 | `entries` | `bigint` | Entries currently in the table (including dead ones not yet reclaimed). |
 | `max_entries` | `bigint` | The `max_entries` setting. |
 | `dealloc` | `bigint` | Eviction passes run because the table was full. |
-| `evicted_entries` | `bigint` | Entries removed by those passes, live or dead combined; see [Eviction](configuration.md#eviction) for telling them apart. |
+| `reclaimed_entries` | `bigint` | Dead entries (every bucket expired) reclaimed by those passes: normal housekeeping, no history lost. See [Eviction](configuration.md#eviction). |
+| `evicted_entries` | `bigint` | Live entries evicted by those passes because reclaiming dead ones did not free enough: if it grows, `max_entries` is too small. |
+| `dropped_records` | `bigint` | Calls not recorded at all because a pass could free nothing; any non-zero value means severe undersizing (or memory pressure). |
 | `buckets` | `int` | The `bucket_count` setting. |
-| `oldest_bucket` | `timestamptz` | Start of the oldest live bucket of any entry (equal to `min(bucket_start)` in the view), or `NULL` if no bucket is live. |
+| `bucket_seconds` | `int` | The `bucket_interval` setting, in seconds. |
+| `oldest_bucket` | `timestamptz` | Start of the oldest live bucket of any entry (equal to `min(bucket_start)` in the view), or `NULL` if no bucket is live. It is judged against the same current bucket as `current_bucket_start`, so it is never older than `current_bucket_start - (buckets - 1) * bucket_seconds`. |
+| `current_bucket_start` | `timestamptz` | Start of the store's current bucket, the newest one observed (it never moves backwards, even if the clock does). |
+| `last_closed_bucket_start` | `timestamptz` | Start of the bucket before it, `current_bucket_start - bucket_seconds`: the newest bucket that can no longer receive calls, shown by [`_last_bucket`](#pg_stat_statement_context_last_bucket). The first one after startup covers only part of an interval. |
 | `shmem_bytes` | `bigint` | Exact shared memory size requested at startup for the statistics store. |
 | `cap_shmem_bytes` | `bigint` | Exact shared memory size requested at startup for the separate [cardinality caps](configuration.md#cardinality_cap_slots) table (allocated even when no cap is set; up to about 576 MiB at the maximum `cardinality_cap_slots`). |
 | `invalid_tags` | `bigint` | Tags rejected as malformed: NUL bytes, invalid encoding, keys over 63 bytes, malformed pairs (see [the tag pipeline](extractors.md#the-tag-pipeline)). |
@@ -316,6 +378,7 @@ SELECT * FROM pg_stat_statement_context_info();
 | `capped_tags` | `bigint` | Tag values recorded as JSON `null` because their key had reached its [cardinality cap](configuration.md#cardinality_cap), including those counted in `cap_table_full`. |
 | `cap_table_full` | `bigint` | Of `capped_tags`, the values collapsed because the shared table of admitted values was full ([`cardinality_cap_slots`](configuration.md#cardinality_cap_slots)). |
 | `stats_reset` | `timestamptz` | Time of the last `pg_stat_statement_context_reset()`, or of server start. |
+| `stats_reset_epoch` | `bigint` | `stats_reset` in whole Unix epoch seconds, for exporters that need a number. |
 
 The extraction counters (`invalid_tags`, `dropped_tags`, `heuristic_scans`,
 `capped_tags`, `cap_table_full`) are collected per backend and added to the

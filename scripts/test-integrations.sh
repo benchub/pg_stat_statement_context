@@ -19,8 +19,8 @@
 # values, Prometheus, and every dashboard panel query through Grafana's
 # /api/ds/query. It then steps the store's clock ahead of now() (as after a
 # backward clock step, through the TEST-ONLY pssc_store_test module) and
-# checks that the recipes stop exporting the per-second gauges rather than
-# replay an older bucket, and recover when the clock catches up.
+# checks that the recipes keep following the store's last closed bucket
+# rather than one chosen by now(), and recover when the clock catches up.
 # Exits non-zero on failure; container logs then land in
 # tmp/integrations-<pg-major>/. Everything it creates is removed on exit;
 # --remove-images also removes the third-party images it pulled.
@@ -155,15 +155,34 @@ check --timeout "${PSSC_INTEGRATION_TIMEOUT:-240}"
 
 # A backward clock step, as the recipes see it: the store's current bucket
 # (a monotonic watermark) ends up ahead of now(). The TEST-ONLY module's
-# debug clock runs the store 40 s (4 buckets) ahead for a moment, then
-# returns to the real clock, so the store's current bucket stays ahead of
-# now() until the clock catches up: no bucket closes meanwhile, and the
-# recipes must not export an older bucket instead.
-step "step the clock back (store 4 buckets ahead of now())"
+# debug clock is pinned in bucket X, 4 buckets ahead, and then in X + 1,
+# before it returns to the real clock. The store's current bucket stays at
+# X + 1, ahead of now(), until the clock catches up, and no bucket closes
+# meanwhile. The recipes must keep exporting the store's last closed bucket
+# X (ahead of now()), not an older bucket chosen by the clock. To tell the
+# two apart, tag controller=rollback gets 7 calls in a real (wall-clock)
+# bucket just before the step and 30 calls in X: only X gives 3 calls/s.
+step "step the clock back (store 5 buckets ahead of now())"
 sql "CREATE EXTENSION IF NOT EXISTS pssc_store_test" >/dev/null
-sql "SELECT pssc_store_test_set_clock_offset(40000000)" >/dev/null
+seed() {
+	sql "SELECT count(pssc_store_test_record(4242 + 0 * n, ARRAY['controller', 'rollback']))
+	     FROM generate_series(1, $1) n" >/dev/null
+}
+seed 7
+x=$(sql "SELECT clock_bucket + 4 FROM pssc_store_test_buckets()")
+pin() {
+	sql "SELECT pssc_store_test_pin_clock(pssc_store_test_bucket_start($1)
+	            + (interval_us / 2 || ' microseconds')::interval)
+	     FROM pssc_store_test_buckets()" >/dev/null
+}
+pin "$x"
+seed 30
+pin "$((x + 1))"
+sql "SELECT count(*) FROM pg_stat_statement_context" >/dev/null   # a reader moves the watermark
 sleep 3
 sql "SELECT pssc_store_test_set_clock_offset(0)" >/dev/null
+cur=$(sql "SELECT current_bucket FROM pssc_store_test_buckets()")
+[ "$cur" = "$((x + 1))" ] || { echo "FAIL: the store's current bucket is $cur, not X + 1 = $((x + 1))" >&2; exit 1; }
 ahead=$(sql "SELECT current_bucket - clock_bucket FROM pssc_store_test_buckets()")
 [ "$ahead" -ge 3 ] || { echo "FAIL: the store is only $ahead buckets ahead of the clock" >&2; exit 1; }
 check --phase rollback --timeout 15

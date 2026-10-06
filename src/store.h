@@ -27,10 +27,11 @@
  * live entries are evicted in order of last_bucket, then usage, both
  * ascending, then scan order (pssc_evict_cmp(); chosen by partial
  * selection, pssc_evict_select_*()), until that many are. dealloc counts the
- * passes, evicted_entries every entry removed (dead or live). The new
- * entry is then inserted. Only if the pass freed nothing (the candidate
- * buffer could not be allocated and no entry was dead) is the record dropped and
- * counted in dropped_records; the statement never fails.
+ * passes, reclaimed_entries the dead entries they removed and
+ * evicted_entries the live ones. The new entry is then inserted. Only if
+ * the pass freed nothing (the candidate buffer could not be allocated and no
+ * entry was dead) is the record dropped and counted in dropped_records; the
+ * statement never fails.
  *
  * Time buckets (§5.2). The header holds the epoch, bucket_interval,
  * bucket_count and current_bucket. The epoch is the postmaster's start time
@@ -126,7 +127,8 @@ typedef struct PsscStoreCounters
 	int64		hash_entries;	/* hash_get_num_entries(), for cross-checks */
 	int64		max_entries;
 	int64		dealloc;		/* eviction passes */
-	int64		evicted_entries;	/* entries they removed, dead or live */
+	int64		reclaimed_entries;	/* dead entries they reclaimed */
+	int64		evicted_entries;	/* live entries they evicted */
 	int64		invalid_tags;
 	int64		dropped_tags;
 	int64		regex_compile_failures;
@@ -136,6 +138,8 @@ typedef struct PsscStoreCounters
 	int64		utility_missing_queryid;
 	int64		dropped_records;	/* records lost: no room after eviction */
 	TimestampTz stats_reset;
+	int64		current_bucket; /* watermark (pssc_store_get_info() only) */
+	int64		interval_us;	/* bucket_interval */
 	Size		shmem_bytes;	/* exactly what was requested */
 	Size		keysize;
 	Size		entrysize;
@@ -151,6 +155,9 @@ typedef struct PsscStoreEntryView
 	int			encoding;
 	int64		last_bucket;	/* PSSC_BUCKET_NONE if never written */
 	double		usage;
+	int64		calls_total;	/* monotonic since stats_since (§5.1) */
+	double		exec_time_total;
+	TimestampTz stats_since;	/* when the entry was created */
 	int			bucket_count;
 	const PsscSlot *slots;		/* [bucket_count], index = bucket_id mod count */
 
@@ -161,6 +168,13 @@ typedef struct PsscStoreEntryView
 	 * hidden) and to pssc_bucket_entry_is_dead().
 	 */
 	int64		current_bucket;
+
+	/*
+	 * current_bucket as observed once at the start of the scan, the same
+	 * for every entry: scan_bucket - 1 is closed (no write can land in it
+	 * any more) for the whole scan.
+	 */
+	int64		scan_bucket;
 } PsscStoreEntryView;
 
 typedef void (*PsscStoreVisitor) (const PsscStoreEntryView *entry, void *arg);
@@ -293,7 +307,8 @@ extern PGDLLEXPORT bool pssc_store_get_counters(PsscStoreCounters *c);
  * the snapshot is wholly before or wholly after any reset. Like every
  * reader it first raises current_bucket to the clock, and it judges each
  * entry's slots against the watermark read after copying them (as
- * pssc_store_foreach()). Scans the whole table. false (*c zeroed,
+ * pssc_store_foreach()); c->current_bucket is the watermark read at the
+ * end of the scan. Scans the whole table. false (*c zeroed,
  * *oldest_bucket PSSC_BUCKET_NONE) if the store is not set up.
  */
 extern PGDLLEXPORT bool pssc_store_get_info(PsscStoreCounters *c,
@@ -341,6 +356,14 @@ extern PGDLLEXPORT void pssc_store_set_record_test_hook(PsscStoreRecordTestHook 
  */
 extern PGDLLEXPORT void pssc_store_set_flush_test_hook(PsscStoreRecordTestHook hook,
 													   void *arg);
+
+/*
+ * Testing aid: if set, pssc_store_get_info() calls hook(arg) after judging
+ * each entry's slots, under the shared store lock, so tests can move the
+ * watermark in the middle of the scan. NULL (the default) disables it.
+ */
+extern PGDLLEXPORT void pssc_store_set_info_scan_test_hook(PsscStoreRecordTestHook hook,
+														   void *arg);
 
 /*
  * Testing aid: in the next eviction pass of this backend, the candidate
