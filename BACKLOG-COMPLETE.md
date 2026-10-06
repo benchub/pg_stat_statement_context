@@ -1032,6 +1032,19 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 **Open questions:** none (answered 2026-10-06)
 **Status:** done
 
+### 20261006-092320-1: Flaky TAP 004: "every alternating reload replaced the extractors" (28 of 30)
+
+**Description:** `test/t/004_extractors.pl` (around line 530) alternates `extractors` between two big values for 30 reloads and expects the session's config generation (`pssc_guc_test_generation()`) to grow by exactly 30. It has failed intermittently with 28 on PG18, twice: once during 20261006-021334-1's harness and once during -39's harness (both before and after the regex CPU-time retry was added). `alter_and_reload()` waits for each session to see a sentinel `scan_window` value, so reloads can't simply coalesce. Likely cause: in that backend the check hook rejected one of the values while re-reading the config file (e.g. a regex compile hitting the 100 ms limit on a busy host, or another transient failure), so the backend kept the old value silently (logged only at DEBUG3). If so, backends can disagree on the config, which is a real (if rare) product issue, not just a test issue.
+
+**Acceptance criteria:**
+- Root cause identified (e.g. by logging the rejection reason in the test, or raising the backend log level for the session) and documented.
+- If it's the compile limit: decide whether a value already accepted by the postmaster should be rejected in a backend because of time alone (e.g. skip the time limit in the SIGHUP re-check, or apply it only in SET/ALTER SYSTEM), fix, and add a test.
+- 004 passes 20 consecutive runs on PG18 under load (e.g. run alongside another harness).
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
