@@ -56,6 +56,33 @@ jobs:
           path: tmp/docker-${{ matrix.pg }}/
           if-no-files-found: ignore
 
+  # Short fuzz smoke run (fuzz/README.md): the libFuzzer targets (clang,
+  # ASan+UBSan, 15 s each, in parallel) and the SQL-level regex extractor
+  # driver against the PGDG PG18 server (30 s). The seeds are printed, so a
+  # failure replays locally with the same commands.
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: libFuzzer targets
+        run: fuzz/run-libfuzzer.sh -t 15
+      - name: SQL fuzz oracle self-test
+        run: perl fuzz/sql/regex_fuzz.pl --self-test
+      - name: SQL-level regex fuzz
+        run: fuzz/sql/run.sh --pgdg --pg 18 -- --duration 30
+      - name: Upload artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-smoke
+          path: |
+            tmp/fuzz/artifacts/
+            tmp/fuzz/*.log
+            tmp/fuzz-sql/
+          if-no-files-found: ignore
+
   linux-source:
     name: Linux PG${{ matrix.pg }} (${{ matrix.flavor }})
     runs-on: ubuntu-latest

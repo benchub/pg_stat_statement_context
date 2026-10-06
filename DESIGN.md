@@ -1159,11 +1159,29 @@ matches this extension's minimum supported version.
   without comments, and with large `IN` lists. Report p99 and maximum latency at
   bucket boundaries and under sustained eviction, not just average throughput.
   Publish overhead numbers relative to `pg_stat_statements` alone.
-- **Fuzzing**: a standalone libFuzzer harness for the pure-C comment scanner and
-  the SQLCommenter/marginalia parsers. The regex extractor depends on backend
-  allocators, `pg_wchar`, and collation code, so it is fuzzed through a
-  backend-aware harness, such as a SQL-level fuzz driver against the debug
-  function.
+- **Fuzzing** (`fuzz/`, item -25): libFuzzer targets for the code that needs no
+  server:
+  - the comment scanner in every position mode (`fuzz_scan`);
+  - the SQLCommenter and marginalia parsers;
+  - the tag-set pipeline (`fuzz_tagset`).
+
+  Besides running under ASan/UBSan, each target checks invariants:
+  - results stay within the input;
+  - comment spans are whole and re-scan to themselves;
+  - comment budgets give a prefix of the unbounded result;
+  - tag limits, sorted unique keys and valid encoding hold;
+  - repeated calls give the same result;
+  - each byte is read a bounded number of times.
+
+  The same targets run under a standalone driver in `make unittest`.
+  `fuzz/run-libfuzzer.sh` runs libFuzzer in Docker. The regex extractor
+  depends on backend allocators, `pg_wchar` and collation code, so
+  `fuzz/sql/run.sh` fuzzes it at the SQL level through
+  `pg_stat_statement_context_extract` against the assert or Valgrind server.
+  It predicts which patterns the check hook will accept, compares tags with a
+  `regexp_matches` oracle, and detects crashes and assertion failures. CI runs
+  a short smoke of both. Six bugs were injected on purpose and the harnesses
+  caught all of them (`fuzz/README.md`).
 
 ## 10. Repository layout (proposed)
 

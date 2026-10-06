@@ -47,8 +47,9 @@ EXTRA_CLEAN = test/unit/test_scan test/unit/test_scan_checked \
 	test/unit/test_counters \
 	test/unit/pairs_alloc_check.o \
 	test/unit/corpus test/unit/*.dSYM \
-	fuzz/fuzz_sqlcommenter fuzz/fuzz_marginalia \
-	fuzz/fuzz_sqlcommenter_standalone fuzz/fuzz_marginalia_standalone \
+	fuzz/fuzz_scan fuzz/fuzz_sqlcommenter fuzz/fuzz_marginalia fuzz/fuzz_tagset \
+	fuzz/fuzz_scan_standalone fuzz/fuzz_sqlcommenter_standalone \
+	fuzz/fuzz_marginalia_standalone fuzz/fuzz_tagset_standalone \
 	fuzz/corpus fuzz/*.dSYM
 
 PG_CONFIG ?= pg_config

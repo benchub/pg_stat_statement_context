@@ -162,13 +162,18 @@ scripts/docker-test.sh 15.0      # same, against an exact release built from sou
 scripts/docker-test.sh --assert 17    # source build with --enable-cassert
 scripts/docker-test.sh --valgrind 18  # regression suite with the server under Valgrind
 make unittest                    # standalone scanner/parser unit tests and fuzz corpus
+fuzz/run-libfuzzer.sh -t 600     # libFuzzer (clang, ASan+UBSan) targets in Docker, 10 min each
+fuzz/sql/run.sh -- --duration 600     # regex extractor SQL fuzzer, assert build in Docker
 scripts/test-integrations.sh 17  # exporter recipes + Grafana dashboard, end to end in Docker
 ```
 
+[fuzz/README.md](fuzz/README.md) describes the fuzz targets, their invariants
+and how to replay a failure.
+
 CI (`.github/workflows/ci.yml`) runs the same `scripts/docker-test.sh` commands
 for its Linux cells (PG 14–18 from PGDG, assert builds of 14–18, Valgrind
-on 18) and runs `docker/run-tests.sh` directly on macOS against PostgreSQL
-built by `docker/build-postgres.sh`. The TAP tests use the PG 15+ module names
+on 18), runs `docker/run-tests.sh` directly on macOS against PostgreSQL
+built by `docker/build-postgres.sh`, and runs a short fuzz smoke job. The TAP tests use the PG 15+ module names
 (`PostgreSQL::Test::Cluster`/`Utils`). PG 14 ships them as aliases of
 `PostgresNode`/`TestLib` from 14.3 but only installs them from 14.6, so
 14.0–14.5 can't run the TAP suite.

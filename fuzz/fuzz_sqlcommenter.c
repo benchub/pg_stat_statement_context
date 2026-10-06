@@ -14,6 +14,8 @@ parse_sc(const char *body, size_t len, const void *arg,
 	pssc_parse_sqlcommenter(body, len, *(const bool *) arg, out, r);
 }
 
+FUZZ_ALPHABET("'\\%0aF2,:=;> \t\nk\0")
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {

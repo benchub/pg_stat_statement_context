@@ -825,6 +825,22 @@ Remove the matching cases from the compat test module (`test/modules/pssc_compat
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-25: Fuzzing harnesses
+
+**Description:** Add fuzzing under `fuzz/` (§9):
+- A standalone libFuzzer harness, built with `clang -fsanitize=fuzzer,address,undefined`, for the comment scanner (all positional modes) and the SQLCommenter/marginalia parsers. Seed it from the regression vectors.
+- A backend-aware, SQL-level fuzz driver for the regex extractor that drives the debug function from task 20261005-091225-11 with generated comments and configured patterns.
+- An optional short smoke run in CI.
+
+**Acceptance criteria:**
+- Each harness builds with one documented command.
+- A 10-minute local run finds no crashes or sanitizer reports.
+- The CI smoke run takes about 60 s.
+
+**Depends on:** 20261005-091225-5, 20261005-091225-6, 20261005-091225-11
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

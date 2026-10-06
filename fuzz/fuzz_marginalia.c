@@ -110,6 +110,8 @@ ref_compare(const char *s, size_t len, const char *kv, size_t kvlen,
 	free(buf);
 }
 
+FUZZ_ALPHABET("'\\%0aF2,:=;> \t\nk\0")
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {

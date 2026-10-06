@@ -2,8 +2,9 @@
  * standalone_main.c
  *		Driver for the fuzz targets without libFuzzer (any C compiler): feeds
  *		each file named on the command line (directories are read one level
- *		deep), then N pseudo-random inputs built from an alphabet of the
- *		parsers' special bytes, to LLVMFuzzerTestOneInput().
+ *		deep), then N pseudo-random inputs built from the target's
+ *		alphabet of special bytes (fuzz_alphabet()), to
+ *		LLVMFuzzerTestOneInput().
  *
  *	fuzz_X_standalone [--random N] FILE|DIR...
  */
@@ -14,7 +15,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-int			LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
+#include "fuzz_check.h"
 
 static size_t nfiles;
 
@@ -75,7 +76,8 @@ run_path(const char *path)
 int
 main(int argc, char **argv)
 {
-	static const char alphabet[] = "'\\%0aF2,:=;> \t\nk\0";
+	size_t		nalpha;
+	const char *alphabet = fuzz_alphabet(&nalpha);
 	unsigned long nrandom = 0;
 	uint32_t	seed = 12345;
 	unsigned long i;
@@ -99,7 +101,7 @@ main(int argc, char **argv)
 		for (k = 0; k < len; k++)
 		{
 			seed = seed * 1103515245u + 12345u;
-			buf[k] = (uint8_t) alphabet[(seed >> 16) % (sizeof(alphabet) - 1)];
+			buf[k] = (uint8_t) alphabet[(seed >> 16) % nalpha];
 		}
 		LLVMFuzzerTestOneInput(buf, len);
 	}

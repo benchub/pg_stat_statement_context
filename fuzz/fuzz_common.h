@@ -7,26 +7,33 @@
 #ifndef PSSC_FUZZ_COMMON_H
 #define PSSC_FUZZ_COMMON_H
 
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
+#include "fuzz_check.h"
 #include "pairs.h"
-
-int			LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
-
-#define FUZZ_CHECK(cond) \
-	do { \
-		if (!(cond)) \
-		{ \
-			fprintf(stderr, "%s:%d: invariant failed: %s\n", __FILE__, __LINE__, #cond); \
-			abort(); \
-		} \
-	} while (0)
 
 typedef void (*FuzzParse) (const char *body, size_t len, const void *arg,
 						   const PsscPairOut *out, PsscPairResult *r);
+
+/*
+ * Parse once. In the PSSC_PAIRS_CHECKED build (every fuzz build: pairs.c
+ * then aborts on any read outside the body) also check the parse is linear,
+ * with the bound test/unit/test_pairs.c uses: 3 reads per byte + 8.
+ */
+static void
+fuzz_parse(FuzzParse parse, const char *body, size_t len, const void *arg,
+		   const PsscPairOut *out, PsscPairResult *r)
+{
+#ifdef PSSC_PAIRS_CHECKED
+	pssc_pairs_reads = 0;
+#endif
+	parse(body, len, arg, out, r);
+#ifdef PSSC_PAIRS_CHECKED
+	if (pssc_pairs_reads > 3 * (unsigned long) len + 8)
+		fprintf(stderr, "%lu reads for %zu bytes\n", pssc_pairs_reads, len);
+	FUZZ_CHECK(pssc_pairs_reads <= 3 * (unsigned long) len + 8);
+#endif
+}
 
 static void
 fuzz_check_storage(const PsscPairOut *out, const PsscPairResult *r)
@@ -79,11 +86,11 @@ fuzz_run(FuzzParse parse, const void *arg, const char *body, size_t len)
 				j = 0;
 
 	FUZZ_CHECK(pairs && buf && small_buf);
-	parse(body, len, arg, &out, &r);
+	fuzz_parse(parse, body, len, arg, &out, &r);
 	fuzz_check_storage(&out, &r);
 	FUZZ_CHECK(r.ndropped == 0);
 
-	parse(body, len, arg, &small, &rs);
+	fuzz_parse(parse, body, len, arg, &small, &rs);
 	fuzz_check_storage(&small, &rs);
 	FUZZ_CHECK(rs.nmalformed == r.nmalformed);
 	FUZZ_CHECK(rs.npairs + rs.ndropped == r.npairs);
@@ -100,7 +107,7 @@ fuzz_run(FuzzParse parse, const void *arg, const char *body, size_t len)
 	small.max_pairs = 0;
 	small.buf = NULL;
 	small.bufsize = 0;
-	parse(body, len, arg, &small, &rs);
+	fuzz_parse(parse, body, len, arg, &small, &rs);
 	FUZZ_CHECK(rs.npairs == 0 && rs.bufused == 0 && rs.ndropped == r.npairs);
 
 	free(pairs);

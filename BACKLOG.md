@@ -51,8 +51,9 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
+| 20261006-021334-1 | Bound regex compile cost (pathological patterns stall first tagged query) | 20261005-091225-10 | no | ready |
+| 20261006-021621-1 | SQL fuzzer: classify only the check hook's own error | 20261005-091225-25 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
-| 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | no | blocked-on-deps |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
@@ -175,6 +176,40 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 - Q2: Should this be combined with 20261005-213120-1, since both change the `_info()` columns?
 **Status:** blocked-on-questions
 
+### 20261006-021334-1: Bound regex compile cost (pathological patterns stall first tagged query)
+
+**Description:** Found by the SQL fuzzer (item -25). The pattern `((?:(?:$)|\Zda|(?<!1)|\S){0,255}` takes over 20 s to compile, both in core `regexp_matches` and in our check hook. Only statement_timeout limited it, by cancelling the `ALTER SYSTEM`. If a superuser sets such a pattern with no statement_timeout, the check hook accepts it. Then every backend compiles it lazily on its first tagged statement (§4.2 regex), stalling a user query for seconds. A cancel or timeout during that compile is re-thrown into the user's query, which is worse than a stall.
+
+The execution-time CPU limits (item -10) don't cover compile. Options (decide and document):
+- Bound compile with a complexity heuristic in the check hook, e.g. reject `{m,n}` with large n around a group that can match empty, or cap pattern length and number of groups.
+- Measure compile time in the check hook and reject patterns over a threshold (e.g. 100 ms). The check hook runs in the postmaster at reload, which is acceptable because the hook already compiles there.
+- Use the engine's cancel mechanism (`rcancelrequested` callback) to abort a compile after N ms in backends, and treat it as a compile failure (counted in `regex_compile_failures`, extractor disabled for the backend) instead of re-throwing into the user's query.
+
+**Acceptance criteria:**
+- The fuzzer's pathological pattern is rejected at SET/reload, or, if it is accepted, a backend never spends more than the documented bound compiling it on the hot path and never fails the user's query because of it.
+- Normal patterns from docs/extractors.md are unaffected.
+- A test covers the case (TAP or pg_regress).
+
+**Depends on:** 20261005-091225-10
+**Open questions:** none
+**Status:** ready
+
+### 20261006-021621-1: SQL fuzzer: classify only the check hook's own error
+
+**Description:** Left over from item -25 after its second review round. In `fuzz/sql/regex_fuzz.pl` (around lines 959–972), `$err` holds stderr from the whole round, so a statement timeout from the earlier `regexp_matches()` pre-check gets read as the check hook's rejection reason. That has two effects:
+- Once the pre-check times out, an unrelated check-hook error (e.g. `division by zero`) is accepted as an expected timeout, hiding a real bug.
+- A correct length-limit rejection after a pre-check timeout counts as a false failure (`want='long'` but `reason='timeout'`).
+
+Fix: capture the check hook's own error message and SQLSTATE right after `ALTER SYSTEM` and classify only that. Keep the pre-check timeout only as the condition for accepting a timeout from the check hook itself.
+
+**Acceptance criteria:**
+- New `--self-test` cases cover both scenarios above and give the right verdict.
+- A short SQL fuzz run against the assert build still passes.
+
+**Depends on:** 20261005-091225-25
+**Open questions:** none
+**Status:** ready
+
 ### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
 
 **Description:** Found while documenting (item -28). `evicted_entries` counts both expired entries reclaimed by an eviction pass and live entries evicted, and `dealloc` counts passes. `dropped_records` (calls lost because a pass freed nothing) is not exposed. So `_info()` alone cannot tell an operator that `max_entries` is too small, contrary to DESIGN §5.3 step 3. The docs currently give a workaround: compare the row count of `pg_stat_statement_context_totals` with `max_entries`.
@@ -191,22 +226,6 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 **Open questions:**
 - Q1: OK to change the `_info()` column set (§7, approved earlier) by renaming or splitting `evicted_entries` and adding `dropped_records`? Proposed names: `reclaimed_entries`, `evicted_entries` (live only), `dropped_records`.
 **Status:** blocked-on-questions
-
-### 20261005-091225-25: Fuzzing harnesses
-
-**Description:** Add fuzzing under `fuzz/` (§9):
-- A standalone libFuzzer harness, built with `clang -fsanitize=fuzzer,address,undefined`, for the comment scanner (all positional modes) and the SQLCommenter/marginalia parsers. Seed it from the regression vectors.
-- A backend-aware, SQL-level fuzz driver for the regex extractor that drives the debug function from task 20261005-091225-11 with generated comments and configured patterns.
-- An optional short smoke run in CI.
-
-**Acceptance criteria:**
-- Each harness builds with one documented command.
-- A 10-minute local run finds no crashes or sanitizer reports.
-- The CI smoke run takes about 60 s.
-
-**Depends on:** 20261005-091225-5, 20261005-091225-6, 20261005-091225-11
-**Open questions:** none
-**Status:** ready
 
 ### 20261005-091225-26: Overhead and latency benchmarks
 

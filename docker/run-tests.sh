@@ -71,6 +71,7 @@ tar -C "$SRC" --exclude=./.git --exclude=./tmp \
 	--exclude=./test/unit/test_tagset --exclude=./test/unit/test_tagset_checked \
 	--exclude=./test/unit/test_counters \
 	--exclude=./test/unit/corpus \
+	--exclude=./fuzz/fuzz_scan --exclude=./fuzz/fuzz_tagset \
 	--exclude=./fuzz/fuzz_sqlcommenter --exclude=./fuzz/fuzz_marginalia \
 	--exclude='./fuzz/*_standalone' --exclude=./fuzz/corpus \
 	-cf - . | tar -C "$BUILD" -xf -
