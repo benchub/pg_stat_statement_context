@@ -1,0 +1,227 @@
+# pg_stat_statement_context: custom queries for postgres_exporter
+# (prometheus-community/postgres_exporter, tested with v0.20.1).
+#
+#   postgres_exporter --extend.query-path=queries.yaml
+#   (or PG_EXPORTER_EXTEND_QUERY_PATH=queries.yaml)
+#
+# --extend.query-path is marked DEPRECATED upstream (in favour of built-in
+# collectors, and sql_exporter for arbitrary SQL) but still works in v0.20.1.
+# docs/integrations/sql_exporter/ exports the same metrics with sql_exporter.
+# See docs/integrations/README.md for the metric semantics. In short:
+#
+# * Every *_per_second metric is a GAUGE: the average rate over the most
+#   recent CLOSED bucket (bucket_interval, 5 min by default). Plot it as is;
+#   never apply rate()/increase() to it. The extension keeps no counter that
+#   only grows (buckets expire, entries are evicted), so there is nothing that
+#   rate() could be applied to. While the system clock is behind the store's
+#   current bucket (after a backward step), the first two queries return no
+#   rows rather than an older bucket.
+# * The pssc_info_*_total metrics are real counters (reset only by
+#   pg_stat_statement_context_reset() or a restart): use rate()/increase().
+# * Tags become labels named tag_<key>. Only the keys listed in the queries
+#   are exported; edit the three tag_* lines of the first two queries to match
+#   your pg_stat_statement_context.tags allowlist. Never export the whole tags
+#   jsonb, or high-cardinality keys, as a label.
+# * Both toplevel values are exported. Sum only toplevel="true" for
+#   per-context totals: nested statements' time is already included in the
+#   statement that ran them.
+#
+# The queries need the extension in the database the exporter connects to,
+# and a role with pg_read_all_stats (see ../monitoring-role.sql).
+
+# Per tag set: calls and execution time, over all query IDs.
+pssc_tag:
+  master: true
+  query: |
+    WITH c AS MATERIALIZED (
+      SELECT * FROM pg_stat_statement_context
+    ), s AS (
+      SELECT width, date_bin(width, now(), timestamptz '2000-01-01 00:00:00+00') AS clock_bucket,
+             (SELECT max(bucket_start) FROM c) AS newest
+        FROM (SELECT current_setting('pg_stat_statement_context.bucket_interval')::interval AS width) g
+    ), w AS (
+      -- The last closed bucket is the one before the store's current bucket.
+      -- That never moves backwards, and the newest bucket with data is a lower
+      -- bound for it, so a clock step back can't select an older bucket. If
+      -- the newest bucket is more than one bucket ahead of now(), the clock
+      -- was stepped back: no bucket closes until it catches up, so no rows.
+      SELECT greatest(clock_bucket, newest) - width AS closed,
+             extract(epoch FROM width)::float8 AS secs
+        FROM s
+       WHERE newest IS NULL OR newest <= clock_bucket + width
+    )
+    SELECT coalesce(d.datname, c.dbid::text) AS datname,
+           c.toplevel::text AS toplevel,
+           coalesce(c.tags ->> 'controller', '') AS tag_controller,
+           coalesce(c.tags ->> 'action', '') AS tag_action,
+           coalesce(c.tags ->> 'job', '') AS tag_job,
+           coalesce(sum(c.calls) FILTER (WHERE c.bucket_start = w.closed), 0)::float8
+             / min(w.secs) AS calls_per_second,
+           coalesce(sum(c.total_exec_time) FILTER (WHERE c.bucket_start = w.closed), 0)
+             / 1000 / min(w.secs) AS exec_seconds_per_second
+      FROM c
+     CROSS JOIN w
+      LEFT JOIN pg_database d ON d.oid = c.dbid
+     WHERE c.tags IS NOT NULL
+     GROUP BY 1, 2, 3, 4, 5
+  metrics:
+    - datname:
+        usage: "LABEL"
+        description: "Database the statements ran in"
+    - toplevel:
+        usage: "LABEL"
+        description: "true for top-level statements, false for nested ones (track = all)"
+    - tag_controller:
+        usage: "LABEL"
+        description: "Value of the controller tag"
+    - tag_action:
+        usage: "LABEL"
+        description: "Value of the action tag"
+    - tag_job:
+        usage: "LABEL"
+        description: "Value of the job tag"
+    - calls_per_second:
+        usage: "GAUGE"
+        description: "Completed executions per second, averaged over the last closed bucket. A gauge: do not rate() it."
+    - exec_seconds_per_second:
+        usage: "GAUGE"
+        description: "Execution time in seconds per second (average concurrently executing statements), over the last closed bucket. A gauge: do not rate() it."
+
+# Top 5 query IDs per tag set, by execution time in the last closed bucket.
+# Join queryid to pg_stat_statements for the text (not as a label).
+pssc_query:
+  master: true
+  query: |
+    WITH c AS MATERIALIZED (
+      SELECT * FROM pg_stat_statement_context
+    ), s AS (
+      SELECT width, date_bin(width, now(), timestamptz '2000-01-01 00:00:00+00') AS clock_bucket,
+             (SELECT max(bucket_start) FROM c) AS newest
+        FROM (SELECT current_setting('pg_stat_statement_context.bucket_interval')::interval AS width) g
+    ), w AS (
+      -- The last closed bucket is the one before the store's current bucket.
+      -- That never moves backwards, and the newest bucket with data is a lower
+      -- bound for it, so a clock step back can't select an older bucket. If
+      -- the newest bucket is more than one bucket ahead of now(), the clock
+      -- was stepped back: no bucket closes until it catches up, so no rows.
+      SELECT greatest(clock_bucket, newest) - width AS closed,
+             extract(epoch FROM width)::float8 AS secs
+        FROM s
+       WHERE newest IS NULL OR newest <= clock_bucket + width
+    ), q AS (
+      SELECT coalesce(d.datname, c.dbid::text) AS datname,
+             c.toplevel::text AS toplevel,
+             c.queryid::text AS queryid,
+             coalesce(c.tags ->> 'controller', '') AS tag_controller,
+             coalesce(c.tags ->> 'action', '') AS tag_action,
+             coalesce(c.tags ->> 'job', '') AS tag_job,
+             sum(c.calls)::float8 / min(w.secs) AS calls_per_second,
+             sum(c.total_exec_time) / 1000 / min(w.secs) AS exec_seconds_per_second
+        FROM c
+        JOIN w ON c.bucket_start = w.closed
+        LEFT JOIN pg_database d ON d.oid = c.dbid
+       WHERE c.tags IS NOT NULL
+       GROUP BY 1, 2, 3, 4, 5, 6
+    )
+    SELECT datname, toplevel, queryid, tag_controller, tag_action, tag_job,
+           calls_per_second, exec_seconds_per_second
+      FROM (SELECT q.*, row_number() OVER (
+                     PARTITION BY datname, toplevel, tag_controller, tag_action, tag_job
+                     ORDER BY exec_seconds_per_second DESC, queryid) AS rank
+              FROM q) r
+     WHERE rank <= 5
+     ORDER BY exec_seconds_per_second DESC
+     LIMIT 500
+  metrics:
+    - datname:
+        usage: "LABEL"
+        description: "Database the statements ran in"
+    - toplevel:
+        usage: "LABEL"
+        description: "true for top-level statements, false for nested ones"
+    - queryid:
+        usage: "LABEL"
+        description: "Query ID, as in pg_stat_statements"
+    - tag_controller:
+        usage: "LABEL"
+        description: "Value of the controller tag"
+    - tag_action:
+        usage: "LABEL"
+        description: "Value of the action tag"
+    - tag_job:
+        usage: "LABEL"
+        description: "Value of the job tag"
+    - calls_per_second:
+        usage: "GAUGE"
+        description: "Completed executions per second over the last closed bucket (top 5 query IDs per tag set). A gauge: do not rate() it."
+    - exec_seconds_per_second:
+        usage: "GAUGE"
+        description: "Execution time in seconds per second over the last closed bucket (top 5 query IDs per tag set). A gauge: do not rate() it."
+
+# Store health: pg_stat_statement_context_info().
+pssc_info:
+  master: true
+  query: |
+    SELECT i.entries::float8 AS entries,
+           i.max_entries::float8 AS max_entries,
+           (SELECT count(*) FROM pg_stat_statement_context(false, true))::float8 AS live_entries,
+           i.buckets::float8 AS buckets,
+           extract(epoch FROM current_setting('pg_stat_statement_context.bucket_interval')::interval)::float8
+             AS bucket_interval_seconds,
+           coalesce(extract(epoch FROM now() - i.oldest_bucket), 0)::float8 AS oldest_bucket_age_seconds,
+           i.shmem_bytes::float8 AS shmem_bytes,
+           extract(epoch FROM i.stats_reset)::float8 AS stats_reset_timestamp_seconds,
+           i.dealloc::float8 AS dealloc_total,
+           i.evicted_entries::float8 AS evicted_entries_total,
+           i.invalid_tags::float8 AS invalid_tags_total,
+           i.dropped_tags::float8 AS dropped_tags_total,
+           i.heuristic_scans::float8 AS heuristic_scans_total,
+           i.regex_compile_failures::float8 AS regex_compile_failures_total,
+           i.utility_missing_queryid::float8 AS utility_missing_queryid_total
+      FROM pg_stat_statement_context_info() i
+  metrics:
+    - entries:
+        usage: "GAUGE"
+        description: "Allocated entries, including dead ones not yet reclaimed"
+    - max_entries:
+        usage: "GAUGE"
+        description: "The max_entries setting"
+    - live_entries:
+        usage: "GAUGE"
+        description: "Entries with at least one live bucket"
+    - buckets:
+        usage: "GAUGE"
+        description: "The bucket_count setting"
+    - bucket_interval_seconds:
+        usage: "GAUGE"
+        description: "The bucket_interval setting, in seconds"
+    - oldest_bucket_age_seconds:
+        usage: "GAUGE"
+        description: "Age of the oldest live bucket (0 if none)"
+    - shmem_bytes:
+        usage: "GAUGE"
+        description: "Shared memory requested at startup"
+    - stats_reset_timestamp_seconds:
+        usage: "GAUGE"
+        description: "Time of the last reset or server start, Unix seconds"
+    - dealloc_total:
+        usage: "COUNTER"
+        description: "Eviction passes"
+    - evicted_entries_total:
+        usage: "COUNTER"
+        description: "Entries removed by eviction passes, dead or live"
+    - invalid_tags_total:
+        usage: "COUNTER"
+        description: "Tags rejected as malformed"
+    - dropped_tags_total:
+        usage: "COUNTER"
+        description: "Valid tags dropped by max_tags / max_tagset_bytes"
+    - heuristic_scans_total:
+        usage: "COUNTER"
+        description: "Statements whose comments were found by the heuristic tail scan"
+    - regex_compile_failures_total:
+        usage: "COUNTER"
+        description: "Regex extractors that failed to compile in a backend"
+    - utility_missing_queryid_total:
+        usage: "COUNTER"
+        description: "Tracked utility statements without a query ID (check shared_preload_libraries order)"

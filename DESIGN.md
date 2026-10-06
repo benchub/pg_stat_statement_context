@@ -1047,9 +1047,17 @@ matches this extension's minimum supported version.
   and before truncation and cardinality caps (§6.11 step 6).
 
 **v3 — ecosystem**
-- Prometheus or OpenTelemetry exporter recipes (postgres_exporter queries, OTel
-  Collector `postgresql` receiver config).
-- Grafana dashboard.
+- **Integrations (done, item -42):** `docs/integrations/` ships recipes for
+  sql_exporter, postgres_exporter (its custom queries are deprecated upstream)
+  and the OTel Collector contrib `sql_query` receiver; the `postgresql` receiver
+  cannot run custom queries. It also has a Grafana dashboard and a
+  least-privilege monitoring role. `scripts/test-integrations.sh` tests them
+  end to end in Docker. Buckets expire and entries are evicted, so the recipes
+  export per-second gauges over the last closed bucket rather than Prometheus
+  counters. Only the `_info()` counters are exported as `_total`. Selected tag
+  keys become `tag_<key>` labels, and the dashboard defaults to
+  `toplevel = true`. Monotonic counters and bucket metadata are proposed in
+  20261006-010149-1.
 - Packaging: PGXN, PGDG apt/yum, Homebrew, Docker images. Engage managed-cloud
   providers about adding the extension to their allowlists.
 - Upstream conversation: propose a core hook or field for "statement comments"

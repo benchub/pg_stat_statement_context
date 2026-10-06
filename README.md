@@ -151,6 +151,7 @@ SELECT pg_stat_statement_context_extract(
 | [docs/extractors.md](docs/extractors.md) | Where comments are found, the extractor DSL, SQLCommenter / marginalia / regex formats, the tag pipeline, allowlist/denylist and cardinality guidance. |
 | [docs/sql-interface.md](docs/sql-interface.md) | The views, `pg_stat_statement_context()`, `_info()`, `_reset()`, `_extract()`, the join to `pg_stat_statements`, nested statements and `toplevel`, visibility, encodings. |
 | [docs/limitations.md](docs/limitations.md) | Prepared statements, scanner caveats, PG14/15 utility query IDs, failed statements, PII, managed providers. |
+| [docs/integrations/](docs/integrations/README.md) | Recipes for postgres_exporter, sql_exporter and the OpenTelemetry Collector, a Grafana dashboard, a monitoring role, and the metric semantics (gauges, `toplevel`, cardinality). |
 
 ## Testing
 
@@ -161,6 +162,7 @@ scripts/docker-test.sh 15.0      # same, against an exact release built from sou
 scripts/docker-test.sh --assert 17    # source build with --enable-cassert
 scripts/docker-test.sh --valgrind 18  # regression suite with the server under Valgrind
 make unittest                    # standalone scanner/parser unit tests and fuzz corpus
+scripts/test-integrations.sh 17  # exporter recipes + Grafana dashboard, end to end in Docker
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same `scripts/docker-test.sh` commands

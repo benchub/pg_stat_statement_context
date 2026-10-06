@@ -1,0 +1,197 @@
+# OpenTelemetry Collector (contrib distribution, otelcol-contrib, tested with
+# 0.162.0) configuration for pg_stat_statement_context.
+#
+# The core `postgresql` receiver collects a fixed set of server metrics and
+# cannot run arbitrary queries, so it cannot read this extension. The
+# contrib `sql_query` receiver (formerly `sqlquery`, stability: alpha) runs
+# SQL and maps columns to metrics and attributes; it is used here. It is
+# only in otelcol-contrib (or a custom build that includes it), not in the
+# core distribution.
+#
+# The metric names and attributes match ../postgres_exporter/queries.yaml and
+# ../sql_exporter/, so the Prometheus exporter below produces the series the
+# Grafana dashboard expects. See ../README.md for the semantics:
+# * *_per_second are gauges: the average over the last CLOSED bucket. Do not
+#   convert them to rates, or treat them as sums. While the system clock is
+#   behind the store's current bucket (after a backward step), the first two
+#   queries return no rows rather than an older bucket.
+# * pssc_info_* counters are cumulative monotonic sums whose start time is
+#   _info().stats_reset (start_ts_column, in Unix nanoseconds), so a reset
+#   is a proper counter restart for OTLP and Prometheus consumers.
+# * Tags become tag_<key> attributes; edit the tag_* columns and
+#   attribute_columns to match your pg_stat_statement_context.tags allowlist.
+#
+# Connection settings come from the environment:
+#   PSSC_PG_HOST, PSSC_PG_PORT, PSSC_PG_DATABASE, PSSC_PG_USER, PSSC_PG_PASSWORD
+# The role needs pg_read_all_stats (see ../monitoring-role.sql), and the
+# extension must exist in PSSC_PG_DATABASE.
+receivers:
+  sql_query/pssc:
+    driver: postgres
+    host: ${env:PSSC_PG_HOST}
+    port: ${env:PSSC_PG_PORT}
+    database: ${env:PSSC_PG_DATABASE}
+    username: ${env:PSSC_PG_USER}
+    password: ${env:PSSC_PG_PASSWORD}
+    additional_params:
+      sslmode: disable          # use verify-full in production
+    # The gauges only change once per bucket_interval (5 min by default);
+    # a shorter interval than that only adds freshness, not resolution.
+    collection_interval: 30s
+    timeout: 10s
+    max_open_conn: 1
+    queries:
+      # Per tag set: calls and execution time, over all query IDs.
+      - sql: |
+          WITH c AS MATERIALIZED (
+            SELECT * FROM pg_stat_statement_context
+          ), s AS (
+            SELECT width, date_bin(width, now(), timestamptz '2000-01-01 00:00:00+00') AS clock_bucket,
+                   (SELECT max(bucket_start) FROM c) AS newest
+              FROM (SELECT current_setting('pg_stat_statement_context.bucket_interval')::interval AS width) g
+          ), w AS (
+            -- The last closed bucket is the one before the store's current bucket.
+            -- That never moves backwards, and the newest bucket with data is a lower
+            -- bound for it, so a clock step back can't select an older bucket. If
+            -- the newest bucket is more than one bucket ahead of now(), the clock
+            -- was stepped back: no bucket closes until it catches up, so no rows.
+            SELECT greatest(clock_bucket, newest) - width AS closed,
+                   extract(epoch FROM width)::float8 AS secs
+              FROM s
+             WHERE newest IS NULL OR newest <= clock_bucket + width
+          )
+          SELECT coalesce(d.datname, c.dbid::text) AS datname,
+                 c.toplevel::text AS toplevel,
+                 coalesce(c.tags ->> 'controller', '') AS tag_controller,
+                 coalesce(c.tags ->> 'action', '') AS tag_action,
+                 coalesce(c.tags ->> 'job', '') AS tag_job,
+                 coalesce(sum(c.calls) FILTER (WHERE c.bucket_start = w.closed), 0)::float8
+                   / min(w.secs) AS calls_per_second,
+                 coalesce(sum(c.total_exec_time) FILTER (WHERE c.bucket_start = w.closed), 0)
+                   / 1000 / min(w.secs) AS exec_seconds_per_second
+            FROM c
+           CROSS JOIN w
+            LEFT JOIN pg_database d ON d.oid = c.dbid
+           WHERE c.tags IS NOT NULL
+           GROUP BY 1, 2, 3, 4, 5
+        metrics:
+          - metric_name: pssc_tag_calls_per_second
+            description: Completed executions per second, averaged over the last closed bucket.
+            value_column: calls_per_second
+            value_type: double
+            attribute_columns: [datname, toplevel, tag_controller, tag_action, tag_job]
+          - metric_name: pssc_tag_exec_seconds_per_second
+            description: Execution time in seconds per second over the last closed bucket.
+            value_column: exec_seconds_per_second
+            value_type: double
+            attribute_columns: [datname, toplevel, tag_controller, tag_action, tag_job]
+
+      # Top 5 query IDs per tag set, by execution time in the last closed bucket.
+      - sql: |
+          WITH c AS MATERIALIZED (
+            SELECT * FROM pg_stat_statement_context
+          ), s AS (
+            SELECT width, date_bin(width, now(), timestamptz '2000-01-01 00:00:00+00') AS clock_bucket,
+                   (SELECT max(bucket_start) FROM c) AS newest
+              FROM (SELECT current_setting('pg_stat_statement_context.bucket_interval')::interval AS width) g
+          ), w AS (
+            -- The last closed bucket is the one before the store's current bucket.
+            -- That never moves backwards, and the newest bucket with data is a lower
+            -- bound for it, so a clock step back can't select an older bucket. If
+            -- the newest bucket is more than one bucket ahead of now(), the clock
+            -- was stepped back: no bucket closes until it catches up, so no rows.
+            SELECT greatest(clock_bucket, newest) - width AS closed,
+                   extract(epoch FROM width)::float8 AS secs
+              FROM s
+             WHERE newest IS NULL OR newest <= clock_bucket + width
+          ), q AS (
+            SELECT coalesce(d.datname, c.dbid::text) AS datname,
+                   c.toplevel::text AS toplevel,
+                   c.queryid::text AS queryid,
+                   coalesce(c.tags ->> 'controller', '') AS tag_controller,
+                   coalesce(c.tags ->> 'action', '') AS tag_action,
+                   coalesce(c.tags ->> 'job', '') AS tag_job,
+                   sum(c.calls)::float8 / min(w.secs) AS calls_per_second,
+                   sum(c.total_exec_time) / 1000 / min(w.secs) AS exec_seconds_per_second
+              FROM c
+              JOIN w ON c.bucket_start = w.closed
+              LEFT JOIN pg_database d ON d.oid = c.dbid
+             WHERE c.tags IS NOT NULL
+             GROUP BY 1, 2, 3, 4, 5, 6
+          )
+          SELECT datname, toplevel, queryid, tag_controller, tag_action, tag_job,
+                 calls_per_second, exec_seconds_per_second
+            FROM (SELECT q.*, row_number() OVER (
+                           PARTITION BY datname, toplevel, tag_controller, tag_action, tag_job
+                           ORDER BY exec_seconds_per_second DESC, queryid) AS rank
+                    FROM q) r
+           WHERE rank <= 5
+           ORDER BY exec_seconds_per_second DESC
+           LIMIT 500
+        metrics:
+          - metric_name: pssc_query_calls_per_second
+            description: Completed executions per second over the last closed bucket (top 5 query IDs per tag set).
+            value_column: calls_per_second
+            value_type: double
+            attribute_columns: [datname, toplevel, queryid, tag_controller, tag_action, tag_job]
+          - metric_name: pssc_query_exec_seconds_per_second
+            description: Execution time in seconds per second over the last closed bucket (top 5 query IDs per tag set).
+            value_column: exec_seconds_per_second
+            value_type: double
+            attribute_columns: [datname, toplevel, queryid, tag_controller, tag_action, tag_job]
+
+      # Store health: pg_stat_statement_context_info().
+      - sql: |
+          SELECT i.entries, i.max_entries,
+                 (SELECT count(*) FROM pg_stat_statement_context(false, true)) AS live_entries,
+                 i.buckets,
+                 extract(epoch FROM current_setting('pg_stat_statement_context.bucket_interval')::interval)::float8
+                   AS bucket_interval_seconds,
+                 coalesce(extract(epoch FROM now() - i.oldest_bucket), 0)::float8 AS oldest_bucket_age_seconds,
+                 i.shmem_bytes,
+                 extract(epoch FROM i.stats_reset)::float8 AS stats_reset_timestamp_seconds,
+                 (extract(epoch FROM i.stats_reset) * 1e9)::bigint AS stats_reset_unix_nano,
+                 i.dealloc, i.evicted_entries, i.invalid_tags, i.dropped_tags,
+                 i.heuristic_scans, i.regex_compile_failures, i.utility_missing_queryid
+            FROM pg_stat_statement_context_info() i
+        metrics:
+          - {metric_name: pssc_info_entries, value_column: entries, description: "Allocated entries, including dead ones not yet reclaimed"}
+          - {metric_name: pssc_info_max_entries, value_column: max_entries, description: "The max_entries setting"}
+          - {metric_name: pssc_info_live_entries, value_column: live_entries, description: "Entries with at least one live bucket"}
+          - {metric_name: pssc_info_buckets, value_column: buckets, description: "The bucket_count setting"}
+          - {metric_name: pssc_info_bucket_interval_seconds, value_column: bucket_interval_seconds, value_type: double, description: "The bucket_interval setting, in seconds"}
+          - {metric_name: pssc_info_oldest_bucket_age_seconds, value_column: oldest_bucket_age_seconds, value_type: double, description: "Age of the oldest live bucket (0 if none)"}
+          - {metric_name: pssc_info_shmem_bytes, value_column: shmem_bytes, description: "Shared memory requested at startup"}
+          - {metric_name: pssc_info_stats_reset_timestamp_seconds, value_column: stats_reset_timestamp_seconds, value_type: double, description: "Time of the last reset or server start, Unix seconds"}
+          # Counters: cumulative monotonic sums starting at stats_reset. The
+          # Prometheus exporter adds the _total suffix.
+          - {metric_name: pssc_info_dealloc, value_column: dealloc, data_type: sum, monotonic: true, start_ts_column: stats_reset_unix_nano, description: "Eviction passes"}
+          - {metric_name: pssc_info_evicted_entries, value_column: evicted_entries, data_type: sum, monotonic: true, start_ts_column: stats_reset_unix_nano, description: "Entries removed by eviction passes, dead or live"}
+          - {metric_name: pssc_info_invalid_tags, value_column: invalid_tags, data_type: sum, monotonic: true, start_ts_column: stats_reset_unix_nano, description: "Tags rejected as malformed"}
+          - {metric_name: pssc_info_dropped_tags, value_column: dropped_tags, data_type: sum, monotonic: true, start_ts_column: stats_reset_unix_nano, description: "Valid tags dropped by max_tags / max_tagset_bytes"}
+          - {metric_name: pssc_info_heuristic_scans, value_column: heuristic_scans, data_type: sum, monotonic: true, start_ts_column: stats_reset_unix_nano, description: "Statements whose comments were found by the heuristic tail scan"}
+          - {metric_name: pssc_info_regex_compile_failures, value_column: regex_compile_failures, data_type: sum, monotonic: true, start_ts_column: stats_reset_unix_nano, description: "Regex extractors that failed to compile in a backend"}
+          - {metric_name: pssc_info_utility_missing_queryid, value_column: utility_missing_queryid, data_type: sum, monotonic: true, start_ts_column: stats_reset_unix_nano, description: "Tracked utility statements without a query ID"}
+
+processors:
+  batch: {}
+
+exporters:
+  # Prometheus scrape endpoint. Series not refreshed for metric_expiration
+  # disappear: keep it a little above collection_interval, so that top-N
+  # query IDs that drop out of the top 5 are not reported for minutes.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    metric_expiration: 90s
+  # To push instead, replace prometheus with e.g.:
+  # otlphttp:
+  #   endpoint: https://otlp.example.com
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    metrics:
+      receivers: [sql_query/pssc]
+      processors: [batch]
+      exporters: [prometheus, debug]

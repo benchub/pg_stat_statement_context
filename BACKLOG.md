@@ -50,6 +50,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
+| 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-25 | Fuzzing harnesses | 20261005-091225-5, 20261005-091225-6, 20261005-091225-11 | no | ready |
 | 20261005-091225-26 | Overhead and latency benchmarks | 20261005-091225-15, 20261005-091225-18, 20261005-091225-20 | no | ready |
@@ -62,7 +63,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | ready |
 | 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | no | ready |
-| 20261005-091225-42 | Roadmap: exporter recipes and Grafana dashboard | 20261005-091225-28 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -154,6 +154,26 @@ dependencies and is not shown.
 ---
 
 ## v1 tasks
+
+### 20261006-010149-1: Exporter-friendly SQL surface: monotonic counters and bucket metadata
+
+**Description:** Found while writing the exporter recipes (item -42). None of the views has a counter that only grows: `_totals` is a sliding window and bucket rows expire. So Prometheus `rate()` can't be used, and the recipes export gauges over the last closed bucket instead. They also hard-code the bucket length GUC and the hidden 2000-01-01 starting point for buckets. Proposed additions:
+1. Bucket metadata in `_info()`: `bucket_seconds`, `current_bucket_start`, `last_closed_bucket_start`.
+2. Optionally a `pg_stat_statement_context_last_bucket` view, which gives the last closed bucket per entry.
+3. Optionally counters per entry that only grow (`calls_total`, `exec_time_total` plus `stats_since`) and survive bucket expiry until the entry is evicted. This costs extra shared-memory bytes per entry.
+4. An epoch-number form of `stats_reset`, or let the recipes keep converting it.
+
+Once this lands, simplify the recipes in `docs/integrations/` and update `scripts/test-integrations.sh`.
+
+**Acceptance criteria:**
+- The chosen columns or views exist, are documented in §7 and `docs/sql-interface.md`, and are tested in TAP or 019.
+- The recipes no longer depend on the epoch or bucket-length GUC.
+
+**Depends on:** 20261005-091225-42
+**Open questions:**
+- Q1: Which of 1–4 should be done? Item 3 changes the shared-memory entry size and the meaning of "evicted".
+- Q2: Should this be combined with 20261005-213120-1, since both change the `_info()` columns?
+**Status:** blocked-on-questions
 
 ### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
 
@@ -390,20 +410,6 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 - 2026-10-05: Normalization runs after rename and allowlist/denylist, before truncation and cardinality caps.
 
 **Depends on:** 20261005-091225-9, 20261005-091225-10
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-42: Roadmap: exporter recipes and Grafana dashboard
-
-**Description:** Publish ready-to-use integration recipes (§8 v3):
-- `postgres_exporter` custom queries
-- an OpenTelemetry Collector `postgresql` receiver configuration
-- a Grafana dashboard JSON that uses the `toplevel` filter correctly
-
-**Acceptance criteria:**
-- Each recipe is tested against a running cluster, and the dashboard renders sample data.
-
-**Depends on:** 20261005-091225-28
 **Open questions:** none
 **Status:** ready
 

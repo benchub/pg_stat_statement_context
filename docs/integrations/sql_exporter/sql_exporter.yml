@@ -1,0 +1,27 @@
+# sql_exporter (burningalchemist/sql_exporter, tested with 0.24.9) for
+# pg_stat_statement_context.
+#
+#   sql_exporter --config.file=sql_exporter.yml
+#
+# Put the DSN here or, to keep the password out of the file, in the
+# SQLEXPORTER_TARGET_DSN environment variable, e.g.
+#   postgres://pssc_monitor:PASSWORD@db.example.com:5432/postgres?sslmode=verify-full
+# The role needs pg_read_all_stats (see ../monitoring-role.sql), and the
+# extension must exist in the database of the DSN.
+global:
+  scrape_timeout: 10s
+  scrape_timeout_offset: 500ms
+  # The *_per_second gauges only change once per bucket_interval (5 min by
+  # default). To query less often than Prometheus scrapes, set e.g. 60s:
+  # sql_exporter then serves cached results in between.
+  min_interval: 0s
+  max_connections: 1
+  max_idle_connections: 1
+  max_connection_lifetime: 10m
+
+target:
+  data_source_name: "postgres://pssc_monitor:CHANGE-ME@localhost:5432/postgres?sslmode=disable"
+  collectors: [pg_stat_statement_context]
+
+collector_files:
+  - "*.collector.yml"

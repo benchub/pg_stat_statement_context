@@ -811,6 +811,20 @@ Remove the matching cases from the compat test module (`test/modules/pssc_compat
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-42: Roadmap: exporter recipes and Grafana dashboard
+
+**Description:** Publish ready-to-use integration recipes (§8 v3):
+- `postgres_exporter` custom queries
+- an OpenTelemetry Collector `postgresql` receiver configuration
+- a Grafana dashboard JSON that uses the `toplevel` filter correctly
+
+**Acceptance criteria:**
+- Each recipe is tested against a running cluster, and the dashboard renders sample data.
+
+**Depends on:** 20261005-091225-28
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

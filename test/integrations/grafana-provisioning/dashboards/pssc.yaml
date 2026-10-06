@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: pg_stat_statement_context
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      # docs/integrations/grafana, mounted read-only
+      path: /var/lib/grafana/dashboards
