@@ -80,6 +80,7 @@ extern PGDLLEXPORT char *pssc_tags;			/* raw text; use pssc_guc_tags() */
 extern PGDLLEXPORT char *pssc_exclude_tags; /* raw text; use pssc_guc_exclude_tags() */
 extern PGDLLEXPORT int pssc_untagged;		/* PsscUntagged */
 extern PGDLLEXPORT char *pssc_normalize;	/* raw text; use pssc_guc_normalize() */
+extern PGDLLEXPORT char *pssc_tags_override;	/* raw text; use pssc_guc_override() */
 
 /*
  * Parsed tag key list (tags / exclude_tags). Keys are kept in list order
@@ -255,6 +256,43 @@ extern PGDLLEXPORT const PsscNormalizeList *pssc_guc_normalize(void);
  * extractors, tags, exclude_tags or normalize changes in this process.
  */
 extern PGDLLEXPORT uint64 pssc_guc_config_generation(void);
+
+/*
+ * Parsed pg_stat_statement_context.tags_override (backlog item
+ * 20261005-091225-30): the sqlcommenter pairs of the setting, URL-decoded,
+ * in order (duplicates kept; the pipeline keeps the first). Flat and
+ * pointer-free like PsscNormalizeList: header, pairs, then the
+ * NUL-terminated strings. Keys are 1..PSSC_MAX_KEY_LEN bytes; an empty value
+ * is {0, 0}. Neither contains a NUL byte.
+ */
+typedef struct PsscOverridePair
+{
+	PsscBlobStr key;
+	PsscBlobStr value;
+} PsscOverridePair;
+
+typedef struct PsscOverrideList
+{
+	uint32		size;			/* total blob size in bytes */
+	uint32		npairs;			/* >= 1 */
+	PsscOverridePair pairs[FLEXIBLE_ARRAY_MEMBER];
+} PsscOverrideList;
+
+static inline const char *
+pssc_override_str(const PsscOverrideList *list, PsscBlobStr s)
+{
+	return s.len == 0 ? "" : (const char *) list + s.off;
+}
+
+/* Current parsed tags_override; NULL when it holds no pair. */
+extern PGDLLEXPORT const PsscOverrideList *pssc_guc_override(void);
+
+/*
+ * Backend-local generation of tags_override: bumped whenever its parsed
+ * value changes (SET, SET LOCAL, RESET, the end of a transaction or of a
+ * function's SET clause that restores another value).
+ */
+extern PGDLLEXPORT uint64 pssc_guc_override_generation(void);
 
 /*
  * Size in bytes of a PsscTagList blob holding nkeys keys whose bytes,

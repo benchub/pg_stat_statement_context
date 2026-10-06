@@ -519,6 +519,7 @@ typedef struct Run
 	long		fail_at;		/* alloc failure injection; 0 = none, n = fail nth (1-based) */
 	const char *appname;		/* application_name; NULL = no appname pass */
 	bool		appname_twice;	/* pass the appname result twice (cache replay) */
+	const char *override;		/* tags_override (sqlcommenter); NULL = none */
 } Run;
 
 typedef struct Res
@@ -533,6 +534,8 @@ typedef struct Res
 	long		allocs;
 	size_t		appname_ntags;
 	bool		appname_oom;
+	size_t		override_ntags;
+	bool		override_oom;
 } Res;
 
 static const char *
@@ -642,6 +645,7 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	PsscTagsetEnv env;
 	PsscTagsetOut out;
 	PsscAppnameTags at;
+	PsscSourceTags ot;
 	char	   *buf;
 
 	apply_defaults(&cfg);
@@ -673,8 +677,34 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 		r.appname_ntags = at.ntags;
 		r.appname_oom = at.oom;
 	}
-	pssc_tagset_build(s, start, end, cfg.ex ? cfg.ex : default_ex, tags, excl,
-					  &lim, &env, cfg.appname ? &at : NULL, &out, &r.st);
+	if (cfg.override)
+	{
+		/* parsed as the check_hook does: sqlcommenter, URL-decoded */
+		size_t		olen = strlen(cfg.override);
+		PsscPair	pairs[64];
+		char		obuf[1024];
+		PsscPairOut po = {pairs, 64, obuf, sizeof(obuf)};
+		PsscPairResult pr;
+
+		assert(olen <= sizeof(obuf));
+		memset(&pr, 0, sizeof(pr));
+		pssc_parse_sqlcommenter(cfg.override, olen, true, &po, &pr);
+		assert(pr.nmalformed == 0 && pr.ndropped == 0);
+		memset(&ot, 0x5a, sizeof(ot));
+		pssc_override_tags_build(pairs, pr.npairs, cfg.ex ? cfg.ex : default_ex,
+								 tags, excl, &lim, &env, &ot);
+		r.override_ntags = ot.ntags;
+		r.override_oom = ot.oom;
+		pssc_tagset_build_with_override(s, start, end,
+										cfg.ex ? cfg.ex : default_ex, tags,
+										excl, &lim, &env,
+										cfg.appname ? &at : NULL, &ot, &out,
+										&r.st);
+	}
+	else
+		pssc_tagset_build(s, start, end, cfg.ex ? cfg.ex : default_ex, tags,
+						  excl, &lim, &env, cfg.appname ? &at : NULL, &out,
+						  &r.st);
 	if (cfg.appname && cfg.appname_twice)
 	{
 		/* the same appname result again: same tags, its counters again */
@@ -2058,6 +2088,183 @@ test_appname(void)
 	}
 }
 
+/*
+ * tags_override (item 20261005-091225-30): session/transaction tags merged
+ * with the comment tags; the override wins every key conflict.
+ */
+static void
+test_override(void)
+{
+	XSpec		sc = SC(PSSC_POS_APPEND);
+	Run			c = {0};
+	Res		   *r;
+
+	/* alone, decoded like a sqlcommenter comment */
+	c.ex = mkex(1, &sc);
+	c.override = "controller='users',action='sh%20ow+x'";
+	r = run("override alone", c, "SELECT 1");
+	CHECK(strcmp(r->text, "action=sh ow x|controller=users") == 0 &&
+		  r->override_ntags == 2 && !r->footer,
+		  "override alone: %s (%zu)", r->text, r->override_ntags);
+	/* no pairs: nothing */
+	c.override = "";
+	EXPECT("override empty", c, "SELECT 1 /*a='1'*/", "a=1");
+
+	/* union with the comment; the override wins a conflict */
+	{
+		XSpec		xs[2] = {SC(PSSC_POS_APPEND), MG(PSSC_POS_APPEND)};
+
+		c.ex = mkex(2, xs);
+		c.override = "controller='ovr',job='j'";
+		EXPECT("override disjoint", c, "SELECT 1 /*action='a'*/",
+			   "action=a|controller=ovr|job=j");
+		EXPECT("override conflict sqlcommenter", c,
+			   "SELECT 1 /*controller='c',action='a'*/",
+			   "action=a|controller=ovr|job=j");
+		EXPECT("override conflict marginalia", c,
+			   "SELECT 1 /*controller:m,action:a*/",
+			   "action=a|controller=ovr|job=j");
+		/* the override wins even when it is truncated and the comment is not */
+		c.max_value = 2;
+		EXPECT("override conflict truncated", c, "SELECT 1 /*job:x*/",
+			   "controller=ov|job=j");
+		c.max_value = 0;
+		/* the override does not make the comment chain produce: footer */
+		r = run_range("override footer", c, "SELECT 1; /*action:f*/", 0, 8);
+		CHECK(strcmp(r->text, "action=f|controller=ovr|job=j") == 0 && r->footer,
+			  "override footer: %s footer %d", r->text, r->footer);
+		r = run_range("override no footer", c, "SELECT 1; SELECT 2", 0, 8);
+		CHECK(strcmp(r->text, "controller=ovr|job=j") == 0 && !r->footer,
+			  "override no footer: %s", r->text);
+		/* first occurrence within the override */
+		c.override = "a='1',a='2'";
+		EXPECT("override first occurrence", c, "SELECT 1 /*a:3*/", "a=1");
+	}
+
+	/* precedence: override > comment > appname */
+	{
+		XSpec		xs[2] = {SC(PSSC_POS_APPEND), AN(PSSC_EXTRACTOR_SQLCOMMENTER)};
+
+		c.ex = mkex(2, xs);
+		c.appname = "a='app',b='app',c='app',d='app'";
+		c.override = "a='ovr',b='ovr'";
+		EXPECT("override precedence", c, "SELECT 1 /*b='cmt',c='cmt'*/",
+			   "a=ovr|b=ovr|c=cmt|d=app");
+		c.appname = NULL;
+	}
+
+	/*
+	 * rename: the rename lists of the comment sqlcommenter extractors, in
+	 * configuration order (first matching rule); never marginalia's, regex's
+	 * or appname's. keys (step 3) is not applied.
+	 */
+	{
+		XSpec		xs[5] = {MG(PSSC_POS_APPEND), SC(PSSC_POS_APPEND),
+		SC(PSSC_POS_PREPEND), AN(PSSC_EXTRACTOR_SQLCOMMENTER), MG(PSSC_POS_PREPEND)};
+
+		xs[0].rename = "m:mg";
+		xs[1].rename = "route:endpoint|a:x";
+		xs[1].keys = "zzz";
+		xs[2].rename = "a:y|b:z";
+		xs[3].rename = "c:appc";
+		xs[4].rename = "d:mgd";
+		c.ex = mkex(5, xs);
+		c.override = "route='/r',a='1',b='2',c='3',m='4',d='5'";
+		EXPECT("override rename", c, "SELECT 1",
+			   "c=3|d=5|endpoint=/r|m=4|x=1|z=2");
+		/* (keys=zzz filtered the comment) */
+		EXPECT("override keys filter comment only", c,
+			   "SELECT 1 /*route='/c',k='v'*/",
+			   "c=3|d=5|endpoint=/r|m=4|x=1|z=2");
+		/* conflicts are decided on the renamed key */
+		xs[1].keys = NULL;
+		c.ex = mkex(5, xs);
+		EXPECT("override rename conflict", c, "SELECT 1 /*route='/c',k='v'*/",
+			   "c=3|d=5|endpoint=/r|k=v|m=4|x=1|z=2");
+		c.override = "endpoint='/o'";
+		EXPECT("override renamed comment conflict", c,
+			   "SELECT 1 /*route='/c',a='9'*/", "endpoint=/o|x=9");
+		/* a rename target invalid in the encoding is dropped and counted */
+		xs[1].rename = "a:\xff";
+		c.ex = mkex(5, xs);
+		c.override = "a='1',b='2'";
+		r = run("override rename invalid", c, "SELECT 1");
+		CHECK(strcmp(r->text, "z=2") == 0 && r->st.invalid_tags == 1,
+			  "override rename invalid: %s inv %llu", r->text,
+			  (unsigned long long) r->st.invalid_tags);
+	}
+
+	/* allowlist, denylist, truncation, encoding, normalize */
+	c.ex = mkex(1, &sc);
+	c.tags = "controller,action";
+	c.override = "job='j',controller='c',action='a'";
+	EXPECT("override allowlist", c, "SELECT 1", "action=a|controller=c");
+	c.tags = NULL;
+	c.exclude = "request_id";
+	c.override = "request_id='r1',a='1'";
+	EXPECT("override denylist", c, "SELECT 1", "a=1");
+	c.exclude = NULL;
+	c.max_value = 3;
+	c.override = "a='abcdef',b='ab%C3%A9'";
+	EXPECT("override truncation", c, "SELECT 1", "a=abc|b=ab");
+	c.max_value = 0;
+	c.override = "a='%FF',b='ok'";
+	r = run("override invalid encoding", c, "SELECT 1");
+	CHECK(strcmp(r->text, "b=ok") == 0 && r->st.invalid_tags == 1,
+		  "override invalid encoding: %s inv %llu", r->text,
+		  (unsigned long long) r->st.invalid_tags);
+	/* an override pair dropped by the pipeline does not block the comment */
+	c.override = "a='%FF'";
+	EXPECT("override dropped no block", c, "SELECT 1 /*a='c'*/", "a=c");
+	c.with_normalize = true;
+	c.override = "route='/u/1'";
+	r = run("override normalize", c, "SELECT 1");
+	CHECK(strcmp(r->text, "route=/u/:id") == 0 && r->st.normalized_tags == 1,
+		  "override normalize: %s norm %llu", r->text,
+		  (unsigned long long) r->st.normalized_tags);
+	/* a failure for the override does not drop the comment's value */
+	c.override = "route='FAIL'";
+	r = run("override normalize failure", c, "SELECT 1 /*route='/c/2'*/");
+	CHECK(strcmp(r->text, "route=/c/:id") == 0 && r->st.normalize_failures == 1,
+		  "override normalize failure: %s fail %llu", r->text,
+		  (unsigned long long) r->st.normalize_failures);
+	c.with_normalize = false;
+
+	/* step 9: priority by key, whatever the source */
+	c.max_tags = 1;
+	c.tags = "b,a";
+	c.override = "a='1'";
+	r = run("override max_tags", c, "SELECT 1 /*b='2'*/");
+	CHECK(strcmp(r->text, "b=2") == 0 && r->st.dropped_tags == 1,
+		  "override max_tags: %s drop %llu", r->text,
+		  (unsigned long long) r->st.dropped_tags);
+	c.tags = NULL;
+	c.max_tags = 0;
+
+	/* out of memory anywhere, override pass included: empty set */
+	{
+		long		total;
+
+		c.override = "x='1',y='2'";
+		r = run("override oom baseline", c, "SELECT 1 /*b='2'*/");
+		total = r->allocs;
+		CHECK(strcmp(r->text, "b=2|x=1|y=2") == 0 && total > 0,
+			  "override oom baseline: %s (%ld)", r->text, total);
+		for (long k = 1; k <= total; k++)
+		{
+			c.fail_at = k;
+			r = run("override oom", c, "SELECT 1 /*b='2'*/");
+			CHECK(r->oom && r->ntags == 0 && r->len == 0,
+				  "override oom at %ld: oom %d text %s", k, r->oom, r->text);
+		}
+		c.fail_at = 1;
+		r = run("override oom first", c, "SELECT 1 /*b='2'*/");
+		CHECK(r->override_oom && r->override_ntags == 0,
+			  "override oom first: %d %zu", r->override_oom, r->override_ntags);
+		c.fail_at = 0;
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2088,6 +2295,7 @@ main(int argc, char **argv)
 	test_escape();
 	test_normalize();
 	test_appname();
+	test_override();
 
 	if (failures)
 	{

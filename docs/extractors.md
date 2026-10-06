@@ -93,6 +93,11 @@ the list. A comment pair that the pipeline drops (an invalid value, a failed
 normalization, a key filtered out) doesn't block the `application_name` value
 for that key.
 
+The session's [`tags_override`](configuration.md#tags_override) tags are
+added to both, and win every key conflict: **override > comment >
+`application_name`**. They are not part of either chain (they don't stop
+an extractor, and an override pair the pipeline drops blocks nothing).
+
 An extractor *produces* when at least one of its tags is still a candidate
 after [pipeline](#the-tag-pipeline) steps 1–7 (validation, the allowlists and
 denylist, `rename`, normalization, truncation). That is decided **before** the
@@ -281,6 +286,10 @@ connection parameter) but can't add comments to their queries.
   statement, as if nothing were cached.
 - `pg_stat_statement_context_extract()` uses the calling session's current
   `application_name`; its result has no separate field for these tags.
+- For tags that a client sets explicitly for a session or a transaction,
+  with `SET` / `SET LOCAL` and without changing `application_name`, see
+  [`tags_override`](configuration.md#tags_override), whose tags win over
+  both comments and `application_name`.
 
 ```sql
 ALTER SYSTEM SET pg_stat_statement_context.extractors =
@@ -439,6 +448,14 @@ extractor finds goes through these steps:
    tag dropped here is not replaced by tags from a skipped extractor. The
    priority depends only on the key, not on whether the tag came from a
    comment or from `application_name`.
+
+The [`tags_override`](configuration.md#tags_override) setting's pairs go
+through the same steps, decoded when the setting is set (step 1), except
+step 3: there is no extractor, so no `keys` list. For step 4 they use the
+`rename` lists of the comment `sqlcommenter` extractors, in configuration
+order (the first rule matching the key applies); other extractors'
+`rename` lists are ignored, and with no `sqlcommenter` extractor nothing is
+renamed.
 
 The stored tag set is sorted by key and is part of the entry's key: two
 statements with the same tags in a different order share an entry, and

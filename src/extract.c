@@ -17,6 +17,13 @@
  * pssc_tagset_build() adds again on every use, so the counters are as if
  * nothing were cached. A result that depends on more than its inputs (out
  * of memory, a normalize or regex failure that may not recur) is not cached.
+ *
+ * The tags_override result (backlog item 20261005-091225-30) is cached the
+ * same way, keyed by the parsed setting (the check_hook's blob): a
+ * statement without an override costs one pointer test, one with an
+ * unchanged override a generation comparison, and one whose override was
+ * set again to the same value (SET LOCAL in every transaction) a memcmp of
+ * the blob.
  */
 #include "postgres.h"
 
@@ -36,19 +43,27 @@ static PsscRegexExtractFn regex_hook = NULL;
 static void *regex_hook_arg = NULL;
 
 /*
- * Cached appname result; valid only if appname_valid. Its inputs are the
- * configuration (generation), the limits, application_name, the database
- * encoding (fixed per backend) and the regex hook (pssc_extract_set_regex_hook()
- * invalidates the cache); results that also depend on transient conditions
- * are not cached.
+ * A cached source result (appname or tags_override); valid only if valid.
+ * Its inputs are the configuration (generation), the limits, the source
+ * text (application_name, or the bytes of the override blob), the database
+ * encoding (fixed per backend) and the regex hook
+ * (pssc_extract_set_regex_hook() invalidates the caches); results that also
+ * depend on transient conditions are not cached.
  */
-static MemoryContext appname_cxt = NULL;
-static bool appname_valid = false;
-static uint64 appname_generation;
-static PsscTagsetLimits appname_limits;
-static char *appname_str;
-static size_t appname_len;
-static PsscAppnameTags appname_tags;
+typedef struct SourceCache
+{
+	MemoryContext cxt;
+	bool		valid;
+	uint64		generation;
+	PsscTagsetLimits limits;
+	char	   *str;
+	size_t		len;
+	PsscSourceTags tags;
+	uint64		src_generation; /* tags_override: pssc_guc_override_generation() */
+} SourceCache;
+
+static SourceCache appname_cache;
+static SourceCache override_cache;
 
 static void *
 env_alloc(void *arg, size_t size)
@@ -103,33 +118,45 @@ same_limits(const PsscTagsetLimits *a, const PsscTagsetLimits *b)
 }
 
 static char *
-cache_copy(const char *s, size_t len)
+cache_copy(SourceCache *cache, const char *s, size_t len)
 {
-	char	   *p = MemoryContextAllocExtended(appname_cxt, Max(len, 1),
-											   MCXT_ALLOC_NO_OOM);
+	char	   *p;
 
+	if (len > MaxAllocSize)
+		return NULL;
+	p = MemoryContextAllocExtended(cache->cxt, Max(len, 1), MCXT_ALLOC_NO_OOM);
 	if (p != NULL && len > 0)
 		memcpy(p, s, len);
 	return p;
 }
 
-/* Stores built (allocated in extract_cxt) as the cached result for name. */
+/* True if cache holds the result for these inputs. */
+static bool
+cache_hit(const SourceCache *cache, const char *str, size_t len,
+		  uint64 generation, const PsscTagsetLimits *limits)
+{
+	return cache->valid && cache->generation == generation &&
+		same_limits(&cache->limits, limits) &&
+		cache->len == len && memcmp(cache->str, str, len) == 0;
+}
+
+/* Stores built (allocated in extract_cxt) as the cached result for str. */
 static void
-appname_cache_store(const char *name, size_t len, uint64 generation,
-					const PsscTagsetLimits *limits, const PsscAppnameTags *built)
+cache_store(SourceCache *cache, const char *str, size_t len, uint64 generation,
+			const PsscTagsetLimits *limits, const PsscSourceTags *built)
 {
 	PsscTagCandidate *tags = NULL;
 
-	MemoryContextReset(appname_cxt);
-	appname_valid = false;
-	appname_str = cache_copy(name, len);
-	if (appname_str == NULL)
+	MemoryContextReset(cache->cxt);
+	cache->valid = false;
+	cache->str = cache_copy(cache, str, len);
+	if (cache->str == NULL)
 		return;
 	if (built->ntags > 0)
 	{
 		if (built->ntags > MaxAllocSize / sizeof(PsscTagCandidate))
 			return;
-		tags = MemoryContextAllocExtended(appname_cxt,
+		tags = MemoryContextAllocExtended(cache->cxt,
 										  sizeof(PsscTagCandidate) * built->ntags,
 										  MCXT_ALLOC_NO_OOM);
 		if (tags == NULL)
@@ -137,18 +164,27 @@ appname_cache_store(const char *name, size_t len, uint64 generation,
 		for (size_t i = 0; i < built->ntags; i++)
 		{
 			tags[i] = built->tags[i];
-			tags[i].key = cache_copy(built->tags[i].key, built->tags[i].klen);
-			tags[i].val = cache_copy(built->tags[i].val, built->tags[i].vlen);
+			tags[i].key = cache_copy(cache, built->tags[i].key, built->tags[i].klen);
+			tags[i].val = cache_copy(cache, built->tags[i].val, built->tags[i].vlen);
 			if (tags[i].key == NULL || tags[i].val == NULL)
 				return;
 		}
 	}
-	appname_len = len;
-	appname_generation = generation;
-	appname_limits = *limits;
-	appname_tags = *built;
-	appname_tags.tags = tags;
-	appname_valid = true;
+	cache->len = len;
+	cache->generation = generation;
+	cache->limits = *limits;
+	cache->tags = *built;
+	cache->tags.tags = tags;
+	cache->valid = true;
+}
+
+/* True if built may be cached: it depends on its inputs only. */
+static bool
+cacheable(const PsscSourceTags *built, uint64 transient, uint64 generation)
+{
+	return !built->oom && built->stats.normalize_failures == 0 &&
+		pssc_regex_transient_failures() == transient &&
+		pssc_guc_config_generation() == generation;
 }
 
 /*
@@ -167,20 +203,75 @@ appname_tags_get(const PsscTagsetLimits *limits, const PsscTagsetEnv *env,
 
 	if (!pssc_extractors_have_appname(extractors))
 		return NULL;
-	if (appname_valid && appname_generation == generation &&
-		same_limits(&appname_limits, limits) &&
-		appname_len == len && memcmp(appname_str, name, len) == 0)
-		return &appname_tags;
+	if (cache_hit(&appname_cache, name, len, generation, limits))
+		return &appname_cache.tags;
 
 	transient = pssc_regex_transient_failures();
 	pssc_appname_tags_build(name, len, extractors, pssc_guc_tags(),
 							pssc_guc_exclude_tags(), limits, env, built);
-	if (!built->oom && built->stats.normalize_failures == 0 &&
-		pssc_regex_transient_failures() == transient &&
-		pssc_guc_config_generation() == generation)
-		appname_cache_store(name, len, generation, limits, built);
+	if (cacheable(built, transient, generation))
+		cache_store(&appname_cache, name, len, generation, limits, built);
 	else
-		appname_valid = false;
+		appname_cache.valid = false;
+	return built;
+}
+
+/*
+ * Returns the tags of the current tags_override (NULL if it has no pair),
+ * from the cache or built into extract_cxt (valid until it is reset).
+ */
+static const PsscSourceTags *
+override_tags_get(const PsscTagsetLimits *limits, const PsscTagsetEnv *env,
+				  PsscSourceTags *built)
+{
+	const PsscOverrideList *ov = pssc_guc_override();
+	uint64		ovgen;
+	uint64		generation;
+	uint64		transient;
+	PsscPair   *pairs;
+
+	if (ov == NULL)
+		return NULL;
+	ovgen = pssc_guc_override_generation();
+	generation = pssc_guc_config_generation();
+	if (override_cache.valid && override_cache.src_generation == ovgen &&
+		override_cache.generation == generation &&
+		same_limits(&override_cache.limits, limits))
+		return &override_cache.tags;
+	if (cache_hit(&override_cache, (const char *) ov, ov->size, generation, limits))
+	{
+		override_cache.src_generation = ovgen;
+		return &override_cache.tags;
+	}
+
+	pairs = env_alloc(NULL, (size_t) ov->npairs * sizeof(PsscPair));
+	if (pairs == NULL)
+	{
+		memset(built, 0, sizeof(*built));
+		built->oom = true;
+		override_cache.valid = false;
+		return built;
+	}
+	for (uint32 i = 0; i < ov->npairs; i++)
+	{
+		pairs[i].key = pssc_override_str(ov, ov->pairs[i].key);
+		pairs[i].keylen = ov->pairs[i].key.len;
+		pairs[i].value = pssc_override_str(ov, ov->pairs[i].value);
+		pairs[i].valuelen = ov->pairs[i].value.len;
+		pairs[i].flags = 0;
+	}
+	transient = pssc_regex_transient_failures();
+	pssc_override_tags_build(pairs, ov->npairs, pssc_guc_extractors(),
+							 pssc_guc_tags(), pssc_guc_exclude_tags(), limits,
+							 env, built);
+	if (cacheable(built, transient, generation))
+	{
+		cache_store(&override_cache, (const char *) ov, ov->size, generation,
+					limits, built);
+		override_cache.src_generation = ovgen;
+	}
+	else
+		override_cache.valid = false;
 	return built;
 }
 
@@ -195,6 +286,8 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 	PsscTagsetOut out;
 	PsscAppnameTags built;
 	const PsscAppnameTags *appname;
+	PsscSourceTags obuilt;
+	const PsscSourceTags *override;
 
 	memset(result, 0, sizeof(*result));
 	if (extract_cxt == NULL)	/* not preloaded: pssc_extract_init() not run */
@@ -226,12 +319,14 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 	limits.standard_conforming_strings = standard_conforming_strings;
 
 	appname = appname_tags_get(&limits, &env, &built);
+	override = override_tags_get(&limits, &env, &obuilt);
 
 	memset(&out, 0, sizeof(out));
 	out.buf = buf;
-	pssc_tagset_build(s, start, end, pssc_guc_extractors(), pssc_guc_tags(),
-					  pssc_guc_exclude_tags(), &limits, &env, appname, &out,
-					  stats);
+	pssc_tagset_build_with_override(s, start, end, pssc_guc_extractors(),
+									pssc_guc_tags(), pssc_guc_exclude_tags(),
+									&limits, &env, appname, override, &out,
+									stats);
 	MemoryContextReset(extract_cxt);
 
 	result->len = out.len;
@@ -274,10 +369,14 @@ pssc_extract_init(void)
 		extract_cxt = AllocSetContextCreate(TopMemoryContext,
 											"pg_stat_statement_context extract",
 											ALLOCSET_DEFAULT_SIZES);
-	if (appname_cxt == NULL)
-		appname_cxt = AllocSetContextCreate(TopMemoryContext,
-											"pg_stat_statement_context appname",
-											ALLOCSET_SMALL_SIZES);
+	if (appname_cache.cxt == NULL)
+		appname_cache.cxt = AllocSetContextCreate(TopMemoryContext,
+												  "pg_stat_statement_context appname",
+												  ALLOCSET_SMALL_SIZES);
+	if (override_cache.cxt == NULL)
+		override_cache.cxt = AllocSetContextCreate(TopMemoryContext,
+												   "pg_stat_statement_context tags_override",
+												   ALLOCSET_SMALL_SIZES);
 }
 
 uint32
@@ -306,7 +405,10 @@ void
 pssc_extract_set_regex_hook(PsscRegexExtractFn fn, void *arg)
 {
 	if (fn != regex_hook || arg != regex_hook_arg)
-		appname_valid = false;
+	{
+		appname_cache.valid = false;
+		override_cache.valid = false;
+	}
 	regex_hook = fn;
 	regex_hook_arg = arg;
 }

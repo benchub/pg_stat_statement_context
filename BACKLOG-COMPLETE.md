@@ -990,6 +990,34 @@ The execution-time CPU limits (item -10) don't cover compile. Options (decide an
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-30: Roadmap: `tags_override` session/transaction context
+
+**Description:** Add a `USERSET` GUC, `pg_stat_statement_context.tags_override`, that can be set with `SET` or `SET LOCAL` (§8 v2, §6.3). It works with prepared statements and with drivers that can't add comments.
+- **Syntax:** sqlcommenter style, `k='v',k2='v2'`, with URL-encoded values (for example `SET LOCAL pg_stat_statement_context.tags_override = 'controller=''users'',action=''show'''`). Parse it in a `check_hook` with the sqlcommenter parser (task 20261005-091225-6) into a flat `extra` blob; malformed values are rejected.
+- **Combination:** override tags **merge** with tags from comments; on a key conflict the override value wins.
+- **Pipeline:** override tags go through the same §6.11 pipeline as comment tags (decode and validation, `rename`, allowlist/denylist, truncation), except the per-extractor `keys` step.
+- Apply it when top-level frames are created, so nested frames inherit it through the normal rules.
+
+If task 20261005-091225-27 decides on go, this task moves into v1.
+
+**Acceptance criteria:**
+- With `SET LOCAL`, statements in the transaction get the override tags, and they no longer apply after commit.
+- Prepared statements executed after the `SET` pick up the override.
+- An override and a comment with disjoint keys produce the union; on a shared key the override value is stored.
+- Override keys are renamed, filtered by the allowlist/denylist, and truncated exactly like comment tags.
+- Invalid values (bad syntax, bad `%` escapes) are rejected at `SET` time.
+- The feature is documented.
+
+**Decisions:**
+- 2026-10-05: Value syntax is sqlcommenter-style `k='v',k2='v2'` with URL-encoded values.
+- 2026-10-05: Override tags merge with comment tags; the `SET` value wins on key conflicts.
+- 2026-10-05: Override tags go through the same §6.11 pipeline (rename, allowlist/denylist, truncation).
+- 2026-10-05: Item -27 decided **no-go** for v1 (no driver reuses prepared statements across comments; see DESIGN.md §6.3). This stays a roadmap item.
+
+**Depends on:** 20261005-091225-18, 20261005-091225-27
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

@@ -16,7 +16,9 @@
  * whole pipeline is O(n log n) in the number of pairs. The appname
  * extractors run as a separate chain over application_name
  * (pssc_appname_tags_build()); their tags join the comment chain's with a
- * later sequence number, so deduplication keeps the comment's value.
+ * later sequence number, so deduplication keeps the comment's value. The
+ * tags_override pairs run through the same steps (pssc_override_tags_build())
+ * and join with an earlier sequence number, so the override wins.
  */
 #ifdef PSSC_STANDALONE
 #include "pssc_standalone.h"
@@ -195,8 +197,32 @@ normalize_value(Ctx *c, const char *key, size_t klen, const char **val,
 }
 
 /*
- * Steps 2-7 of DESIGN.md §6.11 for one pair of extractor e. Returns true if
- * a tag was added.
+ * Step 4 for a tags_override pair (no extractor): the first rule of the
+ * comment sqlcommenter extractors, in configuration order, whose "from" is
+ * key. Returns NULL if none.
+ */
+static const PsscBlobRename *
+override_rename(const Ctx *c, const char *key, size_t klen)
+{
+	for (uint32 i = 0; i < c->ex->nextractors; i++)
+	{
+		const PsscExtractor *e = &c->ex->extractors[i];
+		const PsscBlobRename *ren;
+
+		if (e->source != PSSC_SOURCE_COMMENT ||
+			e->kind != PSSC_EXTRACTOR_SQLCOMMENTER || e->nrename == 0)
+			continue;
+		ren = pssc_extractor_renames(c->ex, e);
+		for (uint32 j = 0; j < e->nrename; j++)
+			if (bytes_eq(key, klen, pssc_blob_str(c->ex, ren[j].from), ren[j].from.len))
+				return &ren[j];
+	}
+	return NULL;
+}
+
+/*
+ * Steps 2-7 of DESIGN.md §6.11 for one pair of extractor e, or of
+ * tags_override if e is NULL. Returns true if a tag was added.
  */
 static bool
 process_pair(Ctx *c, const PsscExtractor *e, const PsscPair *p)
@@ -223,7 +249,7 @@ process_pair(Ctx *c, const PsscExtractor *e, const PsscPair *p)
 		val = "";
 
 	/* 3. per-extractor keys, by original name (regex keys name captures) */
-	if (e->kind != PSSC_EXTRACTOR_REGEX && e->has_keys)
+	if (e != NULL && e->kind != PSSC_EXTRACTOR_REGEX && e->has_keys)
 	{
 		const PsscBlobStr *keys = pssc_extractor_keys(c->ex, e);
 		bool		found = false;
@@ -235,23 +261,28 @@ process_pair(Ctx *c, const PsscExtractor *e, const PsscPair *p)
 	}
 
 	/* 4. rename */
-	if (e->nrename > 0)
 	{
-		const PsscBlobRename *ren = pssc_extractor_renames(c->ex, e);
+		const PsscBlobRename *rule = NULL;
 
-		for (uint32 i = 0; i < e->nrename; i++)
+		if (e == NULL)
+			rule = override_rename(c, key, klen);
+		else if (e->nrename > 0)
 		{
-			if (bytes_eq(key, klen, pssc_blob_str(c->ex, ren[i].from), ren[i].from.len))
+			const PsscBlobRename *ren = pssc_extractor_renames(c->ex, e);
+
+			for (uint32 i = 0; i < e->nrename && rule == NULL; i++)
+				if (bytes_eq(key, klen, pssc_blob_str(c->ex, ren[i].from), ren[i].from.len))
+					rule = &ren[i];
+		}
+		if (rule != NULL)
+		{
+			key = pssc_blob_str(c->ex, rule->to);
+			klen = rule->to.len;
+			/* config bytes, never checked against this encoding */
+			if (!c->env->verify(c->env->arg, key, klen))
 			{
-				key = pssc_blob_str(c->ex, ren[i].to);
-				klen = ren[i].to.len;
-				/* config bytes, never checked against this encoding */
-				if (!c->env->verify(c->env->arg, key, klen))
-				{
-					c->stats->invalid_tags++;
-					return false;
-				}
-				break;
+				c->stats->invalid_tags++;
+				return false;
 			}
 		}
 	}
@@ -478,6 +509,21 @@ cmp_prio(const void *a, const void *b)
 	return 0;
 }
 
+/* Adds the tags of a pre-built source (appname or tags_override). */
+static void
+add_source(Ctx *c, const PsscSourceTags *src)
+{
+	stats_add(c->stats, &src->stats);
+	if (src->oom)
+		c->oom = true;
+	for (size_t i = 0; i < src->ntags && !c->oom; i++)
+	{
+		const PsscTagCandidate *t = &src->tags[i];
+
+		add_tag(c, t->key, t->klen, t->val, t->vlen, t->prio);
+	}
+}
+
 void
 pssc_tagset_build(const char *s, size_t start, size_t end,
 				  const struct PsscExtractorList *extractors,
@@ -489,7 +535,25 @@ pssc_tagset_build(const char *s, size_t start, size_t end,
 				  PsscTagsetOut *out,
 				  PsscTagsetStats *stats)
 {
+	pssc_tagset_build_with_override(s, start, end, extractors, tags,
+									exclude_tags, limits, env, appname, NULL,
+									out, stats);
+}
+
+void
+pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
+								const struct PsscExtractorList *extractors,
+								const struct PsscTagList *tags,
+								const struct PsscTagList *exclude_tags,
+								const PsscTagsetLimits *limits,
+								const PsscTagsetEnv *env,
+								const PsscAppnameTags *appname,
+								const PsscSourceTags *override,
+								PsscTagsetOut *out,
+								PsscTagsetStats *stats)
+{
 	Ctx			c;
+	size_t		base;
 	size_t		n = 0;
 	size_t		maxtags,
 				maxbytes,
@@ -514,29 +578,23 @@ pssc_tagset_build(const char *s, size_t start, size_t end,
 	c.env = env;
 	c.stats = stats;
 
-	run_chain(&c, false);
-	if (c.ntag == 0 && !c.oom)
+	/*
+	 * Sources in precedence order (lower seq first): the deduplication below
+	 * keeps the first occurrence of a key, so tags_override beats the
+	 * comments, which beat application_name.
+	 */
+	if (override != NULL)
+		add_source(&c, override);
+	base = c.ntag;
+	if (!c.oom)
+		run_chain(&c, false);
+	if (c.ntag == base && !c.oom)
 	{
 		run_chain(&c, true);
-		out->footer = c.ntag > 0;
+		out->footer = c.ntag > base;
 	}
-
-	/*
-	 * application_name tags after the comment tags (higher seq): the
-	 * deduplication below keeps the comment's value of a key.
-	 */
 	if (appname != NULL)
-	{
-		stats_add(stats, &appname->stats);
-		if (appname->oom)
-			c.oom = true;
-		for (size_t i = 0; i < appname->ntags && !c.oom; i++)
-		{
-			const PsscTagCandidate *t = &appname->tags[i];
-
-			add_tag(&c, t->key, t->klen, t->val, t->vlen, t->prio);
-		}
-	}
+		add_source(&c, appname);
 	if (c.ntag == 0 || c.oom)
 		goto done;
 
@@ -605,6 +663,37 @@ done:
 	}
 }
 
+/* The tags of a source pass (c->stats is out->stats) into *out. */
+static void
+export_tags(Ctx *c, PsscSourceTags *out)
+{
+	PsscTagCandidate *cand;
+
+	if (c->ntag > 0 && !c->oom)
+	{
+		cand = ctx_alloc(c, c->ntag * sizeof(PsscTagCandidate));
+		if (cand != NULL)
+		{
+			for (size_t i = 0; i < c->ntag; i++)
+			{
+				cand[i].key = c->tag[i].key;
+				cand[i].klen = c->tag[i].klen;
+				cand[i].val = c->tag[i].val;
+				cand[i].vlen = c->tag[i].vlen;
+				cand[i].prio = c->tag[i].prio;
+			}
+			out->tags = cand;
+			out->ntags = c->ntag;
+		}
+	}
+	if (c->oom)
+	{
+		out->tags = NULL;
+		out->ntags = 0;
+		out->oom = true;
+	}
+}
+
 bool
 pssc_extractors_have_appname(const PsscExtractorList *list)
 {
@@ -624,7 +713,6 @@ pssc_appname_tags_build(const char *appname, size_t len,
 						PsscAppnameTags *out)
 {
 	Ctx			c;
-	PsscTagCandidate *cand;
 
 	memset(out, 0, sizeof(*out));
 	if (len == 0)
@@ -641,29 +729,37 @@ pssc_appname_tags_build(const char *appname, size_t len,
 	c.stats = &out->stats;
 
 	run_appname_chain(&c, appname, len);
-	if (c.ntag > 0 && !c.oom)
-	{
-		cand = ctx_alloc(&c, c.ntag * sizeof(PsscTagCandidate));
-		if (cand != NULL)
-		{
-			for (size_t i = 0; i < c.ntag; i++)
-			{
-				cand[i].key = c.tag[i].key;
-				cand[i].klen = c.tag[i].klen;
-				cand[i].val = c.tag[i].val;
-				cand[i].vlen = c.tag[i].vlen;
-				cand[i].prio = c.tag[i].prio;
-			}
-			out->tags = cand;
-			out->ntags = c.ntag;
-		}
-	}
-	if (c.oom)
-	{
-		out->tags = NULL;
-		out->ntags = 0;
-		out->oom = true;
-	}
+	export_tags(&c, out);
+}
+
+void
+pssc_override_tags_build(const PsscPair *pairs, size_t npairs,
+						 const PsscExtractorList *extractors,
+						 const PsscTagList *tags,
+						 const PsscTagList *exclude_tags,
+						 const PsscTagsetLimits *limits,
+						 const PsscTagsetEnv *env,
+						 PsscSourceTags *out)
+{
+	Ctx			c;
+
+	memset(out, 0, sizeof(*out));
+	if (npairs == 0)
+		return;
+
+	memset(&c, 0, sizeof(c));
+	c.s = "";
+	c.ex = extractors;
+	c.tags = tags;
+	c.exclude = exclude_tags;
+	c.match_all = pssc_tag_list_match_all(tags);
+	c.lim = limits;
+	c.env = env;
+	c.stats = &out->stats;
+
+	for (size_t i = 0; i < npairs && !c.oom; i++)
+		process_pair(&c, NULL, &pairs[i]);
+	export_tags(&c, out);
 }
 
 size_t

@@ -53,9 +53,9 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | yes | blocked-on-questions |
 | 20261006-092320-1 | Flaky TAP 004: "every alternating reload replaced the extractors" (28 of 30) | — | no | ready |
+| 20261006-101139-1 | Confirm `tags_override` rename rule and nested `scan` behavior | 20261005-091225-30 | yes | blocked-on-questions |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | yes | blocked-on-questions |
-| 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
@@ -198,6 +198,18 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 **Open questions:** none
 **Status:** ready
 
+### 20261006-101139-1: Confirm `tags_override` rename rule and nested `scan` behavior
+
+**Description:** Item -30 landed `tags_override` with two builder decisions that need the user's confirmation (DESIGN.md §6.11 and §8). If either is rejected, change the code, tests (test/t/023_tags_override.pl, test/sql/tags_override.sql) and docs (docs/configuration.md `tags_override`, docs/extractors.md pipeline) accordingly.
+
+**Acceptance criteria:** the user's answers are recorded as decisions; code, tests and docs match them.
+
+**Depends on:** 20261005-091225-30
+**Open questions:**
+- Q1: There is no global `rename`; override keys currently use the `rename` lists of the comment `sqlcommenter` extractors (config order, first match wins; marginalia/regex/appname renames are ignored; no sqlcommenter extractor → no rename). Keep this, or never rename override keys (the app writes canonical names), or add a global rename GUC?
+- Q2: With `nested_tags = scan`, nested statements re-read the override, so a function's `SET pg_stat_statement_context.tags_override` clause (or a `SET LOCAL` inside the function) tags its nested statements. With `inherit` the top-level tags are copied. Is that acceptable?
+**Status:** blocked-on-questions
+
 ### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
 
 **Description:** Found while documenting (item -28). `evicted_entries` counts both expired entries reclaimed by an eviction pass and live entries evicted, and `dealloc` counts passes. `dropped_records` (calls lost because a pass freed nothing) is not exposed. So `_info()` alone cannot tell an operator that `max_entries` is too small, contrary to DESIGN §5.3 step 3. The docs currently give a workaround: compare the row count of `pg_stat_statement_context_totals` with `max_entries`.
@@ -240,34 +252,6 @@ Proposed: split the counter into `reclaimed_entries` (expired or dead, harmless)
 ---
 
 ## Post-v1 roadmap tasks (§8)
-
-### 20261005-091225-30: Roadmap: `tags_override` session/transaction context
-
-**Description:** Add a `USERSET` GUC, `pg_stat_statement_context.tags_override`, that can be set with `SET` or `SET LOCAL` (§8 v2, §6.3). It works with prepared statements and with drivers that can't add comments.
-- **Syntax:** sqlcommenter style, `k='v',k2='v2'`, with URL-encoded values (for example `SET LOCAL pg_stat_statement_context.tags_override = 'controller=''users'',action=''show'''`). Parse it in a `check_hook` with the sqlcommenter parser (task 20261005-091225-6) into a flat `extra` blob; malformed values are rejected.
-- **Combination:** override tags **merge** with tags from comments; on a key conflict the override value wins.
-- **Pipeline:** override tags go through the same §6.11 pipeline as comment tags (decode and validation, `rename`, allowlist/denylist, truncation), except the per-extractor `keys` step.
-- Apply it when top-level frames are created, so nested frames inherit it through the normal rules.
-
-If task 20261005-091225-27 decides on go, this task moves into v1.
-
-**Acceptance criteria:**
-- With `SET LOCAL`, statements in the transaction get the override tags, and they no longer apply after commit.
-- Prepared statements executed after the `SET` pick up the override.
-- An override and a comment with disjoint keys produce the union; on a shared key the override value is stored.
-- Override keys are renamed, filtered by the allowlist/denylist, and truncated exactly like comment tags.
-- Invalid values (bad syntax, bad `%` escapes) are rejected at `SET` time.
-- The feature is documented.
-
-**Decisions:**
-- 2026-10-05: Value syntax is sqlcommenter-style `k='v',k2='v2'` with URL-encoded values.
-- 2026-10-05: Override tags merge with comment tags; the `SET` value wins on key conflicts.
-- 2026-10-05: Override tags go through the same §6.11 pipeline (rename, allowlist/denylist, truncation).
-- 2026-10-05: Item -27 decided **no-go** for v1 (no driver reuses prepared statements across comments; see DESIGN.md §6.3). This stays a roadmap item.
-
-**Depends on:** 20261005-091225-18, 20261005-091225-27
-**Open questions:** none
-**Status:** ready
 
 ### 20261005-091225-32: Roadmap: per-key cardinality caps (overflow → JSON `null`)
 

@@ -3,7 +3,9 @@
 `pg_stat_statement_context` is a PostgreSQL extension that attributes query
 execution statistics to the **application context** carried in SQL comments,
 such as the comments emitted by [marginalia], Rails `query_log_tags`, and
-[SQLCommenter].
+[SQLCommenter]. Clients that can't add comments can supply the context in
+`application_name` or, per session or transaction, with
+`SET LOCAL pg_stat_statement_context.tags_override = 'controller=''users'''`.
 
 `pg_stat_statements` answers *"which query fingerprints are expensive?"*. This
 extension answers *"which parts of my application run query fingerprint X, how
@@ -147,7 +149,7 @@ SELECT pg_stat_statement_context_extract(
 
 | Document | Contents |
 |---|---|
-| [docs/configuration.md](docs/configuration.md) | Every GUC, changing the configuration from SQL, capacity sizing, time buckets, eviction. |
+| [docs/configuration.md](docs/configuration.md) | Every GUC (including the session/transaction `tags_override`), changing the configuration from SQL, capacity sizing, time buckets, eviction. |
 | [docs/extractors.md](docs/extractors.md) | Where comments are found, the extractor DSL, SQLCommenter / marginalia / regex formats, the tag pipeline, allowlist/denylist and cardinality guidance. |
 | [docs/sql-interface.md](docs/sql-interface.md) | The views, `pg_stat_statement_context()`, the `_activity` view (current tags per backend), `_info()`, `_reset()`, `_extract()`, the join to `pg_stat_statements`, nested statements and `toplevel`, visibility, encodings. |
 | [docs/limitations.md](docs/limitations.md) | Prepared statements, scanner caveats, PG14/15 utility query IDs, failed statements, PII, managed providers. |

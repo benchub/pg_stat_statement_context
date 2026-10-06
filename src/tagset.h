@@ -226,14 +226,18 @@ typedef struct PsscTagCandidate
  * own every time it uses the result, so a cached result counts like a fresh
  * one. Self-contained values: the backend may copy the tags elsewhere and
  * reuse them while the configuration and application_name are unchanged.
+ * The tags_override pass (pssc_override_tags_build()) fills the same
+ * structure.
  */
-typedef struct PsscAppnameTags
+typedef struct PsscSourceTags
 {
 	size_t		ntags;
 	const PsscTagCandidate *tags;
 	PsscTagsetStats stats;
 	bool		oom;			/* env->alloc failed: no tags */
-} PsscAppnameTags;
+} PsscSourceTags;
+
+typedef PsscSourceTags PsscAppnameTags;
 
 /* True if list has at least one appname extractor. */
 extern bool pssc_extractors_have_appname(const struct PsscExtractorList *list);
@@ -252,6 +256,27 @@ extern void pssc_appname_tags_build(const char *appname, size_t len,
 									const PsscTagsetLimits *limits,
 									const PsscTagsetEnv *env,
 									PsscAppnameTags *out);
+
+/*
+ * Runs the pairs of the tags_override setting (backlog item
+ * 20261005-091225-30; parsed and URL-decoded by the GUC's check_hook with
+ * pssc_parse_sqlcommenter()) through steps 2 and 4-7, into *out (zeroed
+ * first; tags allocated with env->alloc, keys and values point into pairs'
+ * text, the blob or scratch). There is no extractor, so no step 3 ("keys");
+ * step 4 applies the "rename" lists of the comment sqlcommenter extractors,
+ * in configuration order, the first rule whose "from" matches the key
+ * winning (no rename without such an extractor). Pairs flagged
+ * PSSC_PAIR_KEY_NUL / PSSC_PAIR_VALUE_NUL are rejected like a comment's.
+ * Every pair is kept (first occurrence first, not deduplicated). Never
+ * fails.
+ */
+extern void pssc_override_tags_build(const PsscPair *pairs, size_t npairs,
+									 const struct PsscExtractorList *extractors,
+									 const struct PsscTagList *tags,
+									 const struct PsscTagList *exclude_tags,
+									 const PsscTagsetLimits *limits,
+									 const PsscTagsetEnv *env,
+									 PsscSourceTags *out);
 
 /*
  * Build the canonical tag set of statement s[start, end) (end <= strlen(s);
@@ -274,6 +299,26 @@ extern void pssc_tagset_build(const char *s, size_t start, size_t end,
 							  const PsscAppnameTags *appname,
 							  PsscTagsetOut *out,
 							  PsscTagsetStats *stats);
+
+/*
+ * pssc_tagset_build() with the tags_override result override (NULL: none),
+ * whose tags are added before every other source, so the override wins
+ * every key conflict: override > comment (own range or footer) >
+ * application_name. Override tags do not count as tags of the statement's
+ * range for the footer fallback. Its counters are added to stats every
+ * time, and its oom makes the result empty, like appname's.
+ */
+extern void pssc_tagset_build_with_override(const char *s, size_t start,
+											size_t end,
+											const struct PsscExtractorList *extractors,
+											const struct PsscTagList *tags,
+											const struct PsscTagList *exclude_tags,
+											const PsscTagsetLimits *limits,
+											const PsscTagsetEnv *env,
+											const PsscAppnameTags *appname,
+											const PsscSourceTags *override,
+											PsscTagsetOut *out,
+											PsscTagsetStats *stats);
 
 /*
  * Output escaping of tag text stored from a SQL_ASCII database (DESIGN.md

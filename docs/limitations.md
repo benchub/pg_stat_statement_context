@@ -47,8 +47,11 @@ Related findings:
   (`where`/`pick`/`find_by` carry no comment; they are simply untagged).
   Use Rails' built-in `query_log_tags` instead.
 
-A session-level tag override that would work with application-held prepared
-statements is not in v1.
+For application-held prepared statements, and for drivers that can't add
+comments, set the tags with
+[`tags_override`](configuration.md#tags_override) instead (for example
+`SET LOCAL` at the start of each request's transaction): it is read when
+each statement executes, not when it was prepared.
 
 ## Scanner caveats
 
@@ -135,6 +138,5 @@ used there.
 
 ## Not in v1
 
-Per-key value normalization and cardinality caps, exemplars, context from
-a session/transaction override GUC, and persistence across restarts are not
-implemented.
+Per-key value normalization and cardinality caps, exemplars, and persistence
+across restarts are not implemented.

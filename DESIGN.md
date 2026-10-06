@@ -882,8 +882,11 @@ some server version, it is omitted on that version rather than exposed as
   - The trailing-footer fallback (§6.5) is used only when the statement's own
     range yields no tags.
 
-  Tags from `tags_override` (roadmap, §8) go through the same steps except
-  step 3, since no extractor is involved. `appname` (item -38) is an extractor,
+  Tags from `tags_override` (item -30, §8) go through the same steps except
+  step 3, since no extractor is involved; their step-4 renames come from the
+  comment `sqlcommenter` extractors' `rename` lists in config order (first
+  match wins). They enter ahead of comment tags, so with first-key-wins the
+  precedence is override > comment > appname. `appname` (item -38) is an extractor,
   so its tags follow every step.
   Malformed tags are dropped and counted in `_info().invalid_tags`. This
   includes:
@@ -1093,8 +1096,24 @@ matches this extension's minimum supported version.
   **merges** with comment tags, and the override wins on key conflicts.
   Override tags go through the §6.11 pipeline (rename, allowlist/denylist,
   truncation). This works with prepared statements and with drivers that can't
-  add comments. It moves into v1 if driver validation (§6.3) shows prepared
-  plans being reused across contexts.
+  add comments. **Done (item -30):**
+  - USERSET, default `''`. The check hook URL-decodes and validates the value
+    into a flat extra blob; bad syntax, bad `%` escapes, NUL, or keys over 63
+    bytes are rejected at `SET` time (invalid encoding only when set from
+    SQL/the client, since the database encoding is unknown for file,
+    `ALTER ROLE` and `ALTER DATABASE` values).
+  - Read at extraction (execution start), so a prepared statement uses the
+    value at `EXECUTE`/Bind-Execute, and a `SET` statement is tagged with the
+    previous value (as for appname).
+  - Nested statements follow `nested_tags`: `inherit` copies the top-level
+    tags; `scan` re-reads the GUC, so a function's `SET` clause or a
+    `SET LOCAL` inside it applies to its nested statements.
+  - Override-only statements count as tagged. `_extract()` uses the
+    session's current override, with no separate output field.
+  - Each backend caches the built tags keyed on the GUC and config
+    generations, with a `memcmp` fallback.
+  - The rename rule and the `scan` behavior await the user's confirmation
+    (item 20261006-101139-1).
 - **Context from `application_name` (done, item -38):** a DSL extractor
   `appname(format=sqlcommenter|marginalia|regex)` (§4.2). Tags from comments
   win over `appname`-derived tags on key conflicts.

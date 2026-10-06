@@ -62,6 +62,7 @@ char	   *pssc_tags = NULL;
 char	   *pssc_exclude_tags = NULL;
 int			pssc_untagged = PSSC_UNTAGGED_SKIP;
 char	   *pssc_normalize = NULL;
+char	   *pssc_tags_override = NULL;
 
 static const struct config_enum_entry track_options[] = {
 	{"none", PSSC_TRACK_NONE, false},
@@ -120,6 +121,9 @@ static const PsscNormalizeList empty_normalize_list = {
 static const PsscNormalizeList *cur_normalize = &empty_normalize_list;
 
 static uint64 config_generation = 0;
+
+static const PsscOverrideList *cur_override = NULL;
+static uint64 override_generation = 0;
 
 /* ---------------- tag list accessors ---------------- */
 
@@ -184,6 +188,18 @@ uint64
 pssc_guc_config_generation(void)
 {
 	return config_generation;
+}
+
+const PsscOverrideList *
+pssc_guc_override(void)
+{
+	return cur_override;
+}
+
+uint64
+pssc_guc_override_generation(void)
+{
+	return override_generation;
 }
 
 static bool
@@ -1641,6 +1657,142 @@ assign_normalize(const char *newval, void *extra)
 	cur_normalize = list;
 }
 
+/* ---------------- tags_override ---------------- */
+
+/*
+ * tags_override check_hook: parse the value with the sqlcommenter parser
+ * (URL-decoding on) and return the PsscOverrideList blob as extra (NULL for
+ * no pair). Rejects what a comment's pipeline would silently drop, so a
+ * mistake is reported at SET time: malformed segments, invalid %-escapes,
+ * decoded NUL bytes, keys longer than 63 bytes and, for values set in this
+ * session (SET, a function's SET clause, connection options), text invalid
+ * in the database encoding. Values from other sources (configuration file,
+ * ALTER ROLE/DATABASE SET) may be applied in databases with another
+ * encoding; invalid pairs among them are dropped and counted per statement
+ * like a comment's (invalid_tags).
+ */
+static bool
+check_tags_override(char **newval, void **extra, GucSource source)
+{
+	const char *val = *newval ? *newval : "";
+	size_t		len = strlen(val);
+	MemoryContext cxt;
+	MemoryContext oldcxt;
+	PsscPairOut out;
+	PsscPairResult res;
+	PsscOverrideList *list = NULL;
+	bool		ok = true;
+	bool		verify = source == PGC_S_SESSION || source == PGC_S_CLIENT;
+
+	*extra = NULL;
+	if (len == 0)
+		return true;
+
+	cxt = AllocSetContextCreate(CurrentMemoryContext,
+								"pg_stat_statement_context tags_override check",
+								ALLOCSET_SMALL_SIZES);
+	oldcxt = MemoryContextSwitchTo(cxt);
+	/* pairs.h: len bytes and (len + 1) / 2 + 1 pairs always suffice */
+	out.max_pairs = (len + 1) / 2 + 1;
+	out.pairs = palloc(out.max_pairs * sizeof(PsscPair));
+	out.bufsize = len;
+	out.buf = palloc(len);
+	memset(&res, 0, sizeof(res));
+	pssc_parse_sqlcommenter(val, len, true, &out, &res);
+
+	if (res.nmalformed > 0 || res.ndropped > 0)
+	{
+		GUC_check_errdetail("Expected comma-separated key='value' pairs, "
+							"with URL-encoded keys and values.");
+		ok = false;
+	}
+	for (size_t i = 0; ok && i < res.npairs; i++)
+	{
+		const PsscPair *p = &out.pairs[i];
+
+		if (p->flags & PSSC_PAIR_BAD_ESCAPE)
+		{
+			GUC_check_errdetail("Pair %zu has an invalid %%-escape.", i + 1);
+			ok = false;
+		}
+		else if ((p->flags & (PSSC_PAIR_KEY_NUL | PSSC_PAIR_VALUE_NUL)) ||
+				 memchr(p->key, '\0', p->keylen) != NULL ||
+				 (p->valuelen > 0 && memchr(p->value, '\0', p->valuelen) != NULL))
+		{
+			GUC_check_errdetail("Pair %zu contains a NUL byte.", i + 1);
+			ok = false;
+		}
+		else if (p->keylen > PSSC_MAX_KEY_LEN)
+		{
+			GUC_check_errdetail("The key of pair %zu is longer than %d bytes.",
+								i + 1, PSSC_MAX_KEY_LEN);
+			ok = false;
+		}
+		else if (verify &&
+				 (!pg_verify_mbstr(GetDatabaseEncoding(), p->key, (int) p->keylen, true) ||
+				  !pg_verify_mbstr(GetDatabaseEncoding(), p->value, (int) p->valuelen, true)))
+		{
+			GUC_check_errdetail("Pair %zu is not valid in encoding \"%s\".",
+								i + 1, GetDatabaseEncodingName());
+			ok = false;
+		}
+	}
+
+	if (ok && res.npairs > 0)
+	{
+		size_t		size = offsetof(PsscOverrideList, pairs) +
+			res.npairs * sizeof(PsscOverridePair);
+		size_t		dpos = size;
+
+		for (size_t i = 0; i < res.npairs; i++)
+			size += out.pairs[i].keylen + 1 +
+				(out.pairs[i].valuelen ? out.pairs[i].valuelen + 1 : 0);
+		/* at most about 2 * len: GUC strings are far below 4 GB */
+		list = pssc_guc_extra_alloc(size);
+		if (list == NULL)
+		{
+			GUC_check_errcode(ERRCODE_OUT_OF_MEMORY);
+			GUC_check_errdetail("Out of memory.");
+			ok = false;
+		}
+		else
+		{
+			memset(list, 0, size);
+			list->size = (uint32) size;
+			list->npairs = (uint32) res.npairs;
+			for (size_t i = 0; i < res.npairs; i++)
+			{
+				DslStr		k = {out.pairs[i].key, out.pairs[i].keylen};
+				DslStr		v = {out.pairs[i].value, out.pairs[i].valuelen};
+
+				list->pairs[i].key = blob_put((char *) list, &dpos, k);
+				list->pairs[i].value = blob_put((char *) list, &dpos, v);
+			}
+			Assert(dpos == size);
+		}
+	}
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(cxt);
+
+	if (ok)
+		*extra = list;
+	return ok;
+}
+
+static void
+assign_tags_override(const char *newval, void *extra)
+{
+	const PsscOverrideList *list = (const PsscOverrideList *) extra;
+
+	/* the old extra is still allocated during the assign hook */
+	if ((list == NULL) != (cur_override == NULL) ||
+		(list != NULL &&
+		 (list->size != cur_override->size ||
+		  memcmp(list, cur_override, list->size) != 0)))
+		override_generation++;
+	cur_override = list;
+}
+
 /* ---------------- definitions ---------------- */
 
 void
@@ -1822,6 +1974,20 @@ pssc_guc_define(void)
 							   0,
 							   check_normalize,
 							   assign_normalize,
+							   NULL);
+
+	/* user */
+	DefineCustomStringVariable(PSSC_GUC_PREFIX ".tags_override",
+							   "Sets tags that override the tags of SQL comments in this session or transaction.",
+							   "Comma-separated key='value' pairs (sqlcommenter format, "
+							   "URL-encoded), merged with the tags of each statement; "
+							   "they win key conflicts.",
+							   &pssc_tags_override,
+							   "",
+							   PGC_USERSET,
+							   0,
+							   check_tags_override,
+							   assign_tags_override,
 							   NULL);
 
 	PSSC_MARK_GUC_PREFIX_RESERVED(PSSC_GUC_PREFIX);

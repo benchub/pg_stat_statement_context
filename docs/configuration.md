@@ -34,6 +34,7 @@ The GUCs exist only when the library is in `shared_preload_libraries`.
 | [`exclude_tags`](#exclude_tags) | string | `'traceparent, tracestate, request_id'` | key list | sighup |
 | [`untagged`](#untagged) | enum | `skip` | `skip`, `record` | sighup |
 | [`normalize`](#normalize) | string | `''` | rule list | sighup |
+| [`tags_override`](#tags_override) | string | `''` | `key='value'` pairs | user |
 
 Every name has the prefix `pg_stat_statement_context.`. The contexts mean:
 
@@ -44,6 +45,8 @@ Every name has the prefix `pg_stat_statement_context.`. The contexts mean:
   them needs a server restart.
 - **sighup**: set in `postgresql.conf` or with `ALTER SYSTEM`, and applied on
   reload (`SELECT pg_reload_conf();` or `pg_ctl reload`).
+- **user**: any user can change it, with `SET`, `SET LOCAL`, a function's
+  `SET` clause or connection options, as well as per role or per database.
 
 ### `enabled`
 
@@ -79,7 +82,10 @@ Which tags nested statements get:
   is then attributed to the controller whose `UPDATE` fired the trigger.
 - `scan`: tags from the nested statement's own source text (for example a
   comment inside the function body), plus [`appname`](extractors.md#appname)
-  tags from `application_name` as it is when the nested statement starts.
+  tags from `application_name` and the [`tags_override`](#tags_override)
+  tags as they are when the nested statement starts (so a function's
+  `SET pg_stat_statement_context.tags_override = ...` clause applies to the
+  statements it runs).
 - `none`: no tags. With `untagged = skip`, nested statements are then not
   recorded at all.
 
@@ -246,6 +252,84 @@ function's `normalize_failures`. If a rule fails to compile in a backend at
 run time (including a compile stopped at the time limit), it is disabled there until the next configuration change (counted
 in `_info().regex_compile_failures`), and tags of its key are dropped. The
 user's statement never fails.
+
+### `tags_override`
+
+Tags for the current session or transaction, for clients that cannot add
+comments (some drivers and ORMs) and for prepared statements, whose text is
+fixed when they are prepared. Empty by default (no tags). Any user can set
+it:
+
+```sql
+BEGIN;
+SET LOCAL pg_stat_statement_context.tags_override = 'controller=''users'',action=''show''';
+SELECT ...;      -- tagged controller=users, action=show
+COMMIT;          -- the override ends with the transaction
+```
+
+- **Syntax**: the [sqlcommenter](extractors.md#sqlcommenter) format,
+  `key='value',key2='value2'`, with URL-encoded keys and values (`%20` or
+  `+` for a space, `%27` for a quote, `%2C` for a comma). Whitespace around
+  pairs is ignored; an empty or blank value means no override. The value is
+  parsed once, when it is set, and **rejected** if it is malformed (an
+  unquoted value, text that is not a pair, an unterminated quote), has an
+  invalid `%`-escape, decodes to a NUL byte or to text invalid in the
+  database encoding, or has a key longer than 63 bytes; the previous value
+  then stays in effect:
+
+  ```sql
+  SET pg_stat_statement_context.tags_override = 'a=''%zz''';
+  -- ERROR:  invalid value for parameter "pg_stat_statement_context.tags_override": "a='%zz'"
+  -- DETAIL:  Pair 1 has an invalid %-escape.
+  ```
+
+- **Merging**: the override's tags are added to the tags of each statement
+  (from its comments, and from `application_name` with
+  [`appname`](extractors.md#appname) extractors). On a key conflict the
+  **override wins**: override > comment > `application_name`. Within the
+  override, the first occurrence of a key wins. The override does not stop
+  the search for a [trailing footer](extractors.md#where-comments-are-found)
+  when the statement has no comment of its own.
+- **Pipeline**: the override's pairs go through the same
+  [pipeline](extractors.md#the-tag-pipeline) as comment tags, except the
+  per-extractor `keys` lists (there is no extractor): `rename`, the
+  `tags` allowlist / `exclude_tags` denylist, `normalize`, truncation to
+  `max_tag_value_len`, and the `max_tags` / `max_tagset_bytes` limits apply,
+  with the same counters (`invalid_tags`, `dropped_tags`, ...). `rename`
+  is per extractor, so the override uses the `rename` lists of the
+  **comment `sqlcommenter` extractors**, in configuration order (the first
+  rule whose source key matches); the `rename` lists of `marginalia`,
+  `regex` and `appname` extractors are not used, and without a
+  `sqlcommenter` extractor keys are not renamed.
+- **When it is read**: when a statement starts executing, like
+  `application_name` for `appname` extractors. A prepared statement
+  (`PREPARE`/`EXECUTE`, or the extended protocol's Parse/Bind/Execute) uses
+  the override in effect when it is executed, not when it was prepared. A
+  `SET ... tags_override` statement itself is tagged with the previous
+  value.
+- **Nested statements** follow [`nested_tags`](#nested_tags): with
+  `inherit` they get the tags of the top-level statement (override
+  included, as it was when that statement started); with `scan` they read
+  the override again when they start, so a function's `SET` clause or a
+  `SET LOCAL` / `set_config()` inside a function applies to the statements
+  after it; with `none` they get no tags. A `SET LOCAL` inside a function
+  also lasts for the rest of the transaction, like any `SET LOCAL`.
+- With `untagged = skip`, a statement whose only tags come from the override
+  is tagged, and recorded.
+- [`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract)
+  uses the session's current override.
+
+An override can also be set per role or database (`ALTER ROLE ... SET`), in
+a driver's connection options (e.g.
+`options=-c pg_stat_statement_context.tags_override=job='nightly'`), or in
+`postgresql.conf`. Values set per role, per database or in the file are
+checked against the database encoding only when a statement uses them; a
+pair invalid there is dropped and counted in `invalid_tags`, like a
+comment's.
+
+Like comments, the override is supplied by the client: any user can
+attribute their statements to any tags, so tags are not a security
+boundary.
 
 ## Changing the configuration from SQL
 
