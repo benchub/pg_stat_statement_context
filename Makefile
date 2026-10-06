@@ -29,7 +29,7 @@ PGFILEDESC = "pg_stat_statement_context - per-tag statement statistics from SQL 
 EXTENSION = pg_stat_statement_context
 DATA = sql/pg_stat_statement_context--1.0.sql
 
-REGRESS = smoke guc extract
+REGRESS = smoke guc extract normalize
 # extract needs a UTF8 database (multibyte cases); --no-locale makes the
 # database creatable with any server locale.
 REGRESS_OPTS = --inputdir=test --encoding=UTF8 --no-locale \

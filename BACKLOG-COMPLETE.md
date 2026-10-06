@@ -841,6 +841,26 @@ Remove the matching cases from the compat test module (`test/modules/pssc_compat
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-41: Roadmap: tag value normalization rules
+
+**Description:** Add per-key regex-replace rules for tag values, for example `/users/\d+` → `/users/:id` on the `route` key (§8 v2). They run after `rename` and the allowlist/denylist, and before truncation and cardinality caps (§6.11 step 6). They reuse the regex infrastructure from task 20261005-091225-10 and its safety limits (§6.11).
+
+*Design note* (non-blocking): GUC name and rule syntax, for example `normalize = 'route:/users/\d+=>/users/:id|...'`, and whether multiple rules per key apply in order.
+
+**Acceptance criteria:**
+- Configured rules rewrite values of their key only, before the key is built.
+- Normalization sees renamed keys and only allowed tags, and its output is then truncated (and, once task 20261005-091225-32 lands, capped).
+- Invalid rules are rejected at `SET`/reload time.
+- CPU limits match those of the regex extractor.
+
+**Decisions:**
+- 2026-10-05: Rules are per-key regex-replace rules.
+- 2026-10-05: Normalization runs after rename and allowlist/denylist, before truncation and cardinality caps.
+
+**Depends on:** 20261005-091225-9, 20261005-091225-10
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

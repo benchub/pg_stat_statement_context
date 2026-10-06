@@ -60,6 +60,14 @@ env_regex(void *arg, int index, const PsscExtractorList *list,
 	regex_hook(regex_hook_arg, index, list, body, len, out, result);
 }
 
+static PsscNormalizeResult
+env_normalize(void *arg, const char *key, size_t klen, const char *val,
+			  size_t vlen, size_t limit, const char **out, size_t *outlen)
+{
+	return pssc_regex_normalize((const PsscNormalizeList *) arg, key, klen,
+								val, vlen, limit, env_alloc, NULL, out, outlen);
+}
+
 /* pssc_extract_tags() with the pipeline counters added to *stats. */
 static void
 extract_tags(const char *s, size_t start, size_t end, char *buf,
@@ -85,6 +93,13 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 	env.verify = env_verify;
 	env.cliplen = env_cliplen;
 	env.regex = regex_hook != NULL ? env_regex : NULL;
+	env.normalize = NULL;
+	if (pssc_guc_normalize()->nrules > 0)
+	{
+		/* env_normalize() is the only callback that uses arg */
+		env.arg = (void *) pssc_guc_normalize();
+		env.normalize = env_normalize;
+	}
 
 	limits.max_tags = pssc_max_tags;
 	limits.max_tag_value_len = pssc_max_tag_value_len;

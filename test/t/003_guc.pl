@@ -122,11 +122,12 @@ is( vars(), join("\n",
 		'max_tags=8', 'max_tag_value_len=64', 'max_tagset_bytes=512',
 		'scan_window=2048', 'extractors=sqlcommenter, marginalia',
 		'tags=action, controller, job',
-		'exclude_tags=traceparent, tracestate, request_id', 'untagged=skip'),
+		'exclude_tags=traceparent, tracestate, request_id', 'untagged=skip',
+		'normalize='),
 	'C variables hold the §4.1 defaults (enums map to the right constants)');
 is( sql(qq{SELECT count(*), count(*) FILTER (WHERE source = 'default' AND setting = boot_val AND NOT pending_restart)
               FROM pg_settings WHERE name LIKE '$P.%'}),
-	'15|15', 'all 15 GUCs are defined and at their defaults');
+	'16|16', 'all 16 GUCs are defined and at their defaults');
 is(show('bucket_interval'), '5min', 'bucket_interval default shown with its unit');
 is(show('scan_window'), '2kB', 'scan_window default shown with its unit');
 is(list('tags'), 'f|3|{action,controller,job}', 'default tags parsed');

@@ -1,0 +1,332 @@
+-- pg_stat_statement_context.normalize (DESIGN.md §6.11 step 6): per-key
+-- regex-replace rules for tag values, seen through the debug function
+-- pg_stat_statement_context_extract(). Rules run after rename and the
+-- allowlist/denylist and before truncation; a rule is equivalent to
+-- regexp_replace(value COLLATE "C", pattern, replacement, 'g'). Requires the
+-- library in shared_preload_libraries and a UTF8 database. The sighup GUCs
+-- are changed with ALTER SYSTEM + pg_reload_conf() through
+-- test/sql/include/config.sql; everything is reset at the end.
+CREATE EXTENSION pg_stat_statement_context;
+-- ---- the GUC ----
+SELECT name, setting, context, vartype, boot_val
+  FROM pg_settings WHERE name = 'pg_stat_statement_context.normalize';
+                name                 | setting | context | vartype | boot_val 
+-------------------------------------+---------+---------+---------+----------
+ pg_stat_statement_context.normalize |         | sighup  | string  | 
+(1 row)
+
+-- sighup, like the extractors: not settable in a session
+SET pg_stat_statement_context.normalize = '';
+ERROR:  parameter "pg_stat_statement_context.normalize" cannot be changed now
+-- The tags plus the diagnostics that are not false or 0.
+CREATE FUNCTION ex(q text)
+RETURNS jsonb LANGUAGE sql AS $$
+  SELECT jsonb_object_agg(key, value)
+    FROM jsonb_each(pg_stat_statement_context_extract(q))
+   WHERE key = 'tags'
+      OR (key IN ('oom', 'invalid_tags', 'dropped_tags', 'regex_compile_failures',
+                  'normalized_tags', 'normalize_failures')
+          AND value NOT IN ('false', '0'))
+$$;
+\set extractors 'sqlcommenter, marginalia'
+\set tags 'action, controller, route, job'
+\set exclude_tags ''
+\set scan_window 2048
+\set normalize 'route: ''/users/\\d+'' => ''/users/:id'''
+\i test/sql/include/config.sql
+\set ECHO none
+SHOW pg_stat_statement_context.normalize;
+ pg_stat_statement_context.normalize 
+-------------------------------------
+ route: '/users/\d+' => '/users/:id'
+(1 row)
+
+-- Both new counters are part of the result.
+SELECT pg_stat_statement_context_extract('SELECT 1 /*route:/users/42*/')
+       - 'stmt_start' - 'stmt_end' AS full_result;
+                                                                                                                         full_result                                                                                                                          
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"oom": false, "tags": {"route": "/users/:id"}, "ntags": 1, "footer": false, "heuristic": false, "dropped_tags": 0, "invalid_tags": 0, "tagset_bytes": 17, "heuristic_scans": 0, "normalized_tags": 1, "normalize_failures": 0, "regex_compile_failures": 0}
+(1 row)
+
+-- ---- one rule ----
+SELECT q, ex(q) FROM (VALUES
+  ('SELECT 1 /*route:/users/42,action:/users/42*/'),  -- the rule's key only
+  ('SELECT 1 /*route:/users/1/users/22/x*/'),          -- every match
+  ('SELECT 1 /*route:/posts/1*/'),                     -- no match: not counted
+  ($q$SELECT 1 /*route='%2Fusers%2F7%3Fa%3D1'*/$q$),   -- after decoding
+  ('SELECT 1 /*route:/users/1,route:/users/2*/'),      -- first occurrence wins
+  ('SELECT 1; /*route:/users/9*/')                     -- footer
+) v(q);
+                       q                       |                                       ex                                       
+-----------------------------------------------+--------------------------------------------------------------------------------
+ SELECT 1 /*route:/users/42,action:/users/42*/ | {"tags": {"route": "/users/:id", "action": "/users/42"}, "normalized_tags": 1}
+ SELECT 1 /*route:/users/1/users/22/x*/        | {"tags": {"route": "/users/:id/users/:id/x"}, "normalized_tags": 1}
+ SELECT 1 /*route:/posts/1*/                   | {"tags": {"route": "/posts/1"}}
+ SELECT 1 /*route='%2Fusers%2F7%3Fa%3D1'*/     | {"tags": {"route": "/users/:id?a=1"}, "normalized_tags": 1}
+ SELECT 1 /*route:/users/1,route:/users/2*/    | {"tags": {"route": "/users/:id"}, "normalized_tags": 1}
+ SELECT 1; /*route:/users/9*/                  | {"tags": {"route": "/users/:id"}, "normalized_tags": 1}
+(6 rows)
+
+-- Different values collapse into one tag set.
+SELECT pg_stat_statement_context_extract('SELECT 1 /*route:/users/1*/')->'tagset_bytes' =
+       pg_stat_statement_context_extract('SELECT 1 /*route:/users/123456*/')->'tagset_bytes'
+       AS same_size,
+       ex('SELECT 1 /*route:/users/1*/')->'tags' =
+       ex('SELECT 1 /*route:/users/123456*/')->'tags' AS same_tags;
+ same_size | same_tags 
+-----------+-----------
+ t         | t
+(1 row)
+
+-- ---- equivalence with regexp_replace(v COLLATE "C", p, r, 'g') ----
+\set normalize 'route: ''x*'' => ''-'''
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT v, ex('SELECT 1 /*route:' || v || '*/')->'tags'->>'route' AS normalized,
+       regexp_replace(v COLLATE "C", 'x*', '-', 'g') AS regexp_replace
+  FROM (VALUES ('abc'), ('xx'), ('axxb'), ('x'), ('ax')) t(v);
+  v   | normalized | regexp_replace 
+------+------------+----------------
+ abc  | -a-b-c-    | -a-b-c-
+ xx   | --         | --
+ axxb | -a--b-     | -a--b-
+ x    | --         | --
+ ax   | -a--       | -a--
+(5 rows)
+
+\set normalize 'route: ''(\\w)(\\w)'' => ''\\2\\1'''
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT v, ex('SELECT 1 /*route:' || v || '*/')->'tags'->>'route' AS normalized,
+       regexp_replace(v COLLATE "C", '(\w)(\w)', '\2\1', 'g') AS regexp_replace
+  FROM (VALUES ('abcde'), ('a-bc-def'), ('é1ü2')) t(v);
+    v     | normalized | regexp_replace 
+----------+------------+----------------
+ abcde    | badce      | badce
+ a-bc-def | a-cb-edf   | a-cb-edf
+ é1ü2     | é1ü2       | é1ü2
+(3 rows)
+
+\set normalize 'route: ''[a-z]+'' => ''<\\&>\\\\'''
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT v, ex('SELECT 1 /*route:' || v || '*/')->'tags'->>'route' AS normalized,
+       regexp_replace(v COLLATE "C", '[a-z]+', '<\&>\\', 'g') AS regexp_replace
+  FROM (VALUES ('ab/cd'), ('/1-')) t(v);
+   v   | normalized  | regexp_replace 
+-------+-------------+----------------
+ ab/cd | <ab>\/<cd>\ | <ab>\/<cd>\
+ /1-   | /1-         | /1-
+(2 rows)
+
+-- ---- several rules: in order, each on the output of the previous one ----
+\set normalize 'route: ''\\d+'' => ''N'', route: ''N/N'' => ''pair'', controller: ''^(\\w+)s$'' => ''\\1'', job: ''(?i)^JOB-'' => '''''
+\i test/sql/include/config.sql
+\set ECHO none
+SHOW pg_stat_statement_context.normalize;
+                                 pg_stat_statement_context.normalize                                 
+-----------------------------------------------------------------------------------------------------
+ route: '\d+' => 'N', route: 'N/N' => 'pair', controller: '^(\w+)s$' => '\1', job: '(?i)^JOB-' => ''
+(1 row)
+
+SELECT ex('SELECT 1 /*route:/1/22/x,controller:users,job:Job-7,action:12*/') AS chained;
+                                                chained                                                 
+--------------------------------------------------------------------------------------------------------
+ {"tags": {"job": "7", "route": "/pair/x", "action": "12", "controller": "user"}, "normalized_tags": 3}
+(1 row)
+
+-- Quotes in patterns and replacements, separators inside quotes, quoted keys.
+\set normalize ' ''route'' : ''it''''s,[|]=>:'' => ''x,y'' , job:''^'' => ''''''q'' '
+\i test/sql/include/config.sql
+\set ECHO none
+SHOW pg_stat_statement_context.normalize;
+          pg_stat_statement_context.normalize           
+--------------------------------------------------------
+  'route' : 'it''s,[|]=>:' => 'x,y' , job:'^' => '''q' 
+(1 row)
+
+SELECT ex($q$SELECT 1 /*route='it%27s%2C%7C%3D%3E%3A',job='j'*/$q$) AS quoting;
+                            quoting                             
+----------------------------------------------------------------
+ {"tags": {"job": "'qj", "route": "x,y"}, "normalized_tags": 2}
+(1 row)
+
+-- Non-ASCII patterns.
+\set normalize 'route: ''[éü]'' => ''?'''
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT ex('SELECT 1 /*route:Zürich-café*/') AS multibyte;
+                        multibyte                         
+----------------------------------------------------------
+ {"tags": {"route": "Z?rich-caf?"}, "normalized_tags": 1}
+(1 row)
+
+-- ---- position in the pipeline ----
+-- After rename: rules see the renamed key.
+\set extractors 'marginalia(rename=path:route|route:old_route)'
+\set tags '*'
+\set normalize 'route: ''\\d+'' => ''N'', path: ''\\d+'' => ''P'', old_route: ''\\d+'' => ''O'''
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT ex('SELECT 1 /*path:/a/1,route:/b/2*/') AS after_rename;
+                              after_rename                              
+------------------------------------------------------------------------
+ {"tags": {"route": "/a/N", "old_route": "/b/O"}, "normalized_tags": 2}
+(1 row)
+
+-- After the allowlist and the denylist: dropped tags are not normalized.
+\set extractors 'sqlcommenter, marginalia'
+\set tags 'action'
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT ex('SELECT 1 /*route:/b/2,action:a*/') AS allowlist;
+         allowlist         
+---------------------------
+ {"tags": {"action": "a"}}
+(1 row)
+
+\set tags '*'
+\set exclude_tags 'route'
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT ex('SELECT 1 /*route:/b/2,action:a*/') AS denylist;
+         denylist          
+---------------------------
+ {"tags": {"action": "a"}}
+(1 row)
+
+\set exclude_tags ''
+-- Before truncation (max_tag_value_len = 64): a rule sees the whole value,
+-- and its output is truncated on a character boundary.
+\set normalize 'route: ''^a{70}Z$'' => ''short'', job: ''^.*$'' => ''\\&\\&'', action: ''x'' => ''é'''
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT ex('SELECT 1 /*route:' || repeat('a', 70) || 'Z*/')->'tags' AS sees_whole_value,
+       length(ex('SELECT 1 /*job:' || repeat('j', 40) || '*/')->'tags'->>'job') AS grown_truncated,
+       ex('SELECT 1 /*action:' || repeat('x', 40) || '*/')->'tags'->>'action' =
+         repeat('é', 32) AS multibyte_truncated;
+  sees_whole_value  | grown_truncated | multibyte_truncated 
+--------------------+-----------------+---------------------
+ {"route": "short"} |              64 | t
+(1 row)
+
+-- A rule may empty a value; the tag is kept.
+\set normalize 'route: ''^.*$'' => '''''
+\i test/sql/include/config.sql
+\set ECHO none
+SELECT ex('SELECT 1 /*route:/users/1*/') AS emptied;
+                    emptied                    
+-----------------------------------------------
+ {"tags": {"route": ""}, "normalized_tags": 1}
+(1 row)
+
+-- ---- invalid rules are rejected (check hook), nothing is written ----
+SELECT count(*) AS before FROM pg_file_settings
+ WHERE name = 'pg_stat_statement_context.normalize'
+   AND sourcefile LIKE '%postgresql.auto.conf' \gset
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route"
+DETAIL:  Expected ":" after the key of rule 1.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: /x/ => ''y''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: /x/ => 'y'"
+DETAIL:  Expected a quoted pattern after "route:" in rule 1.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''x''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: 'x'"
+DETAIL:  Expected "=>" after the pattern of rule 1.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''x'' => y';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: 'x' => y"
+DETAIL:  Expected a quoted replacement after "=>" in rule 1.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''x => ''y';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: 'x => 'y"
+DETAIL:  Expected "=>" after the pattern of rule 1.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = ': ''x'' => ''y''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": ": 'x' => 'y'"
+DETAIL:  Rule 1 has an empty key.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'ro*: ''x'' => ''y''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "ro*: 'x' => 'y'"
+DETAIL:  Key "ro*" of rule 1 contains "*".
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'ro ute: ''x'' => ''y''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "ro ute: 'x' => 'y'"
+DETAIL:  Expected ":" after the key of rule 1.
+SELECT repeat('k', 64) || ': ''x'' => ''y''' AS v \gset
+ALTER SYSTEM SET pg_stat_statement_context.normalize = :'v';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk: 'x' => 'y'"
+DETAIL:  Key "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk..." of rule 1 is longer than 63 bytes.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: '''' => ''y''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: '' => 'y'"
+DETAIL:  Rule 1 has an empty pattern.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''(a'' => ''y''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: '(a' => 'y'"
+DETAIL:  Pattern of rule 1 is invalid: parentheses () not balanced.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''(a)\1'' => ''y''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: '(a)\1' => 'y'"
+DETAIL:  Pattern of rule 1 uses back-references, which are not allowed.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''(a)'' => ''\2''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: '(a)' => '\2'"
+DETAIL:  Replacement of rule 1 refers to group \2, but its pattern has 1 capture group.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''a'' => ''\q''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: 'a' => '\q'"
+DETAIL:  Replacement of rule 1 contains the unknown escape "\q"; only \1 to \9, \& and \\ are allowed.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''a'' => ''b\''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: 'a' => 'b\'"
+DETAIL:  Replacement of rule 1 ends with a lone "\".
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''a'' => ''b'',';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: 'a' => 'b',"
+DETAIL:  Empty entry in the rule list.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = 'route: ''a'' => ''b'' job: ''c'' => ''d''';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: 'a' => 'b' job: 'c' => 'd'"
+DETAIL:  Unexpected "j" after rule 1.
+SELECT 'route: ''' || repeat('a', 1025) || ''' => ''b''' AS v \gset
+ALTER SYSTEM SET pg_stat_statement_context.normalize = :'v';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' => 'b'"
+DETAIL:  Pattern of rule 1 is longer than 1024 bytes.
+SELECT 'route: ''a'' => ''' || repeat('b', 1025) || '''' AS v \gset
+ALTER SYSTEM SET pg_stat_statement_context.normalize = :'v';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "route: 'a' => 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'"
+DETAIL:  Replacement of rule 1 is longer than 1024 bytes.
+SELECT string_agg('k' || i || ': ''a'' => ''b''', ', ') AS v
+  FROM generate_series(1, 33) i \gset
+ALTER SYSTEM SET pg_stat_statement_context.normalize = :'v';
+ERROR:  invalid value for parameter "pg_stat_statement_context.normalize": "k1: 'a' => 'b', k2: 'a' => 'b', k3: 'a' => 'b', k4: 'a' => 'b', k5: 'a' => 'b', k6: 'a' => 'b', k7: 'a' => 'b', k8: 'a' => 'b', k9: 'a' => 'b', k10: 'a' => 'b', k11: 'a' => 'b', k12: 'a' => 'b', k13: 'a' => 'b', k14: 'a' => 'b', k15: 'a' => 'b', k16: 'a' => 'b', k17: 'a' => 'b', k18: 'a' => 'b', k19: 'a' => 'b', k20: 'a' => 'b', k21: 'a' => 'b', k22: 'a' => 'b', k23: 'a' => 'b', k24: 'a' => 'b', k25: 'a' => 'b', k26: 'a' => 'b', k27: 'a' => 'b', k28: 'a' => 'b', k29: 'a' => 'b', k30: 'a' => 'b', k31: 'a' => 'b', k32: 'a' => 'b', k33: 'a' => 'b'"
+DETAIL:  The list has more than 32 rules.
+SELECT count(*) = :before AS nothing_written FROM pg_file_settings
+ WHERE name = 'pg_stat_statement_context.normalize'
+   AND sourcefile LIKE '%postgresql.auto.conf';
+ nothing_written 
+-----------------
+ t
+(1 row)
+
+-- The limits themselves are accepted.
+SELECT string_agg('k' || i || ': ''a'' => ''b''', ', ') AS v
+  FROM generate_series(1, 32) i \gset
+ALTER SYSTEM SET pg_stat_statement_context.normalize = :'v';
+SELECT repeat('k', 63) || ': ''' || repeat('a', 1024) || ''' => '''
+       || repeat('b', 1024) || '''' AS v \gset
+ALTER SYSTEM SET pg_stat_statement_context.normalize = :'v';
+-- Empty and blank settings have no rules.
+ALTER SYSTEM SET pg_stat_statement_context.normalize = '  ';
+-- ---- clean up ----
+DROP FUNCTION ex(text);
+ALTER SYSTEM RESET pg_stat_statement_context.extractors;
+ALTER SYSTEM RESET pg_stat_statement_context.tags;
+ALTER SYSTEM RESET pg_stat_statement_context.exclude_tags;
+ALTER SYSTEM RESET pg_stat_statement_context.scan_window;
+ALTER SYSTEM RESET pg_stat_statement_context.normalize;
+SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+SELECT count(*) AS auto_conf_entries
+  FROM pg_file_settings
+ WHERE name LIKE 'pg\_stat\_statement\_context.%'
+   AND sourcefile LIKE '%postgresql.auto.conf';
+ auto_conf_entries 
+-------------------
+                 0
+(1 row)
+
+DROP EXTENSION pg_stat_statement_context;

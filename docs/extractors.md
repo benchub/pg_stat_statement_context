@@ -82,9 +82,9 @@ same key comes from several places, the first occurrence wins: by extractor
 order, then comment order, then pair order.
 
 An extractor *produces* when at least one of its tags is still a candidate
-after [pipeline](#the-tag-pipeline) steps 1–6 (validation, the allowlists and
-denylist, `rename`, truncation). That is decided **before** the final
-`max_tags` / `max_tagset_bytes` limits (step 7). If those limits then drop the
+after [pipeline](#the-tag-pipeline) steps 1–7 (validation, the allowlists and
+denylist, `rename`, normalization, truncation). That is decided **before** the
+final `max_tags` / `max_tagset_bytes` limits (step 8). If those limits then drop the
 winner's tags, the skipped extractors are not tried again. The statement can
 end up with fewer tags, or none at all. With `untagged = skip`, a statement
 left with no tags is not recorded.
@@ -92,7 +92,7 @@ left with no tags is not recorded.
 For example, with `max_tag_value_len = 1024` and `max_tagset_bytes = 128`, the
 statement `SELECT 1 /*controller='xxx…'*/ /*action:show*/`, with a 200-byte
 value, gets no tags at all (`dropped_tags` = 1). `sqlcommenter` wins with the
-oversized `controller` tag, which step 7 then drops, so the `marginalia`
+oversized `controller` tag, which step 8 then drops, so the `marginalia`
 comment `action:show` is never used. To avoid this, keep `max_tagset_bytes`
 comfortably above the largest possible tag set: the sum over your allowlisted
 keys of `length(key) + max_tag_value_len + 2`. (The defaults give 217 bytes
@@ -319,8 +319,11 @@ extractor finds goes through these steps:
    `tags = '*'`. Then drop keys longer than 63 bytes (counted in
    `invalid_tags`; a key that long can never match an allowlist entry, so
    with an allowlist it is simply not kept).
-6. Truncate the value to `max_tag_value_len` bytes on a character boundary.
-7. Sort and store within `max_tags` and `max_tagset_bytes`: tags are taken in
+6. Normalize the value with the [`normalize`](configuration.md#normalize)
+   rules for its (final) key, in order. A pair whose normalization fails is
+   dropped (counted in the debug function's `normalize_failures`).
+7. Truncate the value to `max_tag_value_len` bytes on a character boundary.
+8. Sort and store within `max_tags` and `max_tagset_bytes`: tags are taken in
    priority order (`tags` list order, or sorted key order with `tags = '*'`).
    A tag is kept if it still fits; otherwise it is dropped (counted in
    `dropped_tags`) and the next one is tried, so an oversized tag never
@@ -349,7 +352,11 @@ can fill the table within seconds, evicting the useful entries.
   table.
 - **Watch for high-cardinality values in allowed keys,** such as routes with
   IDs in them, or a buggy or malicious client sending random values. Truncation
-  (`max_tag_value_len`) bounds the size, not the number, of values. Watch
+  (`max_tag_value_len`) bounds the size, not the number, of values. Values with
+  known variable parts can be rewritten with
+  [`normalize`](configuration.md#normalize) rules, for example
+  `route: '/\d+' => '/:id'` turns `/users/123/posts/4` into
+  `/users/:id/posts/:id`. Watch
   `_info().evicted_entries` and look for keys with many distinct values:
 
   ```sql

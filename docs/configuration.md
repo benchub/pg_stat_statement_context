@@ -33,6 +33,7 @@ The GUCs exist only when the library is in `shared_preload_libraries`.
 | [`tags`](#tags) | string | `'action, controller, job'` | key list or `'*'` | sighup |
 | [`exclude_tags`](#exclude_tags) | string | `'traceparent, tracestate, request_id'` | key list | sighup |
 | [`untagged`](#untagged) | enum | `skip` | `skip`, `record` | sighup |
+| [`normalize`](#normalize) | string | `''` | rule list | sighup |
 
 Every name has the prefix `pg_stat_statement_context.`. The contexts mean:
 
@@ -174,9 +175,77 @@ What to do with statements that end up with no tags:
   entries.
 - `record`: record them with an empty tag set (`tags = {}`).
 
+### `normalize`
+
+Regex-replace rules that rewrite tag values, so that values with variable
+parts (IDs, UUIDs, dates) share one entry. Empty by default (no rules). A
+comma-separated list of rules, each
+
+```
+key: 'pattern' => 'replacement'
+```
+
+- `key` is the **final** tag key: rules run after `rename` and after the
+  `tags` allowlist / `exclude_tags` denylist, so they see renamed keys and only
+  tags that are kept (a rule for a key that isn't kept does nothing). It may be
+  written bare or in single quotes; it follows the rules of `tags` keys.
+- `pattern` and `replacement` are always in single quotes; write a quote as
+  `''`. Commas, `:` and `=>` inside quotes need no escaping.
+- Each rule replaces **every** match, exactly like
+  `regexp_replace(value COLLATE "C", 'pattern', 'replacement', 'g')`: the same
+  engine (PostgreSQL advanced regular expressions) and flags as the
+  [`regex` extractor](extractors.md#regex), and no back-references in the
+  pattern. Flags can be embedded, e.g. `'(?i)^job-'`. In the replacement,
+  `\1` to `\9` insert a capture group, `\&` the whole match and `\\` a
+  backslash; any other escape is rejected.
+- Several rules for the same key run in order, each on the previous one's
+  output. A rule may produce an empty value; the tag is kept.
+- The result is then truncated to `max_tag_value_len` bytes, so a rule sees
+  the whole value (even one longer than `max_tag_value_len`), and a value is
+  truncated only once, after all rules.
+- Limits: at most 32 rules; a pattern is 1 to 1024 bytes and a replacement
+  at most 1024 bytes. A rule's output is cut at
+  `max(value length, max_tag_value_len)` bytes, which also stops the
+  matching there.
+
+For example, in `postgresql.conf`, where quotes are doubled and backslashes
+must be doubled too (the file's own string escaping turns `\\` into `\`):
+
+```
+pg_stat_statement_context.normalize = 'route: ''/users/\\d+'' => ''/users/:id'', route: ''/posts/\\d+'' => ''/posts/:id'''
+```
+
+or from SQL:
+
+```sql
+ALTER SYSTEM SET pg_stat_statement_context.normalize =
+  $$route: '/\d+' => '/:id', job: '^(\w+)Job$' => '\1'$$;
+SELECT pg_reload_conf();
+```
+
+Rules are compiled and fully validated when the value is set or reloaded;
+an invalid rule (syntax, bad pattern, back-reference, reference to a missing
+capture group, unknown escape, over a limit) rejects the whole value and
+the previous one stays in effect. Test rules with
+[`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract),
+which shows the normalized tags and counts the changed values in
+`normalized_tags`.
+
+Rules run on every tagged statement, under the same safety limits as regex
+extractors: each backend compiles a rule once (at first use after a
+configuration change), and the engine's own complexity limits and query
+cancellation apply. If a rule fails at run time (the regex engine runs out of
+memory or reports an error), the tag is **dropped** rather than stored
+unnormalized, which could create many entries; this is counted in the debug
+function's `normalize_failures`. If a rule fails to compile in a backend at
+run time, it is disabled there until the next configuration change (counted
+in `_info().regex_compile_failures`), and tags of its key are dropped. The
+user's statement never fails.
+
 ## Changing the configuration from SQL
 
-The `sighup` settings, including `extractors`, `tags` and `exclude_tags`, can
+The `sighup` settings, including `extractors`, `tags`, `exclude_tags` and
+`normalize`, can
 be changed without a restart:
 
 ```sql

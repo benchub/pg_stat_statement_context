@@ -236,7 +236,7 @@ SELECT * FROM pg_stat_statement_context_info();
 | `invalid_tags` | `bigint` | Tags rejected as malformed: NUL bytes, invalid encoding, keys over 63 bytes, malformed pairs (see [the tag pipeline](extractors.md#the-tag-pipeline)). |
 | `dropped_tags` | `bigint` | Valid tags dropped because the tag set would exceed `max_tags` or `max_tagset_bytes`. |
 | `heuristic_scans` | `bigint` | Statements whose comments were found with the heuristic tail scan (`position=append` on statements longer than `scan_window`). |
-| `regex_compile_failures` | `bigint` | Regex extractors that failed to compile in some backend at run time and were disabled there. |
+| `regex_compile_failures` | `bigint` | Regex extractors and [`normalize`](configuration.md#normalize) rules that failed to compile in some backend at run time and were disabled there. |
 | `utility_missing_queryid` | `bigint` | Tracked utility statements that arrived without a query ID and were not recorded; normally a sign of the wrong `shared_preload_libraries` order (see the [README](../README.md#load-order)). It also rises, in the correct order, when a utility statement is re-executed from a plan cache (for example a named prepared `SET` over the extended protocol): pg_stat_statements clears its query ID after the first execution, so neither extension counts the re-executions. |
 | `stats_reset` | `timestamptz` | Time of the last `pg_stat_statement_context_reset()`, or of server start. |
 
@@ -292,6 +292,8 @@ SELECT jsonb_pretty(pg_stat_statement_context_extract(
     "invalid_tags": 0,
     "tagset_bytes": 29,
     "heuristic_scans": 0,
+    "normalized_tags": 0,
+    "normalize_failures": 0,
     "regex_compile_failures": 0
 }
 ```
@@ -305,6 +307,8 @@ SELECT jsonb_pretty(pg_stat_statement_context_extract(
 | `oom` | Extraction ran out of memory (the hooks would then record no tags). |
 | `stmt_start`, `stmt_end` | The byte range of the statement that was scanned, after extending it backwards over leading comments. |
 | `invalid_tags`, `dropped_tags`, `heuristic_scans`, `regex_compile_failures` | This call's contribution to the `_info()` counters of the same names. |
+| `normalized_tags` | Tags whose value the [`normalize`](configuration.md#normalize) rules changed. |
+| `normalize_failures` | Tags dropped because a `normalize` rule failed (or was disabled by a compile failure). |
 
 **Arguments.** `stmt_location` and `stmt_len` select one statement of a
 multi-statement string, in bytes, the way the parser reports it:
@@ -325,8 +329,9 @@ SELECT pg_stat_statement_context_extract('SELECT 1; SELECT 2; /*controller:x*/',
   pg_stat_statement_context_extract(text, int, int) TO ...`.
 - It works when `enabled = off`, but needs the library preloaded.
 - It doesn't change the statistics or `_info()` counters, except
-  `regex_compile_failures`: a regex compile failure disables the extractor in
-  the calling backend and is counted, as it would be in the hooks.
+  `regex_compile_failures`: a regex compile failure disables the extractor
+  (or `normalize` rule) in the calling backend and is counted, as it would be
+  in the hooks.
 - For a single statement, or the first statement of a string, its result is
   the same as the hooks'. For a later statement that starts more than
   `scan_window` bytes into a multi-statement string, the hooks may see

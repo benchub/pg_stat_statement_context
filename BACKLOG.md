@@ -63,7 +63,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | ready |
 | 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | ready |
 | 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | ready |
-| 20261005-091225-41 | Roadmap: tag value normalization rules | 20261005-091225-9, 20261005-091225-10 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -409,26 +408,6 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 - Hot-path overhead is benchmarked.
 
 **Depends on:** 20261005-091225-18, 20261005-091225-20
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-41: Roadmap: tag value normalization rules
-
-**Description:** Add per-key regex-replace rules for tag values, for example `/users/\d+` → `/users/:id` on the `route` key (§8 v2). They run after `rename` and the allowlist/denylist, and before truncation and cardinality caps (§6.11 step 6). They reuse the regex infrastructure from task 20261005-091225-10 and its safety limits (§6.11).
-
-*Design note* (non-blocking): GUC name and rule syntax, for example `normalize = 'route:/users/\d+=>/users/:id|...'`, and whether multiple rules per key apply in order.
-
-**Acceptance criteria:**
-- Configured rules rewrite values of their key only, before the key is built.
-- Normalization sees renamed keys and only allowed tags, and its output is then truncated (and, once task 20261005-091225-32 lands, capped).
-- Invalid rules are rejected at `SET`/reload time.
-- CPU limits match those of the regex extractor.
-
-**Decisions:**
-- 2026-10-05: Rules are per-key regex-replace rules.
-- 2026-10-05: Normalization runs after rename and allowlist/denylist, before truncation and cardinality caps.
-
-**Depends on:** 20261005-091225-9, 20261005-091225-10
 **Open questions:** none
 **Status:** ready
 

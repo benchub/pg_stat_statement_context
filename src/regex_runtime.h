@@ -49,27 +49,57 @@ extern PGDLLEXPORT void pssc_regex_extract(void *arg, int index,
 										   PsscPairResult *result);
 
 /*
+ * Value normalization (DESIGN.md §6.11 step 6; backlog item
+ * 20261005-091225-41): applies, in order, every rule of list whose key is
+ * key[0, klen) to val[0, vlen) (valid in the database encoding, no NUL),
+ * each to the previous rule's output. A rule is equivalent to
+ * regexp_replace(value COLLATE "C", pattern, replacement, 'g') (same engine
+ * and flags as the regex extractor: REG_ADVANCED, C collation, no
+ * back-references; \1..\9, \& and \\ in the replacement), except that
+ * its output is cut on a character boundary at limit bytes (>= vlen), and
+ * matching stops there. Rules are compiled lazily per backend like regex
+ * extractors (a compile failure disables the rule until the next config
+ * generation and counts in regex_compile_failures). Each result is
+ * allocated with alloc(alloc_arg, ...). Returns PSSC_NORMALIZE_NO_RULES if
+ * no rule names key, PSSC_NORMALIZE_FAILED if a rule is disabled or failed
+ * (engine error, out of memory), else PSSC_NORMALIZE_DONE. Interrupts
+ * propagate as ERROR, as for the regex extractor.
+ */
+extern PGDLLEXPORT PsscNormalizeResult pssc_regex_normalize(const struct PsscNormalizeList *list,
+															const char *key, size_t klen,
+															const char *val, size_t vlen,
+															size_t limit,
+															void *(*alloc) (void *arg, size_t size),
+															void *alloc_arg,
+															const char **out, size_t *outlen);
+
+/*
  * TEST-ONLY fault injection (test/modules/pssc_extract_test). When set, it
  * is called right before creating the memory context of a pattern to
  * compile (phase PSSC_REGEX_TEST_CONTEXT), before each pg_regcomp
  * (PSSC_REGEX_TEST_COMPILE) and before each pg_regexec (PSSC_REGEX_TEST_EXEC)
- * of extractor index, inside the same error handling as the engine call. Returning REG_OKAY lets the engine run;
+ * of extractor index, inside the same error handling as the engine call;
+ * the PSSC_REGEX_TEST_NORM_* phases are the same for normalize rule index.
+ * Returning REG_OKAY lets the engine run;
  * any other value is used as if the engine had returned it. It may also
  * throw (ereport), as the engine can.
  */
 #define PSSC_REGEX_TEST_COMPILE	0
 #define PSSC_REGEX_TEST_EXEC	1
 #define PSSC_REGEX_TEST_CONTEXT	2
+#define PSSC_REGEX_TEST_NORM_CONTEXT	3
+#define PSSC_REGEX_TEST_NORM_COMPILE	4
+#define PSSC_REGEX_TEST_NORM_EXEC		5
 typedef int (*PsscRegexTestHook) (int phase, int index);
 extern PGDLLEXPORT PsscRegexTestHook pssc_regex_test_hook;
 
 /* Backend-local bookkeeping, for tests. */
 typedef struct PsscRegexDebugStats
 {
-	uint64		compiles;		/* successful pg_regcomp calls */
+	uint64		compiles;		/* successful pg_regcomp calls (extractors and rules) */
 	uint64		frees;			/* pg_regfree calls */
 	int			live;			/* compiled regexes currently held */
-	int			failed;			/* extractors disabled by compile failure */
+	int			failed;			/* extractors and rules disabled by compile failure */
 } PsscRegexDebugStats;
 
 extern PGDLLEXPORT void pssc_regex_debug_stats(PsscRegexDebugStats *stats);

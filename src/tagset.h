@@ -27,7 +27,12 @@
  *		 encoding than this database);
  *	  5. the global allowlist ("tags"), or the denylist ("exclude_tags")
  *		 when tags = '*';
- *	  6. drop keys longer than PSSC_MAX_KEY_LEN (63) bytes;
+ *	  6. drop keys longer than PSSC_MAX_KEY_LEN (63) bytes, then normalize
+ *		 the value with the rules for its (final) key (env->normalize, the
+ *		 "normalize" setting); a failure drops the pair and every later
+ *		 occurrence of its key in this pass, so a raw value cannot win;
+ *		 later occurrences of a normalized key are not normalized again
+ *		 (they lose to the first occurrence anyway);
  *	  7. truncate the value to max_tag_value_len bytes with env->cliplen.
  * Chain: an extractor "produces" tags if at least one of its pairs survives
  * steps 2-7. Extractors run in order until one produces tags; after that,
@@ -83,6 +88,28 @@ typedef void (*PsscRegexExtractFn) (void *arg, int index,
 									const PsscPairOut *out,
 									PsscPairResult *result);
 
+/*
+ * Value normalization hook (step 6 of the pipeline; backlog item
+ * 20261005-091225-41). Called with a final key (1..PSSC_MAX_KEY_LEN bytes)
+ * and its value (valid in the encoding, no NUL). Returns NO_RULES if no
+ * rule names key (the value is kept as is), DONE with the result in *out /
+ * *outlen (at most limit bytes, valid until pssc_tagset_build() returns,
+ * e.g. allocated with env->alloc), or FAILED (the pair is dropped). limit is
+ * at least vlen. Must not fail or throw otherwise.
+ */
+typedef enum PsscNormalizeResult
+{
+	PSSC_NORMALIZE_NO_RULES = 0,
+	PSSC_NORMALIZE_DONE,
+	PSSC_NORMALIZE_FAILED
+} PsscNormalizeResult;
+
+typedef PsscNormalizeResult (*PsscNormalizeFn) (void *arg,
+												const char *key, size_t klen,
+												const char *val, size_t vlen,
+												size_t limit,
+												const char **out, size_t *outlen);
+
 typedef struct PsscTagsetEnv
 {
 	void	   *arg;			/* passed to every callback */
@@ -106,6 +133,9 @@ typedef struct PsscTagsetEnv
 
 	/* Regex extractor; NULL means regex extractors produce no pairs. */
 	PsscRegexExtractFn regex;
+
+	/* Value normalization (step 6); NULL means no rules. */
+	PsscNormalizeFn normalize;
 } PsscTagsetEnv;
 
 typedef struct PsscTagsetLimits
@@ -151,6 +181,16 @@ typedef struct PsscTagsetStats
 	 * them in the backend-local copy.
 	 */
 	uint64_t	regex_compile_failures;
+
+	/*
+	 * Step 6: tags whose value the normalize rules changed, and pairs
+	 * dropped because normalizing their value failed (an engine error, out
+	 * of memory, or a rule disabled because its lazy compilation failed --
+	 * the compilation itself counts once in regex_compile_failures). Not in
+	 * _info().
+	 */
+	uint64_t	normalized_tags;
+	uint64_t	normalize_failures;
 } PsscTagsetStats;
 
 typedef struct PsscTagsetOut

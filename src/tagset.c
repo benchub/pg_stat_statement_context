@@ -59,6 +59,18 @@ typedef struct Ctx
 	size_t		seq;
 	bool		oom;
 
+	/*
+	 * Keys normalized so far in this pass (step 6), and whether that failed.
+	 * At most one entry per distinct key a rule names.
+	 */
+	struct
+	{
+		const char *key;
+		size_t		klen;
+		bool		failed;
+	}			normseen[PSSC_MAX_NORMALIZE_RULES];
+	int			nnormseen;
+
 	/* comment scans, shared by extractors with the same position */
 	bool		scanned[NPOSITIONS];
 	PsscScanResult scan[NPOSITIONS];
@@ -130,6 +142,52 @@ add_tag(Ctx *c, const char *key, size_t klen, const char *val, size_t vlen,
 	t->seq = c->seq++;
 	t->prio = prio;
 	t->keep = false;
+	return true;
+}
+
+/*
+ * Step 6 normalization of *val for final key key. Returns false if the pair
+ * must be dropped.
+ */
+static bool
+normalize_value(Ctx *c, const char *key, size_t klen, const char **val,
+				size_t *vlen, size_t maxv)
+{
+	const char *out = NULL;
+	size_t		outlen = 0;
+	size_t		limit = *vlen > maxv ? *vlen : maxv;
+	PsscNormalizeResult r;
+
+	for (int i = 0; i < c->nnormseen; i++)
+	{
+		if (bytes_eq(key, klen, c->normseen[i].key, c->normseen[i].klen))
+			return !c->normseen[i].failed;
+	}
+
+	r = c->env->normalize(c->env->arg, key, klen, *val, *vlen, limit, &out, &outlen);
+	if (r == PSSC_NORMALIZE_NO_RULES)
+		return true;
+	if (r == PSSC_NORMALIZE_DONE &&
+		(outlen > limit || (outlen > 0 && out == NULL) ||
+		 (outlen > 0 && memchr(out, '\0', outlen) != NULL) ||
+		 (outlen > 0 && !c->env->verify(c->env->arg, out, outlen))))
+		r = PSSC_NORMALIZE_FAILED;
+	if (c->nnormseen < PSSC_MAX_NORMALIZE_RULES)
+	{
+		c->normseen[c->nnormseen].key = key;
+		c->normseen[c->nnormseen].klen = klen;
+		c->normseen[c->nnormseen].failed = r != PSSC_NORMALIZE_DONE;
+		c->nnormseen++;
+	}
+	if (r != PSSC_NORMALIZE_DONE)
+	{
+		c->stats->normalize_failures++;
+		return false;
+	}
+	if (!bytes_eq(out, outlen, *val, *vlen))
+		c->stats->normalized_tags++;
+	*val = outlen > 0 ? out : "";
+	*vlen = outlen;
 	return true;
 }
 
@@ -223,8 +281,13 @@ process_pair(Ctx *c, const PsscExtractor *e, const PsscPair *p)
 		return false;
 	}
 
-	/* 7. truncate the value on a character boundary */
 	maxv = c->lim->max_tag_value_len > 0 ? (size_t) c->lim->max_tag_value_len : 0;
+
+	/* 6. normalize the value */
+	if (c->env->normalize != NULL && !normalize_value(c, key, klen, &val, &vlen, maxv))
+		return false;
+
+	/* 7. truncate the value on a character boundary */
 	if (vlen > maxv)
 	{
 		size_t		n = c->env->cliplen(c->env->arg, val, vlen, maxv);
@@ -317,6 +380,7 @@ run_chain(Ctx *c, bool footer)
 	bool		produced = false;
 
 	c->footer = footer;
+	c->nnormseen = 0;
 	memset(c->scanned, 0, sizeof(c->scanned));
 	for (uint32 i = 0; i < c->ex->nextractors && !c->oom; i++)
 	{

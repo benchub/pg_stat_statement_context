@@ -62,7 +62,9 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 -- Fault injection into the regex runtime of this backend
 -- (pssc_regex_test_hook): before creating the memory context of a pattern
 -- to compile (phase 'context'), before each pg_regcomp ('compile') or
--- pg_regexec ('exec') of extractor idx (-1: any), the next count times
+-- pg_regexec ('exec') of extractor idx (-1: any) -- or the same for
+-- normalize rule idx ('norm_context', 'norm_compile', 'norm_exec') --, the
+-- next count times
 -- (-1: always): 'espace' / 'etoobig' (as if the engine returned that code),
 -- 'oom' (throw out of memory), 'error' (elog ERROR), 'cancel' (throw query
 -- canceled), 'regcancel' (as the PG14/15 engine on a pending cancel: set

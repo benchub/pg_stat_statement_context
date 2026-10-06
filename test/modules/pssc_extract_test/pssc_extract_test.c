@@ -358,6 +358,12 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 		inj_phase = PSSC_REGEX_TEST_EXEC;
 	else if (strcmp(phase, "context") == 0)
 		inj_phase = PSSC_REGEX_TEST_CONTEXT;
+	else if (strcmp(phase, "norm_context") == 0)
+		inj_phase = PSSC_REGEX_TEST_NORM_CONTEXT;
+	else if (strcmp(phase, "norm_compile") == 0)
+		inj_phase = PSSC_REGEX_TEST_NORM_COMPILE;
+	else if (strcmp(phase, "norm_exec") == 0)
+		inj_phase = PSSC_REGEX_TEST_NORM_EXEC;
 	else
 		elog(ERROR, "unknown phase \"%s\"", phase);
 	inj_index = index;

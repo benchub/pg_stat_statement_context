@@ -129,6 +129,8 @@ pg_stat_statement_context_extract(PG_FUNCTION_ARGS)
 	push_int(&st, "dropped_tags", (int64) stats.dropped_tags);
 	push_int(&st, "heuristic_scans", (int64) stats.heuristic_scans);
 	push_int(&st, "regex_compile_failures", (int64) stats.regex_compile_failures);
+	push_int(&st, "normalized_tags", (int64) stats.normalized_tags);
+	push_int(&st, "normalize_failures", (int64) stats.normalize_failures);
 
 	result = pushJsonbValue(&st, WJB_END_OBJECT, NULL);
 

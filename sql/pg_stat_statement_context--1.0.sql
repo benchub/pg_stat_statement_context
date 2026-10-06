@@ -46,7 +46,8 @@ GRANT SELECT ON pg_stat_statement_context_totals TO PUBLIC;
 -- bytes) with the current configuration, and returns
 --   {"tags": {...}, "ntags", "tagset_bytes", "footer", "heuristic", "oom",
 --    "stmt_start", "stmt_end", "invalid_tags", "dropped_tags",
---    "heuristic_scans", "regex_compile_failures"}
+--    "heuristic_scans", "regex_compile_failures", "normalized_tags",
+--    "normalize_failures"}
 -- In a SQL_ASCII database, non-ASCII bytes and '\' in tag keys and values
 -- are escaped as \xHH and \\ (tagset_bytes counts the stored bytes).
 -- Records nothing and works even when pg_stat_statement_context.enabled is

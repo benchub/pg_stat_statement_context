@@ -6,7 +6,7 @@
  * All GUCs are defined by pssc_guc_define(), which _PG_init calls only while
  * shared_preload_libraries is being processed. Plain variables are owned by
  * guc.c and updated by the GUC machinery. Parsed settings (tags,
- * exclude_tags and extractors) are flat, pointer-free blobs built by
+ * exclude_tags, extractors and normalize) are flat, pointer-free blobs built by
  * a check_hook and installed by an assign_hook that cannot fail; each
  * effective change bumps the backend-local config generation, so caches
  * derived from the config (e.g. compiled regexes) can tell they are stale.
@@ -79,6 +79,7 @@ extern PGDLLEXPORT char *pssc_extractors;	/* raw DSL text; use pssc_guc_extracto
 extern PGDLLEXPORT char *pssc_tags;			/* raw text; use pssc_guc_tags() */
 extern PGDLLEXPORT char *pssc_exclude_tags; /* raw text; use pssc_guc_exclude_tags() */
 extern PGDLLEXPORT int pssc_untagged;		/* PsscUntagged */
+extern PGDLLEXPORT char *pssc_normalize;	/* raw text; use pssc_guc_normalize() */
 
 /*
  * Parsed tag key list (tags / exclude_tags). Keys are kept in list order
@@ -200,8 +201,44 @@ pssc_extractor_renames(const PsscExtractorList *list, const PsscExtractor *e)
 extern PGDLLEXPORT const PsscExtractorList *pssc_guc_extractors(void);
 
 /*
+ * Parsed pg_stat_statement_context.normalize (DESIGN.md §6.11 step 6):
+ * "key: 'pattern' => 'replacement', ..." regex-replace rules for tag values,
+ * applied in list order. Flat and pointer-free like PsscExtractorList:
+ * header, rules, then the NUL-terminated strings (offsets from the start of
+ * the blob). The key and pattern are never empty; an empty replacement is
+ * {0, 0}. max_ref is the highest \N back-reference in the replacement (0 if
+ * none); the check hook guarantees the pattern has that many groups.
+ */
+#define PSSC_MAX_NORMALIZE_RULES			32
+#define PSSC_MAX_NORMALIZE_REPLACEMENT_LEN	1024	/* bytes */
+
+typedef struct PsscNormalizeRule
+{
+	PsscBlobStr key;
+	PsscBlobStr pattern;
+	PsscBlobStr replacement;
+	uint32		max_ref;
+} PsscNormalizeRule;
+
+typedef struct PsscNormalizeList
+{
+	uint32		size;			/* total blob size in bytes */
+	uint32		nrules;
+	PsscNormalizeRule rules[FLEXIBLE_ARRAY_MEMBER];
+} PsscNormalizeList;
+
+static inline const char *
+pssc_normalize_str(const PsscNormalizeList *list, PsscBlobStr s)
+{
+	return s.len == 0 ? "" : (const char *) list + s.off;
+}
+
+/* Current parsed normalize rules. Never NULL once the GUCs are defined. */
+extern PGDLLEXPORT const PsscNormalizeList *pssc_guc_normalize(void);
+
+/*
  * Backend-local config generation: bumped whenever the effective value of
- * extractors, tags or exclude_tags changes in this process.
+ * extractors, tags, exclude_tags or normalize changes in this process.
  */
 extern PGDLLEXPORT uint64 pssc_guc_config_generation(void);
 

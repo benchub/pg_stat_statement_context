@@ -192,7 +192,8 @@ pssc_guc_test_vars(PG_FUNCTION_ARGS)
 	appendStringInfo(&buf, "extractors=%s\n", STR_VAR("pssc_extractors"));
 	appendStringInfo(&buf, "tags=%s\n", STR_VAR("pssc_tags"));
 	appendStringInfo(&buf, "exclude_tags=%s\n", STR_VAR("pssc_exclude_tags"));
-	appendStringInfo(&buf, "untagged=%s", untagged_name(INT_VAR("pssc_untagged")));
+	appendStringInfo(&buf, "untagged=%s\n", untagged_name(INT_VAR("pssc_untagged")));
+	appendStringInfo(&buf, "normalize=%s", STR_VAR("pssc_normalize"));
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }
 

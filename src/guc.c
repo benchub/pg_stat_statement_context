@@ -61,6 +61,7 @@ char	   *pssc_extractors = NULL;
 char	   *pssc_tags = NULL;
 char	   *pssc_exclude_tags = NULL;
 int			pssc_untagged = PSSC_UNTAGGED_SKIP;
+char	   *pssc_normalize = NULL;
 
 static const struct config_enum_entry track_options[] = {
 	{"none", PSSC_TRACK_NONE, false},
@@ -111,6 +112,12 @@ static const PsscExtractorList empty_extractor_list = {
 
 /* NULL until the first assignment, so that one always bumps the generation. */
 static const PsscExtractorList *cur_extractors = NULL;
+
+static const PsscNormalizeList empty_normalize_list = {
+	offsetof(PsscNormalizeList, rules), 0
+};
+
+static const PsscNormalizeList *cur_normalize = &empty_normalize_list;
 
 static uint64 config_generation = 0;
 
@@ -165,6 +172,12 @@ const PsscExtractorList *
 pssc_guc_extractors(void)
 {
 	return cur_extractors ? cur_extractors : &empty_extractor_list;
+}
+
+const PsscNormalizeList *
+pssc_guc_normalize(void)
+{
+	return cur_normalize;
 }
 
 uint64
@@ -1214,6 +1227,349 @@ assign_extractors(const char *newval, void *extra)
 	cur_extractors = list;
 }
 
+/* ---------------- normalize (DESIGN.md §6.11 step 6) ---------------- */
+
+/*
+ * Syntax: rule {"," rule}, rule = key ":" 'pattern' "=>" 'replacement', with
+ * optional ASCII whitespace between tokens. Pattern and replacement are
+ * always single-quoted ('' is a quote), so separators inside them need no
+ * escaping; the key is bare (up to whitespace, ':', ',' or a quote) or
+ * single-quoted too. A blank value has no rules.
+ */
+typedef struct NormRule
+{
+	DslStr		key;
+	DslStr		pattern;
+	DslStr		replacement;
+	uint32		max_ref;
+} NormRule;
+
+/*
+ * Parse a single-quoted string at *pp (at the quote) into a palloc'd copy;
+ * *pp is left at the next non-whitespace character.
+ */
+static bool
+norm_quoted(const char **pp, DslStr *out, int ruleno, const char *what)
+{
+	const char *p = *pp;
+	char	   *buf = palloc(strlen(p) + 1);
+	size_t		n = 0;
+
+	Assert(*p == '\'');
+	for (p++;; p++)
+	{
+		if (*p == '\0')
+		{
+			GUC_check_errdetail("Unterminated quoted %s in rule %d.", what, ruleno);
+			return false;
+		}
+		if (*p == '\'')
+		{
+			if (p[1] != '\'')
+				break;
+			p++;
+		}
+		buf[n++] = *p;
+	}
+	buf[n] = '\0';
+	out->s = buf;
+	out->len = n;
+	*pp = dsl_skip_ws(p + 1);
+	return true;
+}
+
+static bool
+norm_check_key(DslStr k, int ruleno)
+{
+	if (k.len == 0)
+	{
+		GUC_check_errdetail("Rule %d has an empty key.", ruleno);
+		return false;
+	}
+	if (k.len > PSSC_MAX_KEY_LEN)
+	{
+		int			shown = pg_mbcliplen(k.s,
+										 (int) Min(k.len, (size_t) PSSC_MAX_KEY_LEN + MAX_MULTIBYTE_CHAR_LEN),
+										 PSSC_MAX_KEY_LEN);
+
+		GUC_check_errdetail("Key \"%.*s...\" of rule %d is longer than %d bytes.",
+							shown, k.s, ruleno, PSSC_MAX_KEY_LEN);
+		return false;
+	}
+	for (size_t i = 0; i < k.len; i++)
+	{
+		if (IS_ASCII_SPACE(k.s[i]) || k.s[i] == '*')
+		{
+			GUC_check_errdetail("Key \"%s\" of rule %d contains %s.",
+								dsl_show(k.s, k.len), ruleno,
+								k.s[i] == '*' ? "\"*\"" : "whitespace");
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+ * Validate the pattern (as for a regex extractor: length, encoding, compiles
+ * as an advanced regex with the C collation, no back-references) and the
+ * replacement (length, encoding, escapes \1..\9 within the pattern's
+ * groups, \& and \\ only); sets r->max_ref.
+ */
+static bool
+norm_check_rule(NormRule *r, int ruleno, MemoryContext cxt)
+{
+	regex_t		re;
+	pg_wchar   *wpat;
+	int			wlen;
+	int			rc;
+	long		info;
+	size_t		nsub;
+	int			enc = GetDatabaseEncoding();
+
+	if (r->pattern.len == 0)
+	{
+		GUC_check_errdetail("Rule %d has an empty pattern.", ruleno);
+		return false;
+	}
+	if (r->pattern.len > PSSC_MAX_REGEX_PATTERN_LEN)
+	{
+		GUC_check_errdetail("Pattern of rule %d is longer than %d bytes.",
+							ruleno, PSSC_MAX_REGEX_PATTERN_LEN);
+		return false;
+	}
+	if (r->replacement.len > PSSC_MAX_NORMALIZE_REPLACEMENT_LEN)
+	{
+		GUC_check_errdetail("Replacement of rule %d is longer than %d bytes.",
+							ruleno, PSSC_MAX_NORMALIZE_REPLACEMENT_LEN);
+		return false;
+	}
+	if (!pg_verify_mbstr(enc, r->pattern.s, (int) r->pattern.len, true))
+	{
+		GUC_check_errdetail("Pattern of rule %d is not valid in encoding \"%s\".",
+							ruleno, GetDatabaseEncodingName());
+		return false;
+	}
+	if (!pg_verify_mbstr(enc, r->replacement.s, (int) r->replacement.len, true))
+	{
+		GUC_check_errdetail("Replacement of rule %d is not valid in encoding \"%s\".",
+							ruleno, GetDatabaseEncodingName());
+		return false;
+	}
+
+	wpat = palloc(sizeof(pg_wchar) * (r->pattern.len + 1));
+	wlen = pg_mb2wchar_with_len(r->pattern.s, wpat, (int) r->pattern.len);
+	rc = pssc_regcomp(cxt, &re, wpat, wlen, REG_ADVANCED, C_COLLATION_OID);
+	if (rc != REG_OKAY)
+	{
+		char		msg[128];
+
+		pg_regerror(rc, &re, msg, sizeof(msg));
+		GUC_check_errdetail("Pattern of rule %d is invalid: %s.", ruleno, msg);
+		return false;
+	}
+	info = re.re_info;
+	nsub = re.re_nsub;
+	pssc_regfree(&re);
+	if (info & REG_UBACKREF)
+	{
+		GUC_check_errdetail("Pattern of rule %d uses back-references, which are not allowed.",
+							ruleno);
+		return false;
+	}
+
+	r->max_ref = 0;
+	for (size_t i = 0; i < r->replacement.len; i++)
+	{
+		char		c;
+
+		if (r->replacement.s[i] != '\\')
+			continue;
+		if (i + 1 == r->replacement.len)
+		{
+			GUC_check_errdetail("Replacement of rule %d ends with a lone \"\\\".", ruleno);
+			return false;
+		}
+		c = r->replacement.s[++i];
+		if (c >= '1' && c <= '9')
+		{
+			if ((size_t) (c - '0') > nsub)
+			{
+				GUC_check_errdetail("Replacement of rule %d refers to group \\%c, but its pattern has %zu capture %s.",
+									ruleno, c, nsub, nsub == 1 ? "group" : "groups");
+				return false;
+			}
+			r->max_ref = Max(r->max_ref, (uint32) (c - '0'));
+		}
+		else if (c != '&' && c != '\\')
+		{
+			GUC_check_errdetail("Replacement of rule %d contains the unknown escape \"\\%.*s\"; only \\1 to \\9, \\& and \\\\ are allowed.",
+								ruleno, (int) Min((size_t) pg_encoding_mblen(enc, r->replacement.s + i), r->replacement.len - i),
+								r->replacement.s + i);
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+norm_parse(const char *value, NormRule *rules, int *n, MemoryContext cxt)
+{
+	const char *p = dsl_skip_ws(value);
+
+	*n = 0;
+	if (*p == '\0')
+		return true;
+	for (;;)
+	{
+		NormRule   *r;
+		int			ruleno = *n + 1;
+
+		if (*p == ',' || *p == '\0')
+		{
+			GUC_check_errdetail("Empty entry in the rule list.");
+			return false;
+		}
+		if (*n == PSSC_MAX_NORMALIZE_RULES)
+		{
+			GUC_check_errdetail("The list has more than %d rules.", PSSC_MAX_NORMALIZE_RULES);
+			return false;
+		}
+		r = &rules[(*n)++];
+		memset(r, 0, sizeof(*r));
+
+		if (*p == '\'')
+		{
+			if (!norm_quoted(&p, &r->key, ruleno, "key"))
+				return false;
+		}
+		else
+		{
+			r->key.s = p;
+			while (*p != '\0' && *p != ':' && *p != ',' && *p != '\'' && !IS_ASCII_SPACE(*p))
+				p++;
+			r->key.len = p - r->key.s;
+			p = dsl_skip_ws(p);
+		}
+		if (!norm_check_key(r->key, ruleno))
+			return false;
+		if (*p != ':')
+		{
+			GUC_check_errdetail("Expected \":\" after the key of rule %d.", ruleno);
+			return false;
+		}
+		p = dsl_skip_ws(p + 1);
+		if (*p != '\'')
+		{
+			GUC_check_errdetail("Expected a quoted pattern after \"%s:\" in rule %d.",
+								dsl_show(r->key.s, r->key.len), ruleno);
+			return false;
+		}
+		if (!norm_quoted(&p, &r->pattern, ruleno, "pattern"))
+			return false;
+		if (p[0] != '=' || p[1] != '>')
+		{
+			GUC_check_errdetail("Expected \"=>\" after the pattern of rule %d.", ruleno);
+			return false;
+		}
+		p = dsl_skip_ws(p + 2);
+		if (*p != '\'')
+		{
+			GUC_check_errdetail("Expected a quoted replacement after \"=>\" in rule %d.", ruleno);
+			return false;
+		}
+		if (!norm_quoted(&p, &r->replacement, ruleno, "replacement"))
+			return false;
+		if (!norm_check_rule(r, ruleno, cxt))
+			return false;
+
+		if (*p == '\0')
+			return true;
+		if (*p != ',')
+		{
+			GUC_check_errdetail("Unexpected \"%.*s\" after rule %d.", dsl_charlen(p), p, ruleno);
+			return false;
+		}
+		p = dsl_skip_ws(p + 1);
+	}
+}
+
+/* Serialize rules[0 .. n - 1] into one zero-filled PsscNormalizeList. */
+static PsscNormalizeList *
+norm_serialize(const NormRule *rules, int n)
+{
+	size_t		size = offsetof(PsscNormalizeList, rules) + n * sizeof(PsscNormalizeRule);
+	size_t		dpos = size;
+	PsscNormalizeList *list;
+
+	/* Bounded: 32 rules of at most 63 + 1024 + 1024 bytes. */
+	for (int i = 0; i < n; i++)
+		size += rules[i].key.len + 1 + rules[i].pattern.len + 1 +
+			(rules[i].replacement.len ? rules[i].replacement.len + 1 : 0);
+	list = pssc_guc_extra_alloc(size);
+	if (list == NULL)
+	{
+		GUC_check_errcode(ERRCODE_OUT_OF_MEMORY);
+		GUC_check_errdetail("Out of memory.");
+		return NULL;
+	}
+	memset(list, 0, size);
+	list->size = (uint32) size;
+	list->nrules = (uint32) n;
+	for (int i = 0; i < n; i++)
+	{
+		list->rules[i].key = blob_put((char *) list, &dpos, rules[i].key);
+		list->rules[i].pattern = blob_put((char *) list, &dpos, rules[i].pattern);
+		list->rules[i].replacement = blob_put((char *) list, &dpos, rules[i].replacement);
+		list->rules[i].max_ref = rules[i].max_ref;
+	}
+	Assert(dpos == size);
+	return list;
+}
+
+/*
+ * normalize check_hook: parse and validate the rules and return the
+ * PsscNormalizeList blob as extra (NULL for no rules).
+ */
+static bool
+check_normalize(char **newval, void **extra, GucSource source)
+{
+	MemoryContext cxt;
+	MemoryContext oldcxt;
+	NormRule	rules[PSSC_MAX_NORMALIZE_RULES];
+	int			n;
+	PsscNormalizeList *list = NULL;
+	bool		ok;
+
+	cxt = AllocSetContextCreate(CurrentMemoryContext,
+								"pg_stat_statement_context normalize check",
+								ALLOCSET_SMALL_SIZES);
+	oldcxt = MemoryContextSwitchTo(cxt);
+	ok = norm_parse(*newval ? *newval : "", rules, &n, cxt);
+	if (ok && n > 0)
+	{
+		list = norm_serialize(rules, n);
+		ok = list != NULL;
+	}
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(cxt);
+
+	if (ok)
+		*extra = list;
+	return ok;
+}
+
+static void
+assign_normalize(const char *newval, void *extra)
+{
+	const PsscNormalizeList *list =
+		extra ? (const PsscNormalizeList *) extra : &empty_normalize_list;
+
+	if (cur_normalize->size != list->size ||
+		memcmp(cur_normalize, list, list->size) != 0)
+		config_generation++;
+	cur_normalize = list;
+}
+
 /* ---------------- definitions ---------------- */
 
 void
@@ -1384,6 +1740,18 @@ pssc_guc_define(void)
 							 PGC_SIGHUP,
 							 0,
 							 NULL, NULL, NULL);
+
+	DefineCustomStringVariable(PSSC_GUC_PREFIX ".normalize",
+							   "Sets regex-replace rules that normalize tag values.",
+							   "Comma-separated rules key: 'pattern' => 'replacement', "
+							   "applied in order to the values of their key.",
+							   &pssc_normalize,
+							   "",
+							   PGC_SIGHUP,
+							   0,
+							   check_normalize,
+							   assign_normalize,
+							   NULL);
 
 	PSSC_MARK_GUC_PREFIX_RESERVED(PSSC_GUC_PREFIX);
 }

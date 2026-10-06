@@ -430,6 +430,74 @@ fake_regex(void *arg, int index, const PsscExtractorList *list,
 	}
 }
 
+/* ---------------- fake value normalization ---------------- */
+
+/*
+ * Rules for key "route" only: every run of ASCII digits becomes ":id"
+ * (global replacement, like a "\d+ => :id" rule). A value containing "FAIL"
+ * fails (as on an engine error), and one containing "GROW" is replaced by
+ * as many 'g' as the limit allows (to check the output bound). Every call
+ * is recorded, so tests can check which keys reach step 6.
+ */
+static int	norm_calls;
+static char norm_keys[64][PSSC_MAX_KEY_LEN + 2];	/* "key" of each call */
+static size_t norm_limits[64];
+static size_t norm_vlens[64];
+
+static PsscNormalizeResult
+fake_normalize(void *arg, const char *key, size_t klen, const char *val,
+			   size_t vlen, size_t limit, const char **out, size_t *outlen)
+{
+	char	   *buf;
+	size_t		n = 0;
+
+	assert(klen >= 1 && klen <= PSSC_MAX_KEY_LEN);
+	assert(vlen == 0 || memchr(val, '\0', vlen) == NULL);
+	if (norm_calls < 64)
+	{
+		memcpy(norm_keys[norm_calls], key, klen);
+		norm_keys[norm_calls][klen] = '\0';
+		norm_limits[norm_calls] = limit;
+		norm_vlens[norm_calls] = vlen;
+	}
+	norm_calls++;
+	if (klen != 5 || memcmp(key, "route", 5) != 0)
+		return PSSC_NORMALIZE_NO_RULES;
+	for (size_t i = 0; i + 4 <= vlen; i++)
+		if (memcmp(val + i, "FAIL", 4) == 0)
+			return PSSC_NORMALIZE_FAILED;
+	buf = arena_alloc(arg, limit + 1);
+	for (size_t i = 0; i + 4 <= vlen; i++)
+	{
+		if (memcmp(val + i, "GROW", 4) == 0)
+		{
+			memset(buf, 'g', limit);
+			*out = buf;
+			*outlen = limit;
+			return PSSC_NORMALIZE_DONE;
+		}
+	}
+	for (size_t i = 0; i < vlen;)
+	{
+		if (val[i] >= '0' && val[i] <= '9')
+		{
+			while (i < vlen && val[i] >= '0' && val[i] <= '9')
+				i++;
+			if (n + 3 > limit)
+				break;
+			memcpy(buf + n, ":id", 3);
+			n += 3;
+			continue;
+		}
+		if (n + 1 > limit)
+			break;
+		buf[n++] = val[i++];
+	}
+	*out = buf;
+	*outlen = n;
+	return PSSC_NORMALIZE_DONE;
+}
+
 /* ---------------- running the pipeline ---------------- */
 
 typedef struct Run
@@ -443,6 +511,7 @@ typedef struct Run
 	int			window;			/* default 2048 */
 	bool		non_scs;		/* standard_conforming_strings off */
 	bool		with_regex;
+	bool		with_normalize;
 	long		fail_at;		/* alloc failure injection; 0 = none, n = fail nth (1-based) */
 } Run;
 
@@ -581,6 +650,7 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	env.verify = utf8_verify;
 	env.cliplen = utf8_cliplen;
 	env.regex = cfg.with_regex ? fake_regex : NULL;
+	env.normalize = cfg.with_normalize ? fake_normalize : NULL;
 	/* exactly max_tagset_bytes, so ASan catches overruns */
 	buf = malloc(cfg.max_bytes ? cfg.max_bytes : 1);
 	memset(&out, 0x5a, sizeof(out));
@@ -1547,6 +1617,157 @@ emit_corpus(const char *dir)
 	}
 }
 
+/*
+ * Value normalization (DESIGN.md §6.11 step 6): after rename and the
+ * allowlist/denylist, before truncation; only for the configured key; a
+ * failure drops the key for the statement.
+ */
+static int
+norm_calls_for(const char *key)
+{
+	int			n = 0;
+
+	for (int i = 0; i < norm_calls && i < 64; i++)
+		n += strcmp(norm_keys[i], key) == 0;
+	return n;
+}
+
+static void
+test_normalize(void)
+{
+	Run			c = {0};
+	Res		   *r;
+
+	c.with_normalize = true;
+
+	/* only the rule's key is rewritten, every match */
+	norm_calls = 0;
+	r = run("norm key only", c, "SELECT 1 /*route:/users/123/posts/45,action:/users/456*/");
+	CHECK(strcmp(r->text, "action=/users/456|route=/users/:id/posts/:id") == 0,
+		  "norm key only: %s", r->text);
+	CHECK(r->st.normalized_tags == 1 && r->st.normalize_failures == 0,
+		  "norm key only: counters %llu %llu",
+		  (unsigned long long) r->st.normalized_tags,
+		  (unsigned long long) r->st.normalize_failures);
+	/* a value the rule leaves unchanged is not counted as normalized */
+	r = run("norm unchanged", c, "SELECT 1 /*route:/users/me*/");
+	CHECK(strcmp(r->text, "route=/users/me") == 0 && r->st.normalized_tags == 0,
+		  "norm unchanged: %s %llu", r->text,
+		  (unsigned long long) r->st.normalized_tags);
+
+	/* normalization sees the renamed key, not the original one */
+	{
+		XSpec		xs[] = {MG(PSSC_POS_APPEND)};
+
+		xs[0].rename = "controller:route|route:path";
+		c.ex = mkex(1, xs);
+		norm_calls = 0;
+		EXPECT("norm after rename", c, "SELECT 1 /*controller:/u/1,route:/p/2*/",
+			   "path=/p/2|route=/u/:id");
+		CHECK(norm_calls_for("controller") == 0 && norm_calls_for("route") == 1,
+			  "norm after rename: called for controller %d, route %d",
+			  norm_calls_for("controller"), norm_calls_for("route"));
+		c.ex = NULL;
+	}
+
+	/* only tags that pass the allowlist / denylist reach normalization */
+	c.tags = "action";
+	norm_calls = 0;
+	EXPECT("norm allowlist", c, "SELECT 1 /*route:/u/1,action:a1*/", "action=a1");
+	CHECK(norm_calls_for("route") == 0 && norm_calls_for("action") == 1,
+		  "norm allowlist: route %d action %d", norm_calls_for("route"),
+		  norm_calls_for("action"));
+	c.tags = "*";
+	c.exclude = "route";
+	norm_calls = 0;
+	EXPECT("norm denylist", c, "SELECT 1 /*route:/u/1,action:a1*/", "action=a1");
+	CHECK(norm_calls_for("route") == 0, "norm denylist: route %d",
+		  norm_calls_for("route"));
+	c.exclude = NULL;
+	/* nor does a key over 63 bytes (dropped in step 5) */
+	norm_calls = 0;
+	r = run("norm long key", c,
+			"SELECT 1 /*k123456789012345678901234567890123456789012345678901234567890123:1*/");
+	CHECK(norm_calls == 0 && r->ntags == 0, "norm long key: calls %d", norm_calls);
+
+	/* the output is then truncated (step 7), on the normalized value */
+	c.max_value = 8;
+	norm_calls = 0;
+	EXPECT("norm then truncate", c, "SELECT 1 /*route:/users/123456789*/", "route=/users/:");
+	CHECK(norm_calls == 1 && norm_vlens[0] == 16 && norm_limits[0] == 16,
+		  "norm then truncate: vlen %zu limit %zu", norm_vlens[0], norm_limits[0]);
+	/* a short value may grow up to max_tag_value_len, then truncation */
+	norm_calls = 0;
+	EXPECT("norm limit", c, "SELECT 1 /*route:GROW*/", "route=gggggggg");
+	CHECK(norm_calls == 1 && norm_limits[0] == 8, "norm limit: %zu", norm_limits[0]);
+	EXPECT("norm short", c, "SELECT 1 /*route:1*/", "route=:id");
+	c.max_value = 0;
+
+	/* a failure drops the key, also its later occurrences, and is counted */
+	r = run("norm fail", c, "SELECT 1 /*route:/FAIL/1,action:a,route:/ok/2*/");
+	CHECK(strcmp(r->text, "action=a") == 0 && r->st.normalize_failures == 1 &&
+		  r->st.normalized_tags == 0 && r->st.invalid_tags == 0 &&
+		  r->st.dropped_tags == 0,
+		  "norm fail: %s failures %llu", r->text,
+		  (unsigned long long) r->st.normalize_failures);
+	/* across extractors too: a merge extractor cannot bring it back */
+	{
+		XSpec		xs[] = {SC(PSSC_POS_APPEND), MG(PSSC_POS_APPEND)};
+
+		xs[1].merge = true;
+		c.ex = mkex(2, xs);
+		EXPECT("norm fail merge", c,
+			   "SELECT 1 /*route='/FAIL',job='j'*/ /*route:/u/1*/", "job=j");
+		/* a failed pair does not "produce": the next extractor runs */
+		xs[1].merge = false;
+		c.ex = mkex(2, xs);
+		EXPECT("norm fail chain", c,
+			   "SELECT 1 /*route='/FAIL'*/ /*action:a*/", "action=a");
+		c.ex = NULL;
+	}
+
+	/* later occurrences of a normalized key lose anyway: normalized once */
+	norm_calls = 0;
+	EXPECT("norm first wins", c, "SELECT 1 /*route:/a/1,route:/b/2,route:/c/3*/",
+		   "route=/a/:id");
+	CHECK(norm_calls_for("route") == 1, "norm first wins: %d calls",
+		  norm_calls_for("route"));
+
+	/* the footer pass starts afresh */
+	{
+		const char *s = "SELECT 1; /*route:/f/9*/";
+
+		r = run_range("norm footer", c, s, 0, 8);
+		CHECK(r->footer && strcmp(r->text, "route=/f/:id") == 0,
+			  "norm footer: %d %s", r->footer, r->text);
+		/* a failure in the statement's own comments does not carry over */
+		s = "SELECT 1 /*route:FAIL*/; /*route:/f/9*/";
+		r = run_range("norm footer after fail", c, s, 0, 23);
+		CHECK(r->footer && strcmp(r->text, "route=/f/:id") == 0 &&
+			  r->st.normalize_failures == 1,
+			  "norm footer after fail: %d %s", r->footer, r->text);
+	}
+
+	/* the normalized value is what gets serialized and deduplicated */
+	EXPECT("norm collapse", c, "SELECT 1 /*route:/u/1*/", "route=/u/:id");
+	{
+		Res		   *r1;
+		char		b1[64];
+		size_t		l1;
+
+		r1 = run("norm same 1", c, "SELECT 1 /*route:/u/1*/");
+		l1 = r1->len;
+		memcpy(b1, r1->buf, l1);
+		r1 = run("norm same 2", c, "SELECT 1 /*route:/u/99999*/");
+		CHECK(r1->len == l1 && memcmp(r1->buf, b1, l1) == 0,
+			  "norm collapse: different values, different tag sets");
+	}
+
+	/* no callback: values untouched */
+	c.with_normalize = false;
+	EXPECT("norm off", c, "SELECT 1 /*route:/u/1*/", "route=/u/1");
+}
+
 /* SQL_ASCII output escaping (pssc_tag_escape, DESIGN.md §6.11). */
 static void
 test_escape(void)
@@ -1606,6 +1827,7 @@ main(int argc, char **argv)
 	test_random();
 	test_random_permutations();
 	test_escape();
+	test_normalize();
 
 	if (failures)
 	{

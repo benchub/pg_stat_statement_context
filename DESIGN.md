@@ -259,6 +259,7 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.extractors` | `'sqlcommenter, marginalia'` | sighup | Extractor DSL (§4.2). |
 | `pg_stat_statement_context.tags` | `'action, controller, job'` | sighup | Allowlist of tag keys to keep, applied after `rename`. Tags not listed are discarded. `'*'` keeps all tags (not recommended, see §6.1). |
 | `pg_stat_statement_context.exclude_tags` | `'traceparent, tracestate, request_id'` | sighup | Denylist (high-cardinality). Only relevant when `tags = '*'`. |
+| `pg_stat_statement_context.normalize` | `''` | sighup | Per-key value rewrite rules `key: 'pattern' => 'replacement', …` (item -41). Rules apply in order, each like `regexp_replace(v COLLATE "C", p, r, 'g')`. Patterns may not contain back-references; replacements may use `\1`–`\9`, `\&`, `\\`. Limits: at most 32 rules, 1 kB per pattern or replacement. Validated at SET/reload (§6.11 step 6). |
 | `pg_stat_statement_context.untagged` | `skip` | sighup | `skip` statements without tags (default, decided 2026-10-05, §11 Q1) / `record` them with an empty tag set. |
 
 The configuration lives in GUCs only; there is no separate config file
@@ -799,7 +800,13 @@ some server version, it is omitted on that version rather than exposed as
      the GUC is cluster-wide but databases may have different encodings
   5. apply the global allowlist (or the denylist when `tags = '*'`), and drop
      keys longer than 63 bytes
-  6. *(roadmap)* value normalization: per-key regex-replace rules (§8)
+  6. value normalization (`normalize`, item -41): rules for the final key run
+     in config order, each on the previous output. Each rule's output is capped
+     at `max(value length, max_tag_value_len)` bytes. On a run-time failure
+     the pair is dropped (fail closed) and counted in `normalize_failures`. A
+     rule that fails to compile is disabled for the backend until the next
+     config change and counted in `regex_compile_failures`. The CPU and
+     compile limits are the regex extractor's (§4.2).
   7. truncate on a character boundary (`pg_mbcliplen`)
   8. *(roadmap)* per-key cardinality caps, collapsing overflow values to
      JSON `null` (§8)
@@ -913,7 +920,8 @@ REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PU
 - Runs the hooks' extraction pipeline with the current GUC config and returns
   `tags`, `ntags`, `tagset_bytes`, `footer`, `heuristic`, `oom`, `stmt_start`,
   `stmt_end` (byte offsets), and this call's `invalid_tags`, `dropped_tags`,
-  `heuristic_scans`, `regex_compile_failures`.
+  `heuristic_scans`, `regex_compile_failures`, `normalized_tags`,
+  `normalize_failures`.
 - Restricted because it runs the regex engine on arbitrary input (CPU cost) and
   reveals the extractor configuration; superusers may `GRANT` it.
 - Works when `enabled = off`; errors if the library isn't preloaded.
@@ -1042,9 +1050,11 @@ matches this extension's minimum supported version.
 - A `pg_stat_statement_context_activity` view showing the **current** tags of
   each backend, as a context-aware companion to `pg_stat_activity`. It follows
   the same visibility rules as §6.11.
-- **Value normalization rules:** per-key regex-replace rules, e.g.
-  `/users/\d+` → `/users/:id`. They run after rename and the allowlist/denylist,
-  and before truncation and cardinality caps (§6.11 step 6).
+- **Value normalization rules (done, item -41):** per-key regex-replace rules,
+  e.g. `/users/\d+` → `/users/:id`, set with `normalize` (§4.1). They run after
+  rename and the allowlist/denylist, and before truncation and cardinality caps
+  (§6.11 step 6). The `normalize_*` counters appear only in `_extract()`. Adding
+  them to `_info()` is deferred to the 1.1 upgrade-script decision.
 
 **v3 — ecosystem**
 - **Integrations (done, item -42):** `docs/integrations/` ships recipes for
@@ -1106,7 +1116,7 @@ matches this extension's minimum supported version.
   - small-`max_entries` churn, with dead entries reclaimed before live ones
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset
-- **pg_regress suite** (`make installcheck`: smoke, guc, extract) runs in a
+- **pg_regress suite** (`make installcheck`: smoke, guc, extract, normalize) runs in a
   UTF8, no-locale database. Server-level GUCs are changed with `ALTER SYSTEM` +
   `pg_reload_conf()` and an include file that waits until the new values are
   visible. TAP 013 checks that `_extract()` leaves the store and counters
