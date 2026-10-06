@@ -11,6 +11,7 @@
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 
+#include "activity.h"
 #include "compat.h"
 #include "context.h"
 #include "guc.h"
@@ -18,6 +19,9 @@
 
 PsscFrame  *pssc_active_frame = NULL;
 int			pssc_nesting_level = 0;
+
+/* Depth of planner calls on every version: activity ignores plan-time SQL. */
+static int	planning_depth = 0;
 
 /* Registered executor frames, most recently created first. */
 static dlist_head frames = DLIST_STATIC_INIT(frames);
@@ -308,15 +312,52 @@ pssc_context_note_stmt_boundary(const char *src, int stmt_location,
 	owned_end = pssc_stmt_range(src, stmt_location, stmt_len).end;
 }
 
+static inline bool
+at_top_level(void)
+{
+	return pssc_active_frame == NULL && pssc_nesting_level == 0 &&
+		planning_depth == 0;
+}
+
+static inline void
+enter(PsscFrameSave *save, PsscFrame *frame, bool nest)
+{
+	if (frame != NULL)
+		pssc_active_frame = frame;
+	if (nest)
+		pssc_nesting_level++;
+}
+
+/*
+ * Entering with no frame active at nesting level 0, outside planning,
+ * starts (a part of) a top-level statement: frame, or no frame, becomes
+ * this backend's row of the activity view (activity.h); leaving back to
+ * that state marks it idle.
+ */
 void
 pssc_frame_enter(PsscFrameSave *save, PsscFrame *frame, bool nest)
 {
 	save->active = pssc_active_frame;
 	save->nesting_level = pssc_nesting_level;
-	if (frame != NULL)
-		pssc_active_frame = frame;
-	if (nest)
-		pssc_nesting_level++;
+	save->activity = at_top_level();
+	if (save->activity)
+	{
+		if (frame != NULL)
+			frame->activity_seq = pssc_activity_publish(frame);
+		else
+			pssc_activity_clear();
+	}
+	enter(save, frame, nest);
+}
+
+void
+pssc_frame_enter_finish(PsscFrameSave *save, PsscFrame *frame)
+{
+	save->active = pssc_active_frame;
+	save->nesting_level = pssc_nesting_level;
+	save->activity = at_top_level() && frame != NULL &&
+		pssc_activity_resume(frame->activity_seq);
+	enter(save, frame, true);
 }
 
 void
@@ -324,6 +365,8 @@ pssc_frame_leave(const PsscFrameSave *save)
 {
 	pssc_active_frame = save->active;
 	pssc_nesting_level = save->nesting_level;
+	if (save->activity)
+		pssc_activity_set_idle();
 }
 
 /*
@@ -331,17 +374,22 @@ pssc_frame_leave(const PsscFrameSave *save)
  * its nesting_level around planning even when it does not track planning):
  * statements run by functions evaluated at plan time (constant folding)
  * are not top level. No timing and no frame: such a statement still gets
- * only its own tags (no frame is active while planning). Installed only
- * where pgss does this (PSSC_HAS_PLANNER_NESTING), so toplevel matches
- * pgss's key on every version.
+ * only its own tags (no frame is active while planning). The nesting level
+ * is raised only where pgss does this (PSSC_HAS_PLANNER_NESTING), so
+ * toplevel matches pgss's key on every version; planning_depth is raised
+ * on every version, so plan-time statements never become the backend's
+ * activity row.
  */
 static PlannedStmt *
 pssc_planner(PSSC_PLANNER_PARAMS)
 {
 	PlannedStmt *result;
 	int			save_level = pssc_nesting_level;
+	int			save_depth = planning_depth;
 
-	pssc_nesting_level++;
+	if (PSSC_HAS_PLANNER_NESTING)
+		pssc_nesting_level++;
+	planning_depth++;
 	PG_TRY();
 	{
 		if (prev_planner)
@@ -352,6 +400,7 @@ pssc_planner(PSSC_PLANNER_PARAMS)
 	PG_FINALLY();
 	{
 		pssc_nesting_level = save_level;
+		planning_depth = save_depth;
 	}
 	PG_END_TRY();
 	return result;
@@ -360,8 +409,6 @@ pssc_planner(PSSC_PLANNER_PARAMS)
 void
 pssc_context_init(void)
 {
-	if (!PSSC_HAS_PLANNER_NESTING)
-		return;
 	prev_planner = planner_hook;
 	planner_hook = pssc_planner;
 }

@@ -136,5 +136,5 @@ used there.
 ## Not in v1
 
 Per-key value normalization and cardinality caps, exemplars, context from
-a session/transaction override GUC, a per-backend
-activity view, and persistence across restarts are not implemented.
+a session/transaction override GUC, and persistence across restarts are not
+implemented.

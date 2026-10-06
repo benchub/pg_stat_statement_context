@@ -52,6 +52,8 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | yes | blocked-on-questions |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | yes | blocked-on-questions |
+| 20261006-092320-1 | Flaky TAP 004: "every alternating reload replaced the extractors" (28 of 30) | — | no | ready |
+| 20261006-093831-1 | Flaky TAP 007: boundary-value bucket tests depend on the wall clock | — | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | yes | blocked-on-questions |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28 | yes | blocked-on-questions |
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | ready |
@@ -59,7 +61,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | ready |
-| 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -184,6 +185,29 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 **Open questions:**
 - Q1: Is changing the eviction batch size adaptively (option 1, simpler, alters §5.3 semantics) acceptable, or should we keep the fixed ~5% and do option 2 (compact scan array)?
 **Status:** blocked-on-questions
+
+### 20261006-092320-1: Flaky TAP 004: "every alternating reload replaced the extractors" (28 of 30)
+
+**Description:** `test/t/004_extractors.pl` (around line 530) alternates `extractors` between two big values for 30 reloads and expects the session's config generation (`pssc_guc_test_generation()`) to grow by exactly 30. It has failed intermittently with 28 on PG18, twice: once during 20261006-021334-1's harness and once during -39's harness (both before and after the regex CPU-time retry was added). `alter_and_reload()` waits for each session to see a sentinel `scan_window` value, so reloads can't simply coalesce. Likely cause: in that backend the check hook rejected one of the values while re-reading the config file (e.g. a regex compile hitting the 100 ms limit on a busy host, or another transient failure), so the backend kept the old value silently (logged only at DEBUG3). If so, backends can disagree on the config, which is a real (if rare) product issue, not just a test issue.
+
+**Acceptance criteria:**
+- Root cause identified (e.g. by logging the rejection reason in the test, or raising the backend log level for the session) and documented.
+- If it's the compile limit: decide whether a value already accepted by the postmaster should be rejected in a backend because of time alone (e.g. skip the time limit in the SIGHUP re-check, or apply it only in SET/ALTER SYSTEM), fix, and add a test.
+- 004 passes 20 consecutive runs on PG18 under load (e.g. run alongside another harness).
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
+
+### 20261006-093831-1: Flaky TAP 007: boundary-value bucket tests depend on the wall clock
+
+**Description:** `test/t/007_store.pl` lines ~162–175 restart with `bucket_count=10000` (default `bucket_interval=300`), record once via the clock (`rec(q{1, ...})`, no explicit bucket), then expect `record_at(..., 0)` to land in slot/bucket 0. If the clock bucket has advanced to 1 by then (a 300 s boundary crossed since the store's epoch, or a slow host), writes clamp to the current watermark and land in bucket 1. Seen once on PG18 during -39's harness: got `2::1:1:1:1 2::9999:9999:1:1`, expected `2::0:0:1:1 2::9999:9999:1:1`; passed on rerun.
+
+**Acceptance criteria:** the test pins the clock (the store has a debug clock offset, `PSSC_DEBUG_CLOCK_MAX_OFFSET`) or otherwise avoids depending on the wall clock; 007 passes reliably; audit other tests in 007/008/018 that use `record_at` after a clock-based record for the same pattern.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
 
 ### 20261005-213120-1: `_info()`: distinguish live eviction from expired-entry reclamation
 
@@ -336,19 +360,6 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 - 2026-10-05: Follow pg_stat_statements: discard on format/version mismatch; if `max_entries` shrank, load what fits and evict the rest; if `bucket_interval` or `bucket_count` changed, discard.
 
 **Depends on:** 20261005-091225-15, 20261005-091225-21
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-39: Roadmap: `pg_stat_statement_context_activity` view
-
-**Description:** Add a view that shows the **current** tags of each backend, as a companion to `pg_stat_activity` (§8 v2). Keep per-backend shared slots, sized `MaxBackends × max_tagset_bytes`, and update them when top-level frames are activated. The visibility rules from §6.11 apply.
-
-**Acceptance criteria:**
-- The view shows the running statement's tags joinable on `pid`.
-- Tags are `NULL` for other roles without `pg_read_all_stats`.
-- Hot-path overhead is benchmarked.
-
-**Depends on:** 20261005-091225-18, 20261005-091225-20
 **Open questions:** none
 **Status:** ready
 

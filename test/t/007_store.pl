@@ -138,8 +138,10 @@ sub pgbench
 	ok($f2 - $f1 > -8192,
 		'the store allocates no more than it requested (free space: '
 		  . ($f2 - $f1) . ')');
-	is(sql(qq{SELECT count(*) FROM pg_shmem_allocations WHERE name LIKE '$P%'}), 2,
-		'named allocations: the header and the hash table');
+	is(sql(qq{SELECT string_agg(name, ',' ORDER BY name COLLATE "C")
+	            FROM pg_shmem_allocations WHERE name LIKE '$P%'}),
+		"$P,$P activity,$P hash",
+		'named allocations: the store header and hash table, and the activity slots');
 }
 
 # --------------------------------------------------------- boundary values

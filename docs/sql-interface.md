@@ -8,6 +8,7 @@ extension's schema; the extension is relocatable):
 | [`pg_stat_statement_context`](#the-views) | view, one row per entry and live bucket | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context_totals`](#the-views) | view, one row per entry, live buckets summed | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context(showtags, merge_buckets)`](#pg_stat_statement_contextshowtags-merge_buckets) | set-returning function behind both views | `PUBLIC` |
+| [`pg_stat_statement_context_activity`](#pg_stat_statement_context_activity) | view, current tags of each backend (join `pg_stat_activity` on `pid`); `pg_stat_statement_context_activity()` is the function behind it | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context_info()`](#pg_stat_statement_context_info) | store and diagnostic counters | `PUBLIC` |
 | [`pg_stat_statement_context_reset()`](#pg_stat_statement_context_reset) | clears all statistics | superuser only |
 | [`pg_stat_statement_context_extract(query, stmt_location, stmt_len)`](#pg_stat_statement_context_extract) | debug: show the tags extracted from a statement | superuser only |
@@ -214,6 +215,79 @@ converted to the encoding of the database you query from.
 
 `pg_stat_statement_context_extract()` escapes its output the same way when
 run in a `SQL_ASCII` database.
+
+## `pg_stat_statement_context_activity`
+
+Shows each backend's current tags. It is a companion to `pg_stat_activity`:
+join the two on `pid`.
+
+```sql
+SELECT a.pid, a.usename, a.state, c.state AS tags_state, c.tags,
+       left(a.query, 60) AS query
+  FROM pg_stat_activity a
+  JOIN pg_stat_statement_context_activity c USING (pid)
+ WHERE a.state <> 'idle' OR c.state = 'active'
+ ORDER BY a.query_start;
+```
+
+There is one row per backend whose last top-level statement had tags
+resolved, which happens when the extension is enabled and the statement has a
+query ID. The row holds that statement's tags. `state` is `active` while the
+statement runs and `idle` after it ends. This mirrors
+`pg_stat_activity.query`, which also keeps showing the last statement of an
+idle backend. That way you can still see which code left a session
+`idle in transaction`.
+
+| Column | Type | Description |
+|---|---|---|
+| `pid` | `integer` | Process ID of the backend, as in `pg_stat_activity.pid`. |
+| `userid` | `oid` | Role the statement runs as: the current user when its execution started, for example after `SET ROLE`. `pg_stat_activity.usesysid` shows the session user instead. |
+| `dbid` | `oid` | Database of the backend. |
+| `queryid` | `bigint` | Query ID of the top-level statement, as in `pg_stat_activity.query_id`, or `NULL` if it has none. |
+| `state` | `text` | `active` while the statement runs, `idle` once it has ended (successfully or not). |
+| `tags` | `jsonb` | The statement's tag set, in the same format as the views; `{}` if it had no tags. |
+
+Some details:
+
+- **Only top-level statements.** The row shows the statement the client
+  sent. Statements run by functions, procedures and `DO` blocks don't change
+  the row, whatever `nested_tags` and `track` say. A `CALL` shows the tags of
+  the `CALL`.
+- **Multi-statement strings.** Each statement of the string replaces the row
+  with its own tags when it starts.
+- **Prepared statements.** `EXECUTE` and the extended protocol show the tags
+  of the prepared statement's own text, the same tags the statistics record,
+  and its `queryid`; for `EXECUTE`, `pg_stat_activity.query_id` is the
+  `EXECUTE` statement's own query ID instead.
+  `PREPARE` leaves the row unchanged; `DEALLOCATE` is a utility statement
+  and shows its own tags.
+- **When the row changes.** The row is updated when execution starts: when
+  the executor runs, or when a utility statement starts. Until then, time
+  spent parsing, planning or waiting for a lock that the planner needs is
+  shown against the previous statement's row, and so are statements run
+  while planning (for example by an `IMMUTABLE` function that is
+  constant-folded), on every server version. Compare `queryid` with
+  `pg_stat_activity.query_id` to tell the two apart. A portal that is
+  bound but never executed (extended protocol `Bind` followed by `Close` or
+  `Sync`) doesn't change the row, nor does a cursor closed at the end of
+  its transaction.
+- **When the row disappears.** A top-level statement without tags resolved,
+  for example with `pg_stat_statement_context.enabled = off` or without a
+  query ID, removes the row, and so does the exit of the backend. Parallel
+  workers have no rows.
+- **Visibility.** The same rules as for the statistics views apply (see
+  [Visibility and privacy](#visibility-and-privacy)). For other roles'
+  backends, `queryid`, `state` and `tags` are `NULL` unless you have the
+  privileges of `pg_read_all_stats`. `pid`, `userid` and `dbid` are always
+  shown, as in `pg_stat_activity`.
+- **Cost.** Each backend has one shared slot of `max_tagset_bytes` bytes plus
+  a small header, for each of `MaxBackends` backends; at the defaults that is
+  about 70 kB. The extension writes the slot when a top-level statement
+  starts and ends, without taking a lock. A reader never blocks a writer: it
+  retries the copy of any slot that is being written while it reads. See
+  [benchmarks](benchmarks.md#activity-view) for the measured overhead.
+- **Not counted in `_info().shmem_bytes`.** That column reports the
+  statistics store only.
 
 ## `pg_stat_statement_context_info()`
 

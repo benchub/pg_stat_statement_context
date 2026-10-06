@@ -9,6 +9,7 @@
 #include "fmgr.h"
 #include "miscadmin.h"
 
+#include "activity.h"
 #include "compat.h"
 #include "context.h"
 #include "executor.h"
@@ -40,6 +41,7 @@ _PG_init(void)
 	pssc_extract_init();
 	pssc_regex_init();
 	pssc_store_init();
+	pssc_activity_init();
 	pssc_context_init();
 	pssc_executor_init();
 	pssc_utility_init();

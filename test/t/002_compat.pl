@@ -32,6 +32,13 @@ is($node->safe_psql('postgres', 'SELECT pssc_compat_test_shmem_bump()'),
 is($node->safe_psql('postgres', 'SELECT pssc_compat_test_shmem_bump()'),
 	'2', 'shmem: counter is shared across backends');
 
+# ---- per-backend shared memory: MaxBackends at request time, slot index ----
+is( $node->safe_psql('postgres', q{
+	SELECT at_request = max_backends, slot >= 0, slot < max_backends,
+	       max_backends >= current_setting('max_connections')::int
+	FROM pssc_compat_test_backends()}),
+	't|t|t|t', 'backends: the request-time count equals MaxBackends; the slot is in range');
+
 # ---- ExecutorRun and ProcessUtility signatures ----
 # FETCH 2 then FETCH 3 runs the executor twice.
 my $out = $node->safe_psql('postgres', q{

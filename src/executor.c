@@ -16,6 +16,9 @@
  *
  * ExecutorRun and ExecutorFinish make the frame active and count a
  * nesting level around the chained call (pssc_frame_enter/leave).
+ * ExecutorFinish uses pssc_frame_enter_finish(): portal cleanup also calls
+ * it for portals that never ran (Bind without Execute, cursors dropped at
+ * commit), which must not become the activity row.
  *
  * ExecutorEnd refreshes the frame (user, nesting level, toplevel and
  * recordability as they are now, as pgss reads them) and records one call
@@ -119,7 +122,7 @@ pssc_ExecutorFinish(QueryDesc *queryDesc)
 {
 	PsscFrameSave save;
 
-	pssc_frame_enter(&save, pssc_frame_lookup(queryDesc), true);
+	pssc_frame_enter_finish(&save, pssc_frame_lookup(queryDesc));
 	PG_TRY();
 	{
 		if (prev_ExecutorFinish)

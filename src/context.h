@@ -82,6 +82,8 @@ typedef struct PsscFrame
 	bool		nested;			/* another frame was active when made */
 
 	/* resolved tag set, "k\0v\0..." (DESIGN.md §5.1) */
+	uint64		activity_seq;	/* pssc_activity_publish() of it, 0: none */
+
 	bool		tags_oom;		/* extraction ran out of memory: no tags */
 	int			ntags;
 	uint32		tags_len;
@@ -106,6 +108,7 @@ typedef struct PsscFrameSave
 {
 	PsscFrame  *active;
 	int			nesting_level;
+	bool		activity;		/* entered as the top-level row (activity.h) */
 } PsscFrameSave;
 
 /*
@@ -184,6 +187,15 @@ extern PGDLLEXPORT void pssc_context_note_stmt_boundary(const char *src,
  */
 extern PGDLLEXPORT void pssc_frame_enter(PsscFrameSave *save, PsscFrame *frame,
 										 bool nest);
+
+/*
+ * pssc_frame_enter(save, frame, true) for ExecutorFinish, which also runs
+ * from portal cleanup for portals that never ran: at top level it only
+ * resumes frame's activity row if that is still the row, and never
+ * publishes or clears one.
+ */
+extern PGDLLEXPORT void pssc_frame_enter_finish(PsscFrameSave *save,
+												PsscFrame *frame);
 extern PGDLLEXPORT void pssc_frame_leave(const PsscFrameSave *save);
 
 /*

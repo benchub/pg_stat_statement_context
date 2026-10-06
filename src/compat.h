@@ -137,6 +137,37 @@ typedef void (*pssc_shmem_request_hook_type) (void);
 #endif
 
 /*
+ * Number of regular backends (client backends, autovacuum, background
+ * workers, WAL senders) for sizing per-backend shared memory, valid in the
+ * shared-memory request function (PSSC_INSTALL_SHMEM_REQUEST_HOOK).
+ */
+/* PG15+: MaxBackends is set before shmem_request_hook; PG14: _PG_init runs before InitializeMaxBackends, so compute it the same way. */
+#if PG_VERSION_NUM >= 150000
+#define pssc_max_backends_for_shmem() MaxBackends
+#else
+#include "postmaster/autovacuum.h"
+#include "replication/walsender.h"
+#define pssc_max_backends_for_shmem() \
+	(MaxConnections + autovacuum_max_workers + 1 + max_worker_processes + \
+	 max_wal_senders)
+#endif
+
+/*
+ * This backend's per-backend slot, 0 .. MaxBackends - 1 for regular
+ * backends (pgstat's backend status array uses the same index); outside
+ * that range (or negative) for auxiliary processes and before the backend
+ * has one, so check the bounds.
+ */
+/* PG17+: MyProcNumber (storage/procnumber.h), 0-based; PG14-16: MyBackendId (storage/backendid.h), 1-based. */
+#if PG_VERSION_NUM >= 170000
+#include "storage/procnumber.h"
+#define PSSC_MY_BACKEND_SLOT() ((int) MyProcNumber)
+#else
+#include "storage/backendid.h"
+#define PSSC_MY_BACKEND_SLOT() ((int) MyBackendId - 1)
+#endif
+
+/*
  * Allocate a GUC check_hook "extra" blob the way guc.c will free it.
  * Returns NULL on out-of-memory; the check_hook should then return false.
  * guc.c frees only this top-level block, so keep it pointer-free.

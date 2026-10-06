@@ -20,10 +20,13 @@
 #include "access/parallel.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
+#include "mb/pg_wchar.h"
+#include "portability/instr_time.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 
+#include "activity.h"
 #include "compat.h"
 #include "context.h"
 
@@ -335,4 +338,84 @@ pssc_context_test_leak(PG_FUNCTION_ARGS)
 		leak_cxt = NULL;
 	}
 	PG_RETURN_VOID();
+}
+
+/*
+ * Microbenchmark of the activity view (docs/benchmarks.md):
+ *	write_ns	one top-level statement's writes, publish (active) plus
+ *				set_idle, on this backend's slot, for a tag set of
+ *				tags_bytes bytes
+ *	read_ns		one consistent copy of every slot (the view's read loop
+ *				without the jsonb output), over nslots slots
+ * Afterwards the active frame (the calling statement's) is published
+ * again. Does not need the hooks of this module.
+ */
+typedef uint64 (*act_publish_fn) (const PsscFrame *);
+typedef void (*act_void_fn) (void);
+typedef int (*act_nslots_fn) (void);
+typedef Size (*act_tagsmax_fn) (void);
+typedef void (*act_read_fn) (int, PsscActivityRow *);
+
+PG_FUNCTION_INFO_V1(pssc_context_test_activity_bench);
+Datum
+pssc_context_test_activity_bench(PG_FUNCTION_ARGS)
+{
+	int32		loops = PG_GETARG_INT32(0);
+	int32		tags_bytes = PG_GETARG_INT32(1);
+	act_publish_fn publish = (act_publish_fn) main_sym("pssc_activity_publish");
+	act_void_fn set_idle = (act_void_fn) main_sym("pssc_activity_set_idle");
+	act_nslots_fn nslots_f = (act_nslots_fn) main_sym("pssc_activity_nslots");
+	act_tagsmax_fn tagsmax_f = (act_tagsmax_fn) main_sym("pssc_activity_tags_max");
+	act_read_fn read_f = (act_read_fn) main_sym("pssc_activity_read");
+	PsscFrame **active = (PsscFrame **) main_sym("pssc_active_frame");
+	PsscFrame	frame;
+	PsscActivityRow row;
+	instr_time	t0,
+				t1;
+	int			nslots = nslots_f();
+	TupleDesc	tupdesc;
+	Datum		values[3];
+	bool		nulls[3] = {false, false, false};
+	int			i,
+				j;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	if (loops <= 0 || tags_bytes < 0 || (Size) tags_bytes > tagsmax_f())
+		elog(ERROR, "loops must be > 0 and tags_bytes in [0, max_tagset_bytes]");
+
+	memset(&frame, 0, sizeof(frame));
+	frame.queryId = 42;
+	frame.dbid = MyDatabaseId;
+	frame.userid = GetUserId();
+	frame.encoding = GetDatabaseEncoding();
+	frame.toplevel = true;
+	frame.tags_len = tags_bytes;
+	frame.tags = palloc(Max(tags_bytes, 1));
+	for (i = 0; i < tags_bytes; i++)
+		frame.tags[i] = (i % 8 == 7) ? '\0' : 'a';
+	row.tags = palloc(Max(tagsmax_f(), 1));
+
+	INSTR_TIME_SET_CURRENT(t0);
+	for (i = 0; i < loops; i++)
+	{
+		publish(&frame);
+		set_idle();
+	}
+	INSTR_TIME_SET_CURRENT(t1);
+	INSTR_TIME_SUBTRACT(t1, t0);
+	values[0] = Float8GetDatum(INSTR_TIME_GET_DOUBLE(t1) * 1e9 / loops);
+
+	INSTR_TIME_SET_CURRENT(t0);
+	for (i = 0; i < loops; i++)
+		for (j = 0; j < nslots; j++)
+			read_f(j, &row);
+	INSTR_TIME_SET_CURRENT(t1);
+	INSTR_TIME_SUBTRACT(t1, t0);
+	values[1] = Float8GetDatum(INSTR_TIME_GET_DOUBLE(t1) * 1e9 / loops);
+	values[2] = Int32GetDatum(nslots);
+
+	if (*active != NULL)
+		(*active)->activity_seq = publish(*active);
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

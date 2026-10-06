@@ -61,6 +61,9 @@ static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static int64 executor_runs = 0;
 static int64 utility_calls = 0;
 
+/* pssc_max_backends_for_shmem() in the shared memory request function */
+static int	backends_at_request = -1;
+
 static char *guc_extra_value = NULL;
 static const char *guc_extra_current = NULL;
 
@@ -74,6 +77,7 @@ test_shmem_request(void)
 
 	RequestAddinShmemSpace(TEST_SHMEM_SIZE);
 	RequestNamedLWLockTranche(TEST_PREFIX, 1);
+	backends_at_request = pssc_max_backends_for_shmem();
 }
 
 static void
@@ -427,5 +431,29 @@ pssc_compat_test_counters_ms(PG_FUNCTION_ARGS)
 	values[4] = Float8GetDatum(pssc_ms_from_instr_time(duration));
 	values[5] = Float8GetDatum(INSTR_TIME_GET_MILLISEC(duration));
 
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/* ---- per-backend shared memory: backend count and slot index ---- */
+
+/*
+ * at_request	pssc_max_backends_for_shmem() in the shared memory request
+ *				function (PG14: _PG_init, before MaxBackends is set)
+ * max_backends	MaxBackends in this backend
+ * slot			PSSC_MY_BACKEND_SLOT()
+ */
+PG_FUNCTION_INFO_V1(pssc_compat_test_backends);
+Datum
+pssc_compat_test_backends(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[3];
+	bool		nulls[3] = {false, false, false};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	values[0] = Int32GetDatum(backends_at_request);
+	values[1] = Int32GetDatum(MaxBackends);
+	values[2] = Int32GetDatum(PSSC_MY_BACKEND_SLOT());
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

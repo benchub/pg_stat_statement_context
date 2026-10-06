@@ -51,3 +51,11 @@ AS 'MODULE_PATHNAME' LANGUAGE C VOLATILE;
 -- outlives the transaction; make = false destroys that context.
 CREATE FUNCTION pssc_context_test_leak(make bool) RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT VOLATILE;
+
+-- Microbenchmark of the activity view's writer and reader (nanoseconds per
+-- top-level statement's writes, and per read of all nslots slots).
+CREATE FUNCTION pssc_context_test_activity_bench(loops int, tags_bytes int,
+                                                 OUT write_ns float8,
+                                                 OUT read_ns float8,
+                                                 OUT nslots int)
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT VOLATILE;

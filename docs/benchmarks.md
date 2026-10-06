@@ -118,6 +118,7 @@ The configurations per workload:
 | `pgss` | pg_stat_statements only: the baseline |
 | `ext` | pgss + this extension, defaults (append mode; for `plain`, no comment at all) |
 | `ext-any` | `extractors = 'sqlcommenter(position=any), marginalia(position=any)'`: an exact scan of the whole statement |
+| `ext-activity-reader` | `ext`, plus a session that reads `pg_stat_statement_context_activity` every 1 ms during the run (see [Activity view](#activity-view)) |
 | `ext-1s-buckets` | `bucket_interval = '1s'`, `bucket_count = 50`: about 20 bucket rollovers per run |
 | `prepend/ext` | `extractors = '…(position=prepend), …'` |
 | `ext-window-1MB` | `scan_window = '1MB'`: the window covers the whole 59 KB statement, so the scan is exact rather than heuristic |
@@ -235,6 +236,53 @@ checks passed. Selected rows:
 The two `append/ext` variants (−11.0% and −0.2%) differ by more than any
 real effect, which shows the noise of a single, unpaired run. The eviction p99 is the
 only effect that reproduces clearly, matching PG 18.
+
+## Activity view
+
+The [activity view](sql-interface.md#pg_stat_statement_context_activity)
+adds a write to the backend's shared slot at the start and end of each
+top-level statement. Readers never block writers: the slot uses a change
+counter, like `pg_stat_activity`. Measured on PG 18.6 (Docker on an M1,
+`max_connections = 100`, so 136 slots).
+
+**Microbenchmark** (`pssc_context_test_activity_bench(loops, tags_bytes)` in
+`test/modules/pssc_context_test`; the cost of one publish plus one
+set-idle, the pair a statement causes, and of reading all slots):
+
+| Tag set size | Writer, per pair | Reader, all 136 slots |
+|---:|---:|---:|
+| 0 B | 5.6 ns | ~0.5–0.6 µs |
+| 30 B (typical) | 5.9 ns | |
+| 190 B | 44 ns | |
+| 512 B (`max_tagset_bytes`) | 110 ns | |
+
+A `SELECT` publishes at `ExecutorRun` and again at `ExecutorFinish`, so it
+makes two pairs. That is about 12 ns per statement with typical tags, or
+0.01% of a 0.12 ms point select.
+
+**Reading the view from SQL** (pgbench, one client, 9 backends):
+`SELECT count(*) FROM pg_stat_statement_context_activity` takes 0.077 ms,
+`pg_stat_activity` takes 0.289 ms, and the join of both takes 0.355 ms.
+
+**pgbench A/B** (`append` workload, 6 rounds of each configuration):
+
+| Tree | Configuration | ΔTPS vs pgss [min, max] | Δp99 |
+|---|---|---:|---:|
+| without the view | `append/ext` | −2.1% [−2.2%, +5.4%] | +3.2% |
+| with the view | `append/ext` | −4.6% [−5.3%, −3.7%] | +9.2% |
+| with the view | `append/ext-activity-reader` | −5.2% [−7.5%, −2.9%] | +13.2% |
+
+The two trees were run one after the other, in different sessions. The
+baselines' TPS spread was 14.6% and 22.5%, so the difference between the
+trees, 2.5 points, is within the noise ([Caveats](#caveats)). A difference
+of 12 ns per statement cannot be resolved this way; the microbenchmark is
+the measurement. A reader polling the view every 1 ms (9416 reads, 3149 of
+which saw a tagged active row) did not measurably slow the writers: −5.2%
+against −4.6%. Reproduce with:
+
+```sh
+bench/run.sh --runs 6 --only '^append/(pgss|ext|ext-activity-reader)$'
+```
 
 ## Findings
 

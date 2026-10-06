@@ -46,3 +46,8 @@ CREATE FUNCTION pssc_compat_test_counters_ms(sleep_ms int,
                                              OUT util_ms float8,
                                              OUT util_pgss float8)
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+CREATE FUNCTION pssc_compat_test_backends(OUT at_request int,
+                                          OUT max_backends int,
+                                          OUT slot int)
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

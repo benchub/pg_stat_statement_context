@@ -40,6 +40,31 @@ CREATE VIEW pg_stat_statement_context_totals AS
 GRANT SELECT ON pg_stat_statement_context TO PUBLIC;
 GRANT SELECT ON pg_stat_statement_context_totals TO PUBLIC;
 
+-- Current tags of each backend, a companion to pg_stat_activity (join on
+-- pid): one row per backend whose last top-level statement had a frame,
+-- with that statement's userid, dbid, queryid (NULL if 0) and tags; state
+-- is 'active' while it runs and 'idle' after it ended. A top-level
+-- statement without a frame (pg_stat_statement_context.enabled off, no
+-- query ID) and backend exit remove the row. For other roles' rows
+-- queryid, state and tags are NULL unless the caller has the privileges of
+-- pg_read_all_stats (checked in C), as in the statistics views.
+CREATE FUNCTION pg_stat_statement_context_activity(
+    OUT pid integer,
+    OUT userid oid,
+    OUT dbid oid,
+    OUT queryid bigint,
+    OUT state text,
+    OUT tags jsonb
+)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_stat_statement_context_activity_1_0'
+LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
+
+CREATE VIEW pg_stat_statement_context_activity AS
+    SELECT * FROM pg_stat_statement_context_activity();
+
+GRANT SELECT ON pg_stat_statement_context_activity TO PUBLIC;
+
 -- Debug function (DESIGN.md §7, §9): runs the tag-set pipeline of the
 -- executor hooks on one statement of query (located like the parser does:
 -- stmt_location -1 = the whole string, stmt_len 0 = to the end; both in

@@ -1098,9 +1098,30 @@ matches this extension's minimum supported version.
 - **Context from `application_name` (done, item -38):** a DSL extractor
   `appname(format=sqlcommenter|marginalia|regex)` (§4.2). Tags from comments
   win over `appname`-derived tags on key conflicts.
-- A `pg_stat_statement_context_activity` view showing the **current** tags of
-  each backend, as a context-aware companion to `pg_stat_activity`. It follows
-  the same visibility rules as §6.11.
+- **Activity view (done, item -39):** `pg_stat_statement_context_activity`
+  (`pid`, `userid`, `dbid`, `queryid`, `state`, `tags`) shows each backend's
+  current top-level tags, as a companion to `pg_stat_activity` (join on `pid`).
+  - Each backend owns one shared slot (MaxBackends × `max_tagset_bytes`,
+    ~75 kB at defaults), indexed by proc number (`MyProcNumber` on PG17+,
+    `MyBackendId - 1` before; shims in `src/compat.h`) and requested in
+    shmem_request/`_PG_init` like the store.
+  - Writes are lock-free with a PgBackendStatus-style changecount: only the
+    owner writes, in a critical section with barriers; readers retry until
+    the counter is stable and even. Writers never wait.
+  - A slot is published when a top-level frame starts executing (executor run
+    or utility start: no active frame, nesting level 0, not inside the
+    planner on any version, so the planner hook is installed on PG14–16 to
+    count planning depth). It is marked `idle` when the statement ends and
+    keeps the last tags, as `pg_stat_activity.query` does.
+    `ExecutorFinish` only re-marks the row active if it still belongs to the
+    same statement, so a portal that never ran (Bind→Close, Bind→Sync) or a
+    cursor dropped at COMMIT doesn't replace it. The row is cleared by a
+    top-level statement without tags resolved and at backend exit.
+  - `userid` is the role the statement executes as (`GetUserId()` at
+    publish time, not at Bind). Per §6.11, other roles' `queryid`, `state`
+    and `tags` are NULL without `pg_read_all_stats`.
+  - Cost: ~6 ns per publish/idle pair with typical tags (110 ns at 512 B);
+    reading all slots ~0.5 µs (docs/benchmarks.md). No on/off GUC.
 - **Value normalization rules (done, item -41):** per-key regex-replace rules,
   e.g. `/users/\d+` → `/users/:id`, set with `normalize` (§4.1). They run after
   rename and the allowlist/denylist, and before truncation and cardinality caps

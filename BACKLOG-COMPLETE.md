@@ -967,6 +967,19 @@ The execution-time CPU limits (item -10) don't cover compile. Options (decide an
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-39: Roadmap: `pg_stat_statement_context_activity` view
+
+**Description:** Add a view that shows the **current** tags of each backend, as a companion to `pg_stat_activity` (§8 v2). Keep per-backend shared slots, sized `MaxBackends × max_tagset_bytes`, and update them when top-level frames are activated. The visibility rules from §6.11 apply.
+
+**Acceptance criteria:**
+- The view shows the running statement's tags joinable on `pid`.
+- Tags are `NULL` for other roles without `pg_read_all_stats`.
+- Hot-path overhead is benchmarked.
+
+**Depends on:** 20261005-091225-18, 20261005-091225-20
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

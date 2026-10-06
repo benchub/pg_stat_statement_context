@@ -185,6 +185,8 @@ BOUNDARY_BUCKETS=$((DURATION + 30))
 ANY="$EXT.extractors = 'sqlcommenter(position=any), marginalia(position=any)'"
 PREPEND="$EXT.extractors = 'sqlcommenter(position=prepend), marginalia(position=prepend)'"
 # name | workload | preload | extra settings (';'-separated) | checks (','-separated) | baseline
+#   [| reader]   activity: a session reads ${EXT}_activity every 1 ms during
+#                the measured run (a monitoring stress test, check "reader")
 CONFIGS=(
 	"plain/none|plain|none||none|plain/pgss"
 	"plain/pgss|plain|pgss||pgss|plain/pgss"
@@ -193,6 +195,7 @@ CONFIGS=(
 	"append/pgss|append|pgss||pgss|append/pgss"
 	"append/ext|append|ext||tagged|append/pgss"
 	"append/ext-any|append|ext|$ANY|tagged|append/pgss"
+	"append/ext-activity-reader|append|ext||tagged,reader|append/pgss|activity"
 	"append/ext-1s-buckets|append|ext|$EXT.bucket_interval = '1s';$EXT.bucket_count = $BOUNDARY_BUCKETS|tagged,buckets|append/pgss"
 	"prepend/pgss|prepend|pgss||pgss|prepend/pgss"
 	"prepend/ext|prepend|ext|$PREPEND|tagged|prepend/pgss"
@@ -260,6 +263,13 @@ check_run() {
 			c=$((DURATION - 2))
 			[ "$rows" -ge "$c" ] && [ "$rows" -ge 2 ] || fail "only $rows live buckets (expected >= $c): no bucket rollovers?"
 			;;
+		reader)
+			# "reads active_tagged" from the reader's NOTICE
+			read -r c rows <<< "$(sed -n 's/.*NOTICE:  reads=\([0-9]*\) active_tagged=\([0-9]*\).*/\1 \2/p' "$READER_OUT")"
+			add reader_reads "${c:-0}"; add reader_active_tagged "${rows:-0}"
+			[ "${c:-0}" -gt 0 ] || fail "the activity reader made no reads"
+			[ "${rows:-0}" -gt 0 ] || fail "the activity reader saw no active tagged statement"
+			;;
 		evict)
 			info=$(q "SELECT dealloc || ' ' || evicted_entries || ' ' || entries || ' ' || max_entries FROM ${EXT}_info()")
 			read -r d e n m <<< "$info"
@@ -273,6 +283,27 @@ check_run() {
 		esac
 	done
 	echo "{$json}"
+}
+
+# Reads the activity view every 1 ms for $DURATION s (in the background,
+# from a server backend), then reports its reads and the active tagged
+# rows it saw.
+READER_OUT=$WORK/reader.out
+start_reader() {
+	as_pg "$PGBIN/psql" -X -q -h "$SOCK" -d bench -v ON_ERROR_STOP=1 -c "
+	DO \$\$
+	DECLARE n bigint := 0; a bigint := 0; c bigint;
+	        stop timestamptz := clock_timestamp() + interval '$DURATION s';
+	BEGIN
+	  WHILE clock_timestamp() < stop LOOP
+	    SELECT count(*) FILTER (WHERE state = 'active' AND tags ? 'controller')
+	      INTO c FROM ${EXT}_activity;
+	    a := a + c; n := n + 1;
+	    PERFORM pg_sleep(0.001);
+	  END LOOP;
+	  RAISE NOTICE 'reads=% active_tagged=%', n, a;
+	END \$\$" > "$READER_OUT" 2>&1 &
+	READER_PID=$!
 }
 
 TOTAL=0
@@ -289,7 +320,7 @@ for run in $(seq 1 "$RUNS"); do
 	if [ $((run % 2)) = 1 ]; then idx=$(seq 0 $((${#CONFIGS[@]} - 1))); else idx=$(seq $((${#CONFIGS[@]} - 1)) -1 0); fi
 	for i in $idx; do
 		cfg=${CONFIGS[$i]}
-		IFS='|' read -r name workload preload settings checks baseline <<< "$cfg"
+		IFS='|' read -r name workload preload settings checks baseline reader <<< "$cfg"
 		order=$((i + 1))
 		[[ -z $ONLY || $name =~ $ONLY ]] || continue
 		write_conf "$(preload_list "$preload")" "$settings"
@@ -303,10 +334,14 @@ for run in $(seq 1 "$RUNS"); do
 			if [ "$preload" = ext ]; then q "SELECT ${EXT}_reset()" >/dev/null; fi
 			rm -f "$LOGS"/*
 			before=$(cpu_sample)
+			if [ "$reader" = activity ]; then start_reader; fi
 			if ! pgbench -n -M simple -c "$CLIENTS" -j "$THREADS" -T "$DURATION" -f "$script" \
 				--log --log-prefix="$LOGS/tx" bench > "$OUT/runs/$tag.pgbench.txt" 2>&1; then
 				cat "$OUT/runs/$tag.pgbench.txt" >&2
 				fail "$name: pgbench failed"
+			fi
+			if [ "$reader" = activity ]; then
+				wait "$READER_PID" || { cat "$READER_OUT" >&2; fail "$name: activity reader failed"; }
 			fi
 			foreign=$(foreign_cores "$before" "$(cpu_sample)")
 			if [ "$foreign" = null ] || [ "$attempt" = "$ATTEMPTS" ] \
