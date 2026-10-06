@@ -19,9 +19,17 @@
  * inserting (and resetting) takes the exclusive lock. Tag extraction and
  * key building happen before any lock is taken.
  *
- * Until backlog item 20261005-091225-15 (eviction) lands, a record whose
- * key is new while the table holds max_entries entries is dropped and
- * counted in the dropped_records header counter.
+ * Eviction (§5.3): a record whose key is new while the table holds
+ * max_entries entries first runs an eviction pass under the exclusive lock
+ * (store_evict() in store.c): every dead entry is reclaimed, every
+ * surviving entry's usage decays by 0.99 (as in pgss), and if fewer than
+ * max(1, max_entries * 5 / 100) entries were freed (pssc_evict_target()),
+ * live entries are evicted in order of last_bucket, then usage, both
+ * ascending (pssc_evict_sort()), until that many are. dealloc counts the
+ * passes, evicted_entries every entry removed (dead or live). The new
+ * entry is then inserted. Only if the pass freed nothing (the sort array
+ * could not be allocated and no entry was dead) is the record dropped and
+ * counted in dropped_records; the statement never fails.
  *
  * Time buckets (§5.2). The header holds the epoch, bucket_interval,
  * bucket_count and current_bucket. The epoch is the postmaster's start time
@@ -105,7 +113,8 @@ typedef enum PsscStoreResult
 	PSSC_STORE_UPDATED,			/* existing entry, shared-lock fast path */
 	PSSC_STORE_INSERTED,		/* new entry, exclusive-lock slow path */
 	PSSC_STORE_FOUND_LATE,		/* another backend inserted it first */
-	PSSC_STORE_FULL,			/* table at max_entries: dropped, counted */
+	PSSC_STORE_FULL,			/* no room even after eviction: dropped,
+								 * counted in dropped_records */
 	PSSC_STORE_UNAVAILABLE		/* shared memory not set up (not preloaded) */
 } PsscStoreResult;
 
@@ -115,14 +124,14 @@ typedef struct PsscStoreCounters
 	int64		entries;
 	int64		hash_entries;	/* hash_get_num_entries(), for cross-checks */
 	int64		max_entries;
-	int64		dealloc;
-	int64		evicted_entries;
+	int64		dealloc;		/* eviction passes */
+	int64		evicted_entries;	/* entries they removed, dead or live */
 	int64		invalid_tags;
 	int64		dropped_tags;
 	int64		regex_compile_failures;
 	int64		heuristic_scans;
 	int64		utility_missing_queryid;
-	int64		dropped_records;	/* records lost to a full table */
+	int64		dropped_records;	/* records lost: no room after eviction */
 	TimestampTz stats_reset;
 	Size		shmem_bytes;	/* exactly what was requested */
 	Size		keysize;
@@ -286,6 +295,14 @@ typedef void (*PsscStoreRecordTestHook) (void *arg);
 /* (The hook runs after the record has computed its bucket id.) */
 extern PGDLLEXPORT void pssc_store_set_record_test_hook(PsscStoreRecordTestHook hook,
 														void *arg);
+
+/*
+ * Testing aid: the next eviction pass in this backend behaves as if its
+ * sort array could not be allocated (it still reclaims dead entries).
+ * One-shot; the flag is cleared by that pass whether or not it needed the
+ * array. Reachable only from C (test/modules/pssc_store_test).
+ */
+extern PGDLLEXPORT void pssc_store_debug_fail_next_eviction_alloc(void);
 
 /*
  * Testing aid (DESIGN.md §9): a debug clock for clock steps and bucket

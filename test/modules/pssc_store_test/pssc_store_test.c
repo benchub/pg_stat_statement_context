@@ -505,3 +505,11 @@ pssc_store_test_stall_next_record(PG_FUNCTION_ARGS)
 	((set_hook_fn) main_sym("pssc_store_set_record_test_hook")) (stall_hook, NULL);
 	PG_RETURN_VOID();
 }
+
+PG_FUNCTION_INFO_V1(pssc_store_test_fail_next_eviction_alloc);
+Datum
+pssc_store_test_fail_next_eviction_alloc(PG_FUNCTION_ARGS)
+{
+	((void_fn) main_sym("pssc_store_debug_fail_next_eviction_alloc")) ();
+	PG_RETURN_VOID();
+}

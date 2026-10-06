@@ -16,7 +16,7 @@
  *
  * Backend-independent like tagset.c: test/unit builds counters.c with
  * -DPSSC_STANDALONE. Callers serialize access (the entry spinlock, §5.4);
- * nothing here locks or allocates. The backend-only part at the end is two
+ * nothing here locks or allocates (pssc_evict_sort() sorts in place). The backend-only part at the end is two
  * thin conversions to milliseconds, done exactly as pgss does.
  */
 #ifndef PSSC_COUNTERS_H
@@ -123,6 +123,37 @@ extern void pssc_slot_merge(PsscSlot *dst, const PsscSlot *src);
 extern double pssc_usage_init(void);
 extern void pssc_usage_exec(double *usage);
 extern void pssc_usage_decay(double *usage);
+
+/*
+ * Eviction planning (§5.3), pure helpers for store.c's eviction pass.
+ *
+ * pssc_evict_target: how many entries a pass aims to free,
+ * max(1, max_entries * PSSC_EVICT_PERCENT / 100) with integer division
+ * (pgss's USAGE_DEALLOC_PERCENT; pgss also frees at least 10, but here
+ * max_entries is >= 100, so the floor of 1 only guards tiny values).
+ *
+ * pssc_evict_live_count: how many live entries to evict once dead_freed
+ * dead entries have been reclaimed (all dead entries are always reclaimed,
+ * even beyond the target): max(0, target - dead_freed), at most nlive.
+ *
+ * pssc_evict_cmp / pssc_evict_sort: eviction order of live entries,
+ * last_bucket ascending (least recently written first), then usage
+ * ascending (least used first); ties compare equal (their order is
+ * unspecified). entry is opaque here (the store's hash entry).
+ */
+#define PSSC_EVICT_PERCENT	5
+
+typedef struct PsscEvictCandidate
+{
+	int64		last_bucket;
+	double		usage;
+	void	   *entry;
+} PsscEvictCandidate;
+
+extern PGDLLEXPORT int64 pssc_evict_target(int64 max_entries);
+extern PGDLLEXPORT int64 pssc_evict_live_count(int64 target, int64 dead_freed, int64 nlive);
+extern PGDLLEXPORT int pssc_evict_cmp(const void *a, const void *b);
+extern PGDLLEXPORT void pssc_evict_sort(PsscEvictCandidate *cands, size_t n);
 
 /* Seconds to milliseconds, as pgss converts queryDesc->totaltime->total. */
 static inline double

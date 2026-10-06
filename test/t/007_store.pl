@@ -1,7 +1,8 @@
 # Shared store core (DESIGN.md §3.1 item 4, §5.1, §5.4, §9; backlog
 # 20261005-091225-13): shared memory sizing and request, the hash table with
 # custom hash/compare, the per-entry bucket ring, locking under concurrent
-# recording (pgbench), max_entries enforcement, forced hash collisions,
+# recording (pgbench), max_entries enforcement (eviction itself is
+# test/t/009_eviction.pl), forced hash collisions,
 # header counters and reset. The store is driven through the TEST-ONLY
 # module test/modules/pssc_store_test (make install-test-modules).
 use strict;
@@ -184,11 +185,13 @@ sub pgbench
 	is($c->{shmem_bytes}, sql('SELECT pssc_store_test_shmem_size_for(20000, 512, 12)'),
 		'larger max_entries: shmem_bytes equals the formula');
 	is(sql(q{SELECT count(*) FROM generate_series(1, 20001) q
-	         WHERE pssc_store_test_record(q) = 'inserted'}), 20000,
-		'20000 entries inserted');
+	         WHERE pssc_store_test_record(q) = 'inserted'}), 20001,
+		'20001 entries inserted');
 	$c = counters();
-	is("$c->{entries} $c->{hash_entries} $c->{dropped_records}", '20000 20000 1',
-		'the 20001st entry is dropped and counted');
+	# the 20001st insert ran one eviction pass (§5.3): 5% of 20000 freed
+	is("$c->{entries} $c->{hash_entries} $c->{dealloc} $c->{evicted_entries} "
+		  . "$c->{dropped_records}", '19001 19001 1 1000 0',
+		'the 20001st insert evicts 1000 entries (5%) and succeeds');
 }
 
 # ------------------------------------------------- key, entry and the ring
@@ -344,21 +347,23 @@ configure(max_entries => 100);
 	is(sql(q{SELECT string_agg(r || ':' || n, ' ' ORDER BY r) FROM
 	         (SELECT pssc_store_test_record(q) r, count(*) n
 	            FROM generate_series(1, 150) q GROUP BY 1) s}),
-		'full:50 inserted:100', 'a full table drops new keys');
+		'inserted:150', 'a full table evicts to make room for new keys');
 	my $c = counters();
-	is("$c->{entries} $c->{hash_entries} $c->{dropped_records}", '100 100 50',
-		'entries capped at max_entries; drops counted in dropped_records');
-	is(rec(q{1}), 'updated', 'existing keys are still recorded when full');
+	is("$c->{entries} $c->{hash_entries} $c->{dealloc} $c->{evicted_entries} "
+		  . "$c->{dropped_records}", '100 100 10 50 0',
+		'entries capped at max_entries; 10 passes of 5 evictions, nothing dropped');
+	is(rec(q{150}), 'updated', 'existing keys are still recorded when full');
 
 	sql('SELECT pssc_store_test_reset()');
 	my $n = pgbench(q{\set q random(1, 1000)
 SELECT pssc_store_test_record(:q);
 }, 8, 500);
 	$c = counters();
-	is("$c->{entries} $c->{hash_entries}", '100 100',
-		'concurrent inserts never exceed max_entries');
-	is(sql('SELECT sum(calls) FROM pssc_store_test_entries()') + $c->{dropped_records}, $n,
-		'every concurrent record is either stored or counted as dropped');
+	ok($c->{entries} >= 96 && $c->{entries} <= 100 && $c->{entries} == $c->{hash_entries},
+		"concurrent inserts never exceed max_entries ($c->{entries})");
+	is($c->{dropped_records}, 0, 'concurrent records into a full table are not dropped');
+	ok(sql('SELECT sum(calls) FROM pssc_store_test_entries()') <= $n,
+		'stored calls do not exceed the records');
 }
 
 $node->stop;

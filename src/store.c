@@ -37,7 +37,7 @@ typedef struct PsscEntryHeader
 	slock_t		mutex;			/* protects everything below and the slots */
 	int			encoding;		/* of tags[] (that of key.dbid) */
 	int64		last_bucket;	/* newest bucket_id written */
-	double		usage;			/* pgss-style, for eviction (item -15) */
+	double		usage;			/* pgss-style, for eviction (§5.3) */
 } PsscEntryHeader;
 
 /* Shared header. */
@@ -80,8 +80,8 @@ typedef struct PsscSharedState
 
 	/* under the lock (exclusive to change) */
 	int64		entries;
-	int64		dealloc;
-	int64		evicted_entries;
+	int64		dealloc;		/* eviction passes (§5.3) */
+	int64		evicted_entries;	/* entries removed by them, dead or live */
 	TimestampTz stats_reset;
 
 	/* updated without the lock */
@@ -90,7 +90,8 @@ typedef struct PsscSharedState
 	pg_atomic_uint64 regex_compile_failures;
 	pg_atomic_uint64 heuristic_scans;
 	pg_atomic_uint64 utility_missing_queryid;
-	pg_atomic_uint64 dropped_records;	/* new keys dropped: table full */
+	pg_atomic_uint64 dropped_records;	/* new keys dropped: no room even
+										 * after an eviction pass */
 } PsscSharedState;
 
 static pssc_shmem_request_hook_type prev_shmem_request_hook = NULL;
@@ -106,6 +107,9 @@ static Size store_keysize = 0;
 
 static PsscStoreRecordTestHook record_test_hook = NULL;
 static void *record_test_hook_arg = NULL;
+
+/* Testing aid: the next eviction pass in this backend cannot allocate. */
+static bool debug_fail_next_eviction_alloc = false;
 
 #define ENTRY_HEADER_OFFSET(keysize) (keysize)
 #define ENTRY_SLOTS_OFFSET(keysize) \
@@ -508,6 +512,117 @@ entry_accum(void *entry, double elapsed_ms)
 	return bucket_id;
 }
 
+/*
+ * One eviction pass (§5.3); the caller holds the exclusive lock and found
+ * the table at max_entries. Returns the number of entries removed.
+ *
+ *	1. Raise current_bucket to the clock, as readers do, and reclaim every
+ *	   dead entry (no slot in the live window) in one scan; every surviving
+ *	   entry's usage decays by PSSC_USAGE_DECREASE_FACTOR, as in pgss's
+ *	   entry_dealloc(). The scan allocates nothing.
+ *	2. If that freed fewer than pssc_evict_target() entries, copy
+ *	   (last_bucket, usage) of every live entry into an array, sort it by
+ *	   last_bucket then usage (pssc_evict_sort()) and evict from the front
+ *	   until the target is free.
+ *	3. dealloc += 1; evicted_entries += every entry removed, dead or live.
+ *
+ * The entry fields are read and written without the entry spinlocks: those
+ * are only ever taken by a backend holding the table lock (writers and
+ * readers alike take it in shared mode), so under the exclusive lock nobody
+ * else can be touching any entry.
+ *
+ * The array in step 2 is allocated with MCXT_ALLOC_NO_OOM in the caller's
+ * (short-lived) memory context: recording runs inside user statements, so
+ * an out-of-memory condition must not fail the statement. If it cannot be
+ * allocated, only the dead entries are freed; the caller then drops its
+ * record (dropped_records) if that left no room. Nothing between the
+ * allocation and the pfree can raise an ERROR, and the table is consistent
+ * after every single removal.
+ */
+static int64
+store_evict(void)
+{
+	HASH_SEQ_STATUS seq;
+	void	   *entry;
+	int			count = store_state->bucket_count;
+	int64		current;
+	int64		target;
+	int64		dead = 0;
+	int64		nlive = 0;
+	int64		nvictims;
+	int64		evicted = 0;
+	bool		fail_alloc = debug_fail_next_eviction_alloc;
+
+	Assert(LWLockHeldByMeInMode(store_state->lock, LW_EXCLUSIVE));
+	debug_fail_next_eviction_alloc = false;
+
+	/*
+	 * The same watermark readers use (§5.2): an entry dead here is hidden
+	 * from every reader already, and stays dead because it never decreases.
+	 * Only lock holders advance it, so it is stable while we hold the lock.
+	 */
+	current = observe_current_bucket(PSSC_BUCKET_NONE);
+	target = pssc_evict_target(store_state->max_entries);
+
+	/* deleting the entry just returned by hash_seq_search() is allowed */
+	hash_seq_init(&seq, store_htab);
+	while ((entry = hash_seq_search(&seq)) != NULL)
+	{
+		PsscEntryHeader *hdr = entry_header(entry);
+
+		if (pssc_bucket_entry_is_dead(hdr->last_bucket, current, count))
+		{
+			hash_search(store_htab, entry, HASH_REMOVE, NULL);
+			dead++;
+		}
+		else
+		{
+			pssc_usage_decay(&hdr->usage);
+			nlive++;
+		}
+	}
+	evicted = dead;
+
+	nvictims = pssc_evict_live_count(target, dead, nlive);
+	if (nvictims > 0)
+	{
+		PsscEvictCandidate *cands = NULL;
+
+		if (!fail_alloc)
+			cands = MemoryContextAllocExtended(CurrentMemoryContext,
+											   (Size) nlive * sizeof(PsscEvictCandidate),
+											   MCXT_ALLOC_HUGE | MCXT_ALLOC_NO_OOM);
+		if (cands != NULL)
+		{
+			int64		n = 0;
+
+			hash_seq_init(&seq, store_htab);
+			while ((entry = hash_seq_search(&seq)) != NULL)
+			{
+				PsscEntryHeader *hdr = entry_header(entry);
+
+				Assert(n < nlive);
+				cands[n].last_bucket = hdr->last_bucket;
+				cands[n].usage = hdr->usage;
+				cands[n].entry = entry;
+				n++;
+			}
+			Assert(n == nlive);
+			pssc_evict_sort(cands, (size_t) n);
+			for (int64 i = 0; i < nvictims; i++)
+				hash_search(store_htab, cands[i].entry, HASH_REMOVE, NULL);
+			evicted += nvictims;
+			pfree(cands);
+		}
+	}
+
+	store_state->entries -= evicted;
+	store_state->dealloc++;
+	store_state->evicted_entries += evicted;
+	Assert(store_state->entries == hash_get_num_entries(store_htab));
+	return evicted;
+}
+
 PsscStoreResult
 pssc_store_record(const PsscKey *key, double elapsed_ms)
 {
@@ -568,22 +683,26 @@ pssc_store_record_at(const PsscKey *key, int64 bucket_id, double elapsed_ms)
 	LWLockAcquire(store_state->lock, LW_EXCLUSIVE);
 	(void) observe_current_bucket(bucket_id);	/* the clock moved while waiting */
 	hash = key_hash_effective(normal);	/* the mode may have changed */
-	if (store_state->entries < store_state->max_entries)
-	{
-		entry = hash_search_with_hash_value(store_htab, key, hash,
-											HASH_ENTER_NULL, &found);
-		if (entry != NULL && !found)
-		{
-			entry_init(entry);
-			store_state->entries++;
-		}
-		result = found ? PSSC_STORE_FOUND_LATE : PSSC_STORE_INSERTED;
-	}
+	entry = hash_search_with_hash_value(store_htab, key, hash, HASH_FIND, NULL);
+	if (entry != NULL)
+		result = PSSC_STORE_FOUND_LATE;
 	else
 	{
-		/* Full: only an existing key may be recorded (no eviction yet, -15). */
-		entry = hash_search_with_hash_value(store_htab, key, hash, HASH_FIND, NULL);
-		result = PSSC_STORE_FOUND_LATE;
+		/* §5.3: make room first (the new key cannot be among the victims) */
+		if (store_state->entries >= store_state->max_entries)
+			(void) store_evict();
+		if (store_state->entries < store_state->max_entries)
+		{
+			entry = hash_search_with_hash_value(store_htab, key, hash,
+												HASH_ENTER_NULL, &found);
+			if (entry != NULL)
+			{
+				Assert(!found);
+				entry_init(entry);
+				store_state->entries++;
+			}
+		}
+		result = PSSC_STORE_INSERTED;
 	}
 
 	if (entry == NULL)
@@ -755,6 +874,12 @@ pssc_store_debug_force_collisions(bool on)
 	}
 	store_state->force_collisions = on;
 	LWLockRelease(store_state->lock);
+}
+
+void
+pssc_store_debug_fail_next_eviction_alloc(void)
+{
+	debug_fail_next_eviction_alloc = true;
 }
 
 void

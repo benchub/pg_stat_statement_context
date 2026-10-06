@@ -382,6 +382,25 @@ Testing:
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-15: Eviction under pressure (dead entries first, then pgss-style)
+
+**Description:** Implement §5.3. When an insert finds the table at `max_entries`, under the exclusive lock:
+1. Reclaim dead entries: those whose `last_bucket` is older than the live window, so all slots have expired.
+2. If that frees less than ~5% of `max_entries`, evict further entries ordered by `last_bucket` (oldest first), then by `usage` (lowest first), until ~5% is free. Decay `usage` pgss-style.
+3. Increment `dealloc` (once per pass) and `evicted_entries` (per entry).
+
+The insert that triggered eviction must then succeed.
+
+**Acceptance criteria:**
+- In a small-`max_entries` churn test, the entry count never exceeds the limit and the counters increase.
+- Dead entries are reclaimed before any live entry is evicted.
+- Among live entries, the least recently written are evicted first.
+- Task 20261005-091225-26 measures the latency of an eviction pass (a full-table scan and sort, as in pgss).
+
+**Depends on:** 20261005-091225-14
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

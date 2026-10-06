@@ -5,8 +5,8 @@
 #   test_pairs.c  SQLCommenter / marginalia pair parsers, pssc_comment_body
 #   test_tagset.c tag-set pipeline and extractor chain (src/tagset.c, built
 #                 with -DPSSC_STANDALONE and the c.h shim pssc_standalone.h)
-#   test_counters.c per-bucket counter slot and pgss-style usage
-#                 (src/counters.c, built with -DPSSC_STANDALONE)
+#   test_counters.c per-bucket counter slot, pgss-style usage and eviction
+#                 ordering/target (src/counters.c, built with -DPSSC_STANDALONE)
 #   make -C test/unit          build and run (top-level: make unittest)
 #   make -C test/unit corpus   write the case inputs to corpus/ (fuzz seeds)
 # test_counters is a single ASan/UBSan build. The others each run as two

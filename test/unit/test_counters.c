@@ -1,7 +1,8 @@
 /*
  * test_counters.c
  *		Standalone unit tests for src/counters.c, the per-bucket counter slot
- *		(DESIGN.md §5.1, §5.2, §7) and the pgss-style usage (§5.3). Built
+ *		(DESIGN.md §5.1, §5.2, §7), the pgss-style usage and the eviction
+ *		target and ordering (§5.3). Built
  *		with -DPSSC_STANDALONE under ASan/UBSan (no server needed).
  *
  * All double comparisons are exact: the functions must compute precisely
@@ -534,6 +535,99 @@ test_ring_check(void)
 	CHECK(pssc_ring_check(r, 4, 9, 9, &bad) == NULL, "valid again");
 }
 
+/* §5.3: an eviction pass aims to free max(1, max_entries * 5 / 100) entries */
+static void
+test_evict_target(void)
+{
+	const struct
+	{
+		int64		max_entries;
+		int64		want;
+	}			cases[] = {
+		{1, 1}, {19, 1}, {20, 1}, {39, 1}, {40, 2}, {100, 5}, {119, 5},
+		{120, 6}, {10000, 500}, {20000, 1000}, {1073741823, 53687091},
+	};
+	size_t		i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+	{
+		int64		got = pssc_evict_target(cases[i].max_entries);
+
+		CHECK(got == cases[i].want, "evict target(%lld) = %lld, want %lld",
+			  (long long) cases[i].max_entries, (long long) got,
+			  (long long) cases[i].want);
+	}
+	CHECK(PSSC_EVICT_PERCENT == 5, "pgss USAGE_DEALLOC_PERCENT");
+}
+
+/* live entries still to evict once the dead ones have been reclaimed */
+static void
+test_evict_live_count(void)
+{
+	CHECK(pssc_evict_live_count(5, 0, 100) == 5, "no dead: evict the target");
+	CHECK(pssc_evict_live_count(5, 2, 98) == 3, "2 dead: 3 live");
+	CHECK(pssc_evict_live_count(5, 5, 95) == 0, "dead reach the target: no live");
+	CHECK(pssc_evict_live_count(5, 30, 70) == 0, "more dead than the target: no live");
+	CHECK(pssc_evict_live_count(5, 0, 3) == 3, "never more than the live entries");
+	CHECK(pssc_evict_live_count(5, 1, 0) == 0, "no live entries");
+	CHECK(pssc_evict_live_count(1, 0, 1) == 1, "target 1, one live");
+}
+
+static PsscEvictCandidate
+cand(int64 last_bucket, double usage, int id)
+{
+	PsscEvictCandidate c;
+
+	memset(&c, 0, sizeof(c));
+	c.last_bucket = last_bucket;
+	c.usage = usage;
+	c.entry = (void *) (intptr_t) id;
+	return c;
+}
+
+/* order: last_bucket ascending (least recently written first), then usage */
+static void
+test_evict_order(void)
+{
+	PsscEvictCandidate a = cand(5, 100.0, 1);
+	PsscEvictCandidate b = cand(6, 1.0, 2);
+	PsscEvictCandidate c = cand(6, 2.0, 3);
+	PsscEvictCandidate d = cand(6, 2.0, 4);
+	PsscEvictCandidate e = cand(-3, 50.0, 5);
+	PsscEvictCandidate arr[9];
+	const int	want[] = {9, 5, 1, 8, 2, 6, 7, 3, 4};
+	int			i;
+
+	CHECK(pssc_evict_cmp(&a, &b) < 0, "older bucket first despite higher usage");
+	CHECK(pssc_evict_cmp(&b, &a) > 0, "newer bucket after");
+	CHECK(pssc_evict_cmp(&b, &c) < 0, "same bucket: lower usage first");
+	CHECK(pssc_evict_cmp(&c, &b) > 0, "same bucket: higher usage after");
+	CHECK(pssc_evict_cmp(&c, &d) == 0, "same bucket and usage: equal");
+	CHECK(pssc_evict_cmp(&e, &a) < 0, "negative bucket ids are older");
+	CHECK(pssc_evict_cmp(&a, &a) == 0, "reflexive");
+
+	/* far-apart ids must not be compared by subtraction (overflow) */
+	a = cand(INT64_MAX, 1.0, 1);
+	e = cand(INT64_MIN + 1, 1.0, 2);
+	CHECK(pssc_evict_cmp(&e, &a) < 0 && pssc_evict_cmp(&a, &e) > 0,
+		  "extreme ids compare without overflow");
+
+	arr[0] = cand(7, 3.0, 3);
+	arr[1] = cand(5, 9.0, 1);
+	arr[2] = cand(7, 9.5, 4);
+	arr[3] = cand(6, 0.5, 8);
+	arr[4] = cand(7, 1.0, 2);
+	arr[5] = cand(7, 1.5, 6);
+	arr[6] = cand(2, 2.0, 5);
+	arr[7] = cand(7, 2.0, 7);
+	arr[8] = cand(-1, 99.0, 9);
+	pssc_evict_sort(arr, 9);
+	for (i = 0; i < 9; i++)
+		CHECK((int) (intptr_t) arr[i].entry == want[i], "sorted[%d] = %d, want %d",
+			  i, (int) (intptr_t) arr[i].entry, want[i]);
+	pssc_evict_sort(arr, 0);	/* empty is fine */
+}
+
 int
 main(void)
 {
@@ -552,6 +646,9 @@ main(void)
 	test_merge_matches_accum();
 	test_ms_from_seconds();
 	test_usage();
+	test_evict_target();
+	test_evict_live_count();
+	test_evict_order();
 
 	if (failures)
 	{

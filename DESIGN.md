@@ -433,8 +433,9 @@ and `bucket_count` (`keysize + MAXALIGN(entry header) + bucket_count × 24`). Sh
 With the defaults, an entry is on the order of 1 KB, dominated by the tag set.
 `_info()` reports the exact `shmem_bytes` value.
 
-Until eviction (§5.3, item -15) lands, a record that finds the table full is
-dropped and counted in the header counter `dropped_records`. Testing (§9) uses
+A record is dropped and counted in the header counter `dropped_records` only
+when an eviction pass (§5.3) freed nothing: no entry was dead and the sort
+array could not be allocated. Testing (§9) uses
 a forced-collision mode, set only through the test module and only while the
 table is empty. The effective hash is chosen under the table lock.
 
@@ -501,6 +502,22 @@ If an insert finds the table at `max_entries`, then under the exclusive lock:
 
 As in pgss, an eviction pass scans and sorts the whole table. That cost is paid
 only when the table is full; the benchmarks measure it (§9).
+
+Details (decided 2026-10-05, item -15):
+- **Target:** each pass aims to free `max(1, max_entries * 5 / 100)` entries.
+- **Dead entries:** the pass first raises `current_bucket` to the clock, as
+  readers do. One scan then reclaims *all* dead entries, even beyond the
+  target, without allocating anything.
+- **Live entries:** these are evicted only when the dead entries fall short of
+  the target.
+- **Decay:** every surviving entry's `usage` is multiplied by 0.99 on every
+  pass, as in pgss.
+- **No entry spinlocks:** every path that takes an entry spinlock holds the
+  table lock (shared), so the pass reads and writes `last_bucket` and `usage`
+  without spinlocks while it holds the exclusive lock.
+- **Out of memory:** the sort array is allocated with `MCXT_ALLOC_NO_OOM`. If
+  that fails, only dead entries are reclaimed. The user's statement never
+  fails, and `dealloc` still counts the pass.
 
 ### 5.4 Locking
 

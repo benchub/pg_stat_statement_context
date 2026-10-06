@@ -53,7 +53,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
 | 20261005-091225-11 | Debug extract function and scanner/extractor regression suite | 20261005-091225-9, 20261005-091225-10 | no | ready |
-| 20261005-091225-15 | Eviction under pressure (dead entries first, then pgss-style) | 20261005-091225-14 | no | ready |
 | 20261005-091225-16 | Execution frames and active-frame tracking | 20261005-091225-9 | no | ready |
 | 20261005-091225-17 | Executor hooks and recording | 20261005-091225-12, 20261005-091225-14, 20261005-091225-16 | no | blocked-on-deps |
 | 20261005-091225-18 | `ProcessUtility` hook | 20261005-091225-17 | no | blocked-on-deps |
@@ -71,7 +70,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-30 | Roadmap: `tags_override` session/transaction context | 20261005-091225-18, 20261005-091225-27 | no | blocked-on-deps |
 | 20261005-091225-32 | Roadmap: per-key cardinality caps (overflow → JSON `null`) | 20261005-091225-17, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | blocked-on-deps |
-| 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | blocked-on-deps |
+| 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | blocked-on-deps |
 | 20261005-091225-38 | Roadmap: context from `application_name` | 20261005-091225-9, 20261005-091225-17 | no | blocked-on-deps |
 | 20261005-091225-39 | Roadmap: `pg_stat_statement_context_activity` view | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
@@ -224,25 +223,6 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 - Any version-specific expected output uses alternative expected files, with a comment explaining why.
 
 **Depends on:** 20261005-091225-9, 20261005-091225-10
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-15: Eviction under pressure (dead entries first, then pgss-style)
-
-**Description:** Implement §5.3. When an insert finds the table at `max_entries`, under the exclusive lock:
-1. Reclaim dead entries: those whose `last_bucket` is older than the live window, so all slots have expired.
-2. If that frees less than ~5% of `max_entries`, evict further entries ordered by `last_bucket` (oldest first), then by `usage` (lowest first), until ~5% is free. Decay `usage` pgss-style.
-3. Increment `dealloc` (once per pass) and `evicted_entries` (per entry).
-
-The insert that triggered eviction must then succeed.
-
-**Acceptance criteria:**
-- In a small-`max_entries` churn test, the entry count never exceeds the limit and the counters increase.
-- Dead entries are reclaimed before any live entry is evicted.
-- Among live entries, the least recently written are evicted first.
-- Task 20261005-091225-26 measures the latency of an eviction pass (a full-table scan and sort, as in pgss).
-
-**Depends on:** 20261005-091225-14
 **Open questions:** none
 **Status:** ready
 
@@ -689,7 +669,7 @@ If task 20261005-091225-27 decides on go, this task moves into v1.
 
 **Depends on:** 20261005-091225-15
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261005-091225-35: Roadmap: persist stats across clean restarts
 

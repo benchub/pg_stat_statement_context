@@ -75,6 +75,48 @@ pssc_usage_decay(double *usage)
 }
 
 int64
+pssc_evict_target(int64 max_entries)
+{
+	/* max_entries <= INT_MAX, so the product cannot overflow an int64 */
+	int64		target = max_entries * PSSC_EVICT_PERCENT / 100;
+
+	return target < 1 ? 1 : target;
+}
+
+int64
+pssc_evict_live_count(int64 target, int64 dead_freed, int64 nlive)
+{
+	int64		n;
+
+	if (dead_freed >= target)
+		return 0;
+	n = target - dead_freed;
+	return n < nlive ? n : nlive;
+}
+
+int
+pssc_evict_cmp(const void *a, const void *b)
+{
+	const PsscEvictCandidate *ca = (const PsscEvictCandidate *) a;
+	const PsscEvictCandidate *cb = (const PsscEvictCandidate *) b;
+
+	if (ca->last_bucket != cb->last_bucket)
+		return ca->last_bucket < cb->last_bucket ? -1 : 1;
+	if (ca->usage < cb->usage)
+		return -1;
+	if (ca->usage > cb->usage)
+		return 1;
+	return 0;
+}
+
+void
+pssc_evict_sort(PsscEvictCandidate *cands, size_t n)
+{
+	if (n > 1)
+		qsort(cands, n, sizeof(PsscEvictCandidate), pssc_evict_cmp);
+}
+
+int64
 pssc_bucket_floor_div(int64 a, int64 b)
 {
 	int64		q = a / b;		/* truncates toward zero; b > 0 */
