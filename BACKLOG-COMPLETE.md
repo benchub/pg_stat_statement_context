@@ -549,6 +549,22 @@ Write `pg_regress` tests (`test/sql`, `test/expected`) for every item in the fir
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-19: `shared_preload_libraries` load-order detection and policy
+
+**Description:** In `_PG_init`, parse `shared_preload_libraries` and detect when `pg_stat_statements` is loaded **after** this extension. In that order, pgss's hook runs outside ours and zeroes `pstmt->queryId` before our hook sees it (§3.2, §6.12). Log a `WARNING` that explains the required order. Take no other action: utility tracking stays enabled. The runtime counter `utility_missing_queryid` already exists (task 20261005-091225-18).
+
+**Acceptance criteria:**
+- The warning is emitted exactly when the order is wrong, and utility tracking is not disabled.
+- The correct order, or no pgss at all, produces no warning.
+- The TAP tests in task 20261005-091225-22 cover both orders.
+
+**Decisions:**
+- 2026-10-05 (§11 Q7): A load-order violation produces a `WARNING` only.
+
+**Depends on:** 20261005-091225-18
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

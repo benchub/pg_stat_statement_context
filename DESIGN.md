@@ -184,7 +184,12 @@ enabled and `track_utility` is on, and it also warns that `pstmt` may be freed
 by `ROLLBACK`. This extension's hook must therefore run outside pgss's:
 `shared_preload_libraries = 'pg_stat_statements, pg_stat_statement_context'`
 (the library loaded last installs the outermost hook). `_PG_init` checks the
-order in `shared_preload_libraries` and logs a `WARNING` if it is wrong. The
+order in `shared_preload_libraries` and logs a `WARNING` if it is wrong. (Item -19: the list is parsed with `SplitDirectoriesString`, as the
+postmaster does; entries match by basename, case-insensitively on every
+platform, ignoring `.so`/`.dylib`/`.dll`/`.sl`; only each library's first entry
+counts; the check is skipped when `IsUnderPostmaster`, so EXEC_BACKEND children
+don't repeat it. The HINT reads
+`shared_preload_libraries = 'pg_stat_statements, pg_stat_statement_context'`.) The
 warning is the only action: utility tracking is not disabled (decided
 2026-10-05, §11 Q7). At
 runtime, utility calls that arrive with `queryId = 0` are counted in

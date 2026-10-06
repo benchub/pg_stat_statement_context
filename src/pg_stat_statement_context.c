@@ -43,6 +43,7 @@ _PG_init(void)
 	pssc_context_init();
 	pssc_executor_init();
 	pssc_utility_init();
+	pssc_utility_check_load_order();
 
 	/*
 	 * Make compute_query_id = auto behave as on, so query IDs match

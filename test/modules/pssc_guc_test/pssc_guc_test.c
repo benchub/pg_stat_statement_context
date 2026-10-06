@@ -1,7 +1,9 @@
 /*
  * pssc_guc_test.c
  *		TEST-ONLY module that exposes pg_stat_statement_context's parsed
- *		configuration (src/guc.h) to SQL for test/t/003_guc.pl.
+ *		configuration (src/guc.h) to SQL for test/t/003_guc.pl, and its
+ *		shared_preload_libraries load-order matcher (src/utility.h) for
+ *		test/t/014_load_order.pl.
  *
  * This is not part of pg_stat_statement_context and is never installed by
  * the top-level "make install". It reaches the main library's exported
@@ -27,6 +29,7 @@
 
 #include "guc.h"
 #include "scan.h"
+#include "utility.h"
 
 PG_MODULE_MAGIC;
 
@@ -457,4 +460,19 @@ pssc_guc_test_extractors_size(PG_FUNCTION_ARGS)
 	if (list == NULL)
 		elog(ERROR, "parsed extractors blob is NULL");
 	PG_RETURN_INT64((int64) list->size);
+}
+
+/*
+ * Whether pg_stat_statement_context would warn about the load order for the
+ * given shared_preload_libraries value (src/utility.c), so spellings the
+ * server cannot load here (e.g. other letter case) can be checked.
+ */
+PG_FUNCTION_INFO_V1(pssc_guc_test_load_order_wrong);
+Datum
+pssc_guc_test_load_order_wrong(PG_FUNCTION_ARGS)
+{
+	bool		(*fn) (const char *) =
+		(bool (*) (const char *)) main_sym("pssc_load_order_wrong");
+
+	PG_RETURN_BOOL(fn(text_to_cstring(PG_GETARG_TEXT_PP(0))));
 }

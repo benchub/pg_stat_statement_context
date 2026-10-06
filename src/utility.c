@@ -44,11 +44,14 @@
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "miscadmin.h"
+#include "nodes/pg_list.h"
 #include "nodes/parsenodes.h"
 #include "portability/instr_time.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/varlena.h"
 
 #include "compat.h"
 #include "context.h"
@@ -237,4 +240,112 @@ pssc_utility_init(void)
 {
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = pssc_ProcessUtility;
+}
+
+#define PSSC_LIBRARY_NAME "pg_stat_statement_context"
+#define PGSS_LIBRARY_NAME "pg_stat_statements"
+
+/*
+ * Does a shared_preload_libraries entry name the library "name"?  Entries
+ * are matched by basename without a shared-library suffix, so
+ * "$libdir/pg_stat_statements" and "pg_stat_statements.so" both match
+ * "pg_stat_statements".
+ *
+ * Letter case is ignored on every platform: on a case-insensitive
+ * filesystem (macOS by default, Windows) "PG_STAT_STATEMENTS" loads the
+ * same library. A false positive would need a differently-cased library
+ * that actually loads on a case-sensitive filesystem, which is implausible,
+ * and the only consequence is a WARNING.
+ */
+static bool
+library_entry_is(const char *entry, const char *name)
+{
+	static const char *const suffixes[] = {".so", ".dylib", ".dll", ".sl"};
+	const char *base = last_dir_separator(entry);
+	size_t		baselen;
+	size_t		namelen = strlen(name);
+
+	base = base ? base + 1 : entry;
+	baselen = strlen(base);
+	if (baselen == namelen)
+		return pg_strncasecmp(base, name, namelen) == 0;
+	for (int i = 0; i < lengthof(suffixes); i++)
+	{
+		size_t		sl = strlen(suffixes[i]);
+
+		if (baselen == namelen + sl &&
+			pg_strncasecmp(base, name, namelen) == 0 &&
+			pg_strcasecmp(base + namelen, suffixes[i]) == 0)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * pg_stat_statements must be loaded before this extension: the library
+ * loaded last installs the outermost ProcessUtility hook, so with pgss after
+ * us its hook runs first and zeroes the utility's queryId before ours sees
+ * it (DESIGN.md §3.2, §6.12).
+ *
+ * The list is split like the postmaster's load_libraries() does. Only the
+ * first entry of each library counts, because a library is loaded (and its
+ * hooks installed) once.
+ */
+bool
+pssc_load_order_wrong(const char *spl)
+{
+	char	   *rawstring;
+	List	   *elemlist;
+	ListCell   *lc;
+	int			pos = 0;
+	int			self_pos = -1;
+	int			pgss_pos = -1;
+
+	rawstring = pstrdup(spl);
+	if (!SplitDirectoriesString(rawstring, ',', &elemlist))
+	{
+		/* The postmaster already rejected an unparsable list. */
+		list_free_deep(elemlist);
+		pfree(rawstring);
+		return false;
+	}
+
+	foreach(lc, elemlist)
+	{
+		const char *entry = (const char *) lfirst(lc);
+
+		if (self_pos < 0 && library_entry_is(entry, PSSC_LIBRARY_NAME))
+			self_pos = pos;
+		else if (pgss_pos < 0 && library_entry_is(entry, PGSS_LIBRARY_NAME))
+			pgss_pos = pos;
+		pos++;
+	}
+	list_free_deep(elemlist);
+	pfree(rawstring);
+
+	return self_pos >= 0 && pgss_pos > self_pos;
+}
+
+/*
+ * A WARNING only: utility tracking stays enabled, and utilities pgss zeroed
+ * are counted in utility_missing_queryid.
+ *
+ * Only the postmaster (or a single-user backend) warns: on EXEC_BACKEND
+ * platforms every child re-runs process_shared_preload_libraries(), and
+ * IsUnderPostmaster is true there.
+ */
+void
+pssc_utility_check_load_order(void)
+{
+	if (IsUnderPostmaster || shared_preload_libraries_string == NULL)
+		return;
+	if (pssc_load_order_wrong(shared_preload_libraries_string))
+		ereport(WARNING,
+				(errmsg("%s is loaded after %s in shared_preload_libraries",
+						PGSS_LIBRARY_NAME, PSSC_LIBRARY_NAME),
+				 errdetail("In this order the ProcessUtility hook of %s runs first and clears the query identifier of utility statements, so they are not recorded; they are counted in utility_missing_queryid instead.",
+						   PGSS_LIBRARY_NAME),
+				 errhint("Set shared_preload_libraries = '%s, %s' (%s first) and restart the server.",
+						 PGSS_LIBRARY_NAME, PSSC_LIBRARY_NAME,
+						 PGSS_LIBRARY_NAME)));
 }

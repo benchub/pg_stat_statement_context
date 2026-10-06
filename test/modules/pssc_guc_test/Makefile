@@ -1,5 +1,6 @@
 # TEST-ONLY module: inspects the parsed configuration of
-# pg_stat_statement_context (src/guc.h) from SQL (see test/t/003_guc.pl).
+# pg_stat_statement_context (src/guc.h) from SQL (see test/t/003_guc.pl), and
+# runs its load-order matcher (src/utility.h, test/t/014_load_order.pl).
 # It is never built or installed by the top-level "make install"; use
 # "make install-test-modules" (scripts/docker-test.sh does this). It needs
 # pg_stat_statement_context in shared_preload_libraries.

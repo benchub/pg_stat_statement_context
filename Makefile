@@ -55,12 +55,14 @@ include $(PGXS)
 
 # TEST-ONLY modules: pssc_compat_test exercises the src/compat.h shims
 # (test/t/002_compat.pl); pssc_guc_test inspects the parsed GUC state of
-# src/guc.h (test/t/003_guc.pl); pssc_extract_test runs the tag-set pipeline
-# of src/extract.h on given text and injects faults into the regex runtime
+# src/guc.h (test/t/003_guc.pl) and runs the load-order matcher of
+# src/utility.h (test/t/014_load_order.pl); pssc_extract_test runs the
+# tag-set pipeline of src/extract.h on given text and injects faults into the regex runtime
 # (test/t/005_extract.pl, test/t/006_regex.pl); pssc_store_test drives the
 # shared store of src/store.h (test/t/007_store.pl, 008_buckets.pl,
 # 009_eviction.pl, and reads recorded entries in 011_executor.pl and
-# 012_utility.pl, and the shared counters in 013_extract_fn.pl, which also
+# 012_utility.pl and 014_load_order.pl, and the shared counters in
+# 013_extract_fn.pl, which also
 # injects a regex compile failure through pssc_extract_test).
 # pssc_context_test exposes the execution frames of src/context.h (frame
 # registry, active frame, frames seen at ExecutorEnd) to SQL

@@ -52,7 +52,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-3 | CI matrix (PG14–18 × Linux/macOS, assert, Valgrind) | 20261005-091225-1 | no | ready |
 | 20261005-101154-1 | Harden exact-release source-build harness | none | no | ready |
-| 20261005-091225-19 | `shared_preload_libraries` load-order detection and policy | 20261005-091225-18 | no | ready |
 | 20261005-091225-20 | Stats SRF and views | 20261005-091225-12, 20261005-091225-14 | no | ready |
 | 20261005-091225-21 | `_info()` and `_reset()` functions | 20261005-091225-15, 20261005-091225-20 | no | blocked-on-deps |
 | 20261005-091225-22 | TAP tests: execution lifecycle and pgss parity | 20261005-091225-18, 20261005-091225-20 | no | blocked-on-deps |
@@ -194,22 +193,6 @@ dependencies and is not shown.
 - A failed download (e.g. a bad URL or a simulated mid-stream failure) or a checksum mismatch fails the build.
 
 **Depends on:** none
-**Open questions:** none
-**Status:** ready
-
-### 20261005-091225-19: `shared_preload_libraries` load-order detection and policy
-
-**Description:** In `_PG_init`, parse `shared_preload_libraries` and detect when `pg_stat_statements` is loaded **after** this extension. In that order, pgss's hook runs outside ours and zeroes `pstmt->queryId` before our hook sees it (§3.2, §6.12). Log a `WARNING` that explains the required order. Take no other action: utility tracking stays enabled. The runtime counter `utility_missing_queryid` already exists (task 20261005-091225-18).
-
-**Acceptance criteria:**
-- The warning is emitted exactly when the order is wrong, and utility tracking is not disabled.
-- The correct order, or no pgss at all, produces no warning.
-- The TAP tests in task 20261005-091225-22 cover both orders.
-
-**Decisions:**
-- 2026-10-05 (§11 Q7): A load-order violation produces a `WARNING` only.
-
-**Depends on:** 20261005-091225-18
 **Open questions:** none
 **Status:** ready
 
