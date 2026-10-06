@@ -441,37 +441,38 @@ prepare(void)
 
 /* ---------------- checks ---------------- */
 
-static void
+/* Returns the number of null values. */
+static int
 check_output(const Config *c, const Prepared *pr, const Env *env,
-			 const PsscTagsetOut *out)
+			 const PsscTagsetOut *out, bool capped)
 {
-	const char *p = out->buf,
-			   *end = out->buf + out->len,
-			   *prevkey = NULL;
+	int			nnull = 0;
+	const char *prevkey = NULL;
 	size_t		prevlen = 0;
+	size_t		off = 0;
 	int			n = 0;
 
 	FUZZ_CHECK(!out->oom);
 	FUZZ_CHECK(out->ntags >= 0 && out->ntags <= c->limits.max_tags);
 	FUZZ_CHECK(out->len <= (size_t) c->limits.max_tagset_bytes);
 	FUZZ_CHECK((out->ntags == 0) == (out->len == 0));
-	while (p < end)
+	while (off < out->len)
 	{
-		const char *k = p,
+		const char *k,
 				   *v;
 		size_t		kl,
 					vl;
-		const char *z = memchr(k, 0, end - k);
+		PsscTagView t;
 
-		FUZZ_CHECK(z);
-		kl = z - k;
-		v = z + 1;
-		FUZZ_CHECK(v < end);
-		z = memchr(v, 0, end - v);
-		FUZZ_CHECK(z);
-		vl = z - v;
-		p = z + 1;
+		FUZZ_CHECK(pssc_tagset_next(out->buf, out->len, &off, &t));
+		k = t.key;
+		kl = t.klen;
+		v = t.isnull ? "" : t.val;
+		vl = t.vlen;
 		n++;
+		/* only a cap hook produces nulls (§6.11 step 8) */
+		FUZZ_CHECK(!t.isnull || capped);
+		nnull += t.isnull;
 
 		FUZZ_CHECK(kl >= 1 && kl <= PSSC_MAX_KEY_LEN);
 		FUZZ_CHECK(vl <= (size_t) c->limits.max_tag_value_len);
@@ -490,6 +491,27 @@ check_output(const Config *c, const Prepared *pr, const Env *env,
 			FUZZ_CHECK(pssc_tag_list_find(pr->tags, k, (int) kl) >= 0);
 	}
 	FUZZ_CHECK(n == out->ntags);
+	return nnull;
+}
+
+/*
+ * A deterministic, stateless cap for step 8: collapses values by their
+ * first byte and length (odd first byte: "over the cap"; length 3: "table
+ * full"); keys starting with 'k' are uncapped.
+ */
+static PsscCapResult
+fuzz_cap(void *arg, const char *key, size_t klen, const char *val,
+		 size_t vlen, bool admit)
+{
+	(void) arg;
+	(void) admit;
+	if (klen > 0 && key[0] == 'k')
+		return PSSC_CAP_KEEP;
+	if (vlen == 3)
+		return PSSC_CAP_NULL_FULL;
+	if (vlen > 0 && (val[0] & 1))
+		return PSSC_CAP_NULL;
+	return PSSC_CAP_KEEP;
 }
 
 static void
@@ -513,7 +535,7 @@ run_one(const char *s, size_t start, size_t end, size_t ci, Env *env,
 	pssc_tagset_build(s, start, end, pr->ex, pr->tags, pr->exclude,
 					  &c->limits, &te, NULL, &out, &st);
 	nallocs = env->arena.count;
-	check_output(c, pr, env, &out);
+	check_output(c, pr, env, &out, false);
 
 	/* deterministic */
 	arena_reset(&env->arena, -1);
@@ -534,6 +556,27 @@ run_one(const char *s, size_t start, size_t end, size_t ci, Env *env,
 		pssc_tagset_build(s, start, end, pr->ex, pr->tags, pr->exclude,
 						  &c->limits, &te, NULL, &out2, &st3);
 		FUZZ_CHECK(out2.oom && out2.len == 0 && out2.ntags == 0);
+	}
+
+	/*
+	 * step 8 with a stateless fake cap: the output stays well-formed, nulls
+	 * appear only through it and are exactly the counted ones, and it never
+	 * adds tags
+	 */
+	{
+		PsscTagsetEnv tc = te;
+		PsscTagsetStats st4 = {0};
+
+		tc.cap = fuzz_cap;
+		arena_reset(&env->arena, -1);
+		memset(&out2, 0, sizeof(out2));
+		out2.buf = buf2;
+		pssc_tagset_build(s, start, end, pr->ex, pr->tags, pr->exclude,
+						  &c->limits, &tc, NULL, &out2, &st4);
+		/* every counted collapse is in the output (and only those) */
+		FUZZ_CHECK(check_output(c, pr, env, &out2, true) ==
+				   (int) st4.capped_tags);
+		FUZZ_CHECK(st4.cap_table_full <= st4.capped_tags);
 	}
 	arena_reset(&env->arena, -1);
 	free(buf);

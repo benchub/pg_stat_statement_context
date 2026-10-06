@@ -38,7 +38,7 @@ Both have the same columns:
 | `dbid` | `oid` | Database in which it ran. |
 | `queryid` | `bigint` | Query ID, identical to `pg_stat_statements.queryid`. |
 | `toplevel` | `bool` | True if the statement was run by the client, false if it was nested (only with `track = all`). |
-| `tags` | `jsonb` | The tag set, an object of string values, e.g. `{"action": "show", "controller": "users"}`; `{}` for statements recorded with `untagged = record`. |
+| `tags` | `jsonb` | The tag set, an object of string values, e.g. `{"action": "show", "controller": "users"}`; `{}` for statements recorded with `untagged = record`. A value is JSON `null` (never a string) when its key had reached its [cardinality cap](configuration.md#cardinality_cap); client input can't produce `null`. |
 | `calls` | `bigint` | Number of completed executions in the bucket (or window). |
 | `total_exec_time` | `float8` | Total execution time in milliseconds. |
 
@@ -306,17 +306,20 @@ SELECT * FROM pg_stat_statement_context_info();
 | `evicted_entries` | `bigint` | Entries removed by those passes, live or dead combined; see [Eviction](configuration.md#eviction) for telling them apart. |
 | `buckets` | `int` | The `bucket_count` setting. |
 | `oldest_bucket` | `timestamptz` | Start of the oldest live bucket of any entry (equal to `min(bucket_start)` in the view), or `NULL` if no bucket is live. |
-| `shmem_bytes` | `bigint` | Exact shared memory size requested at startup. |
+| `shmem_bytes` | `bigint` | Exact shared memory size requested at startup for the statistics store. |
+| `cap_shmem_bytes` | `bigint` | Exact shared memory size requested at startup for the separate [cardinality caps](configuration.md#cardinality_cap_slots) table (allocated even when no cap is set; up to about 576 MiB at the maximum `cardinality_cap_slots`). |
 | `invalid_tags` | `bigint` | Tags rejected as malformed: NUL bytes, invalid encoding, keys over 63 bytes, malformed pairs (see [the tag pipeline](extractors.md#the-tag-pipeline)). |
 | `dropped_tags` | `bigint` | Valid tags dropped because the tag set would exceed `max_tags` or `max_tagset_bytes`. |
 | `heuristic_scans` | `bigint` | Statements whose comments were found with the heuristic tail scan (`position=append` on statements longer than `scan_window`). |
 | `regex_compile_failures` | `bigint` | Regex extractors and [`normalize`](configuration.md#normalize) rules that failed to compile in some backend at run time (including compiles stopped at the [100 ms compile time limit](extractors.md#regex)) and were disabled there. |
 | `utility_missing_queryid` | `bigint` | Tracked utility statements that arrived without a query ID and were not recorded; normally a sign of the wrong `shared_preload_libraries` order (see the [README](../README.md#load-order)). It also rises, in the correct order, when a utility statement is re-executed from a plan cache (for example a named prepared `SET` over the extended protocol): pg_stat_statements clears its query ID after the first execution, so neither extension counts the re-executions. |
+| `capped_tags` | `bigint` | Tag values recorded as JSON `null` because their key had reached its [cardinality cap](configuration.md#cardinality_cap), including those counted in `cap_table_full`. |
+| `cap_table_full` | `bigint` | Of `capped_tags`, the values collapsed because the shared table of admitted values was full ([`cardinality_cap_slots`](configuration.md#cardinality_cap_slots)). |
 | `stats_reset` | `timestamptz` | Time of the last `pg_stat_statement_context_reset()`, or of server start. |
 
-The extraction counters (`invalid_tags`, `dropped_tags`, `heuristic_scans`)
-are collected per backend and added to the shared counters when a statement
-finishes; `_info()` includes the calling session's own pending counts.
+The extraction counters (`invalid_tags`, `dropped_tags`, `heuristic_scans`,
+`capped_tags`, `cap_table_full`) are collected per backend and added to the
+shared counters when a statement finishes; `_info()` includes the calling session's own pending counts.
 
 ## `pg_stat_statement_context_reset()`
 
@@ -325,7 +328,9 @@ SELECT pg_stat_statement_context_reset();
 ```
 
 Removes every entry, zeroes every counter of `_info()` and sets
-`stats_reset`. Statements still running in other sessions are recorded after
+`stats_reset`. It also forgets the values admitted by the
+[cardinality caps](configuration.md#cardinality_cap), so every key can take
+its cap of distinct values again. Statements still running in other sessions are recorded after
 the reset when they finish. Superuser-only by default; to delegate it:
 
 ```sql
@@ -365,6 +370,7 @@ SELECT jsonb_pretty(pg_stat_statement_context_extract(
     "stmt_end": 57,
     "heuristic": false,
     "stmt_start": 0,
+    "capped_tags": 0,
     "dropped_tags": 0,
     "invalid_tags": 0,
     "tagset_bytes": 29,
@@ -386,6 +392,7 @@ SELECT jsonb_pretty(pg_stat_statement_context_extract(
 | `invalid_tags`, `dropped_tags`, `heuristic_scans`, `regex_compile_failures` | This call's contribution to the `_info()` counters of the same names. |
 | `normalized_tags` | Tags whose value the [`normalize`](configuration.md#normalize) rules changed. |
 | `normalize_failures` | Tags dropped because a `normalize` rule failed (or was disabled by a compile failure). |
+| `capped_tags` | Values shown as `null` because their key has reached its [cardinality cap](configuration.md#cardinality_cap). The function only looks at the caps: it never admits a value, so calling it doesn't use up any key's cap, and its count isn't added to `_info().capped_tags`. |
 
 **Arguments.** `stmt_location` and `stmt_len` select one statement of a
 multi-statement string, in bytes, the way the parser reports it:

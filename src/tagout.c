@@ -14,14 +14,14 @@
 /* One key or value of a stored tag set, or its output text. */
 typedef struct TagText
 {
-	const char *s;
+	const char *s;				/* NULL for a null value (§6.11 step 8) */
 	size_t		len;
 } TagText;
 
 /*
- * Splits tags[0, len) ("k\0v\0...") into its keys and values, alternating,
- * into a palloc'd array; returns their number (always even: a trailing key
- * without a value is ignored).
+ * Splits tags[0, len) ("k\0v\0...", a null value as "k\0\0\0") into its
+ * keys and values, alternating, into a palloc'd array; returns their number
+ * (always even: a malformed rest is ignored).
  */
 static int
 tags_split(const char *tags, size_t len, TagText **out)
@@ -30,25 +30,17 @@ tags_split(const char *tags, size_t len, TagText **out)
 	size_t		off = 0;
 	int			n = 0;
 	TagText    *t;
+	PsscTagView v;
 
 	for (size_t i = 0; i < len; i++)
 		nul += (tags[i] == '\0');
 	t = palloc(sizeof(TagText) * (nul + 2));
-	while (off < len)
+	while (pssc_tagset_next(tags, len, &off, &v))
 	{
-		const char *k = tags + off;
-		size_t		klen = strnlen(k, len - off);
-		const char *v = k + klen + 1;
-		size_t		vlen;
-
-		if (off + klen + 1 >= len)
-			break;				/* malformed: no value */
-		vlen = strnlen(v, len - (off + klen + 1));
-		t[n].s = k;
-		t[n++].len = klen;
-		t[n].s = v;
-		t[n++].len = vlen;
-		off += klen + 1 + vlen + 1;
+		t[n].s = v.key;
+		t[n++].len = v.klen;
+		t[n].s = v.val;
+		t[n++].len = v.vlen;
 	}
 	*out = t;
 	return n;
@@ -143,9 +135,14 @@ push_pairs(JsonbParseState **st, const TagText *t, int n)
 	{
 		JsonbValue	v;
 
-		v.type = jbvString;
-		v.val.string.val = (char *) t[i].s;
-		v.val.string.len = (int) t[i].len;
+		if (t[i].s == NULL)
+			v.type = jbvNull;	/* a capped value: JSON null */
+		else
+		{
+			v.type = jbvString;
+			v.val.string.val = (char *) t[i].s;
+			v.val.string.len = (int) t[i].len;
+		}
 		(void) pushJsonbValue(st, (i % 2 == 0) ? WJB_KEY : WJB_VALUE, &v);
 	}
 	return pushJsonbValue(st, WJB_END_OBJECT, NULL);
@@ -159,7 +156,8 @@ pssc_tags_push_jsonb(JsonbParseState **st, const char *tags, size_t len,
 	int			n = tags_split(tags, len, &t);
 
 	for (int i = 0; i < n; i++)
-		t[i] = tag_text(t[i].s, t[i].len, encoding);
+		if (t[i].s != NULL)
+			t[i] = tag_text(t[i].s, t[i].len, encoding);
 	(void) push_pairs(st, t, n);
 	pfree(t);
 }
@@ -179,12 +177,13 @@ pssc_tags_jsonb_noerror(const char *tags, size_t len, int encoding,
 	if (encoding != PG_SQL_ASCII)
 	{
 		for (int i = 0; ok && i < n; i++)
-			ok = tag_text_noerror(t[i].s, t[i].len, encoding, &conv[i]);
+			ok = t[i].s == NULL ? (conv[i] = t[i], true) :
+				tag_text_noerror(t[i].s, t[i].len, encoding, &conv[i]);
 	}
 	if (encoding == PG_SQL_ASCII || !ok)
 	{
 		for (int i = 0; i < n; i++)
-			conv[i] = tag_escaped(t[i].s, t[i].len);
+			conv[i] = t[i].s == NULL ? t[i] : tag_escaped(t[i].s, t[i].len);
 	}
 	result = JsonbValueToJsonb(push_pairs(&st, conv, n));
 	pfree(t);

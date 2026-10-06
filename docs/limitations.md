@@ -138,5 +138,8 @@ used there.
 
 ## Not in v1
 
-Per-key value normalization and cardinality caps, exemplars, and persistence
-across restarts are not implemented.
+Exemplars and persistence across restarts are not implemented. The
+[cardinality caps](configuration.md#cardinality_cap) don't decay: a value
+admitted under a key's cap keeps its place until
+`pg_stat_statement_context_reset()` or a restart, even after its entries are
+evicted.

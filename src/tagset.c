@@ -40,6 +40,7 @@ typedef struct Tag
 	size_t		seq;			/* order of appearance in the chain */
 	size_t		prio;			/* drop priority: lower is kept first */
 	bool		keep;
+	bool		isnull;			/* collapsed by a cardinality cap (step 8) */
 } Tag;
 
 #define NPOSITIONS 3
@@ -147,6 +148,7 @@ add_tag(Ctx *c, const char *key, size_t klen, const char *val, size_t vlen,
 	t->seq = c->seq++;
 	t->prio = prio;
 	t->keep = false;
+	t->isnull = false;
 	return true;
 }
 
@@ -479,6 +481,29 @@ stats_add(PsscTagsetStats *dst, const PsscTagsetStats *src)
 	dst->regex_compile_failures += src->regex_compile_failures;
 	dst->normalized_tags += src->normalized_tags;
 	dst->normalize_failures += src->normalize_failures;
+	dst->capped_tags += src->capped_tags;
+	dst->cap_table_full += src->cap_table_full;
+}
+
+/*
+ * Step 8 for one tag: whether its value collapses to null (admit as in
+ * PsscCapFn). The diagnostics are counted by count_collapse(), once the
+ * null is known to be kept.
+ */
+static PsscCapResult
+cap_result(Ctx *c, const Tag *t, bool admit)
+{
+	if (c->env->cap == NULL)
+		return PSSC_CAP_KEEP;
+	return c->env->cap(c->env->arg, t->key, t->klen, t->val, t->vlen, admit);
+}
+
+static void
+count_collapse(Ctx *c, PsscCapResult r)
+{
+	c->stats->capped_tags++;
+	if (r == PSSC_CAP_NULL_FULL)
+		c->stats->cap_table_full++;
 }
 
 static int
@@ -610,7 +635,12 @@ pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
 
 	/*
 	 * Greedy fill in priority order: keep each tag that still fits both
-	 * limits, drop the others.
+	 * limits, drop the others. Step 8 runs on each tag just before it is
+	 * placed, so only values that are stored as strings are admitted (a
+	 * dropped tag never uses up one of its key's distinct values); when the
+	 * string does not fit, the cap is only asked whether the value would
+	 * collapse, and the tag is then kept as null if that fits: the result is
+	 * that of step 8 on every tag followed by step 9.
 	 */
 	order = ctx_alloc(&c, n * sizeof(Tag *));
 	if (order == NULL)
@@ -624,13 +654,35 @@ pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
 	maxbytes = limits->max_tagset_bytes > 0 ? (size_t) limits->max_tagset_bytes : 0;
 	for (size_t i = 0; i < n; i++)
 	{
-		size_t		need = order[i]->klen + 1 + order[i]->vlen + 1;
+		Tag		   *t = order[i];
+		size_t		need = t->klen + 1 + t->vlen + 1;
+		size_t		need_null = t->klen + 3;	/* key \0 \0 \0 */
+		size_t		room = maxbytes - used;
+		PsscCapResult r;
 
 		if (kept >= maxtags)
 			break;
-		if (need > maxbytes - used)
+		if (need <= room)
+			r = cap_result(&c, t, true);
+		else if (need_null <= room && c.env->cap != NULL)
+		{
+			/* kept only as null: never admitted */
+			r = cap_result(&c, t, false);
+			if (r == PSSC_CAP_KEEP)
+				continue;
+		}
+		else
 			continue;
-		order[i]->keep = true;
+		if (r != PSSC_CAP_KEEP)
+		{
+			/* a null needs one byte more than "" */
+			if (need_null > room)
+				continue;
+			need = need_null;
+			t->isnull = true;
+			count_collapse(&c, r);
+		}
+		t->keep = true;
 		used += need;
 		kept++;
 	}
@@ -646,6 +698,14 @@ pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
 		memcpy(out->buf + out->len, t->key, t->klen);
 		out->len += t->klen;
 		out->buf[out->len++] = '\0';
+		if (t->isnull)
+		{
+			/* null: two NULs after the key's (see tagset.h) */
+			out->buf[out->len++] = '\0';
+			out->buf[out->len++] = '\0';
+			out->ntags++;
+			continue;
+		}
 		if (t->vlen > 0)
 			memcpy(out->buf + out->len, t->val, t->vlen);
 		out->len += t->vlen;

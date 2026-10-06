@@ -502,6 +502,65 @@ fake_normalize(void *arg, const char *key, size_t klen, const char *val,
 	return PSSC_NORMALIZE_DONE;
 }
 
+/*
+ * Cardinality caps (step 8): admits up to fake_cap_limit distinct values
+ * per key, and at most fake_cap_slots (key, value) pairs in all (0: no
+ * limit) -- beyond that NULL_FULL. The admitted set persists across runs
+ * until fake_cap_reset(). Every call is recorded.
+ */
+#define CAPMAX 512
+static int	fake_cap_limit;
+static int	fake_cap_slots;
+static int	cap_n;
+static char cap_keys[CAPMAX][PSSC_MAX_KEY_LEN + 1];
+static char cap_vals[CAPMAX][4097];
+static int	cap_calls;
+static char cap_call_text[64][PSSC_MAX_KEY_LEN + 4200];	/* "key=value/admit" */
+
+static void
+fake_cap_reset(void)
+{
+	cap_n = 0;
+	cap_calls = 0;
+	fake_cap_slots = 0;
+}
+
+static PsscCapResult
+fake_cap(void *arg, const char *key, size_t klen, const char *val,
+		 size_t vlen, bool admit)
+{
+	int			count = 0;
+
+	(void) arg;
+	assert(klen >= 1 && klen <= PSSC_MAX_KEY_LEN && vlen <= 4096);
+	assert(vlen == 0 || memchr(val, '\0', vlen) == NULL);
+	if (cap_calls < 64)
+		xsprintf(cap_call_text[cap_calls], "%.*s=%.*s/%d", (int) klen, key,
+				 (int) vlen, val, admit ? 1 : 0);
+	cap_calls++;
+	for (int i = 0; i < cap_n; i++)
+	{
+		if (strlen(cap_keys[i]) != klen || memcmp(cap_keys[i], key, klen) != 0)
+			continue;
+		if (strlen(cap_vals[i]) == vlen && memcmp(cap_vals[i], val, vlen) == 0)
+			return PSSC_CAP_KEEP;
+		count++;
+	}
+	if (count >= fake_cap_limit)
+		return PSSC_CAP_NULL;
+	if ((fake_cap_slots > 0 && cap_n >= fake_cap_slots) || cap_n >= CAPMAX)
+		return PSSC_CAP_NULL_FULL;
+	if (admit)
+	{
+		memcpy(cap_keys[cap_n], key, klen);
+		cap_keys[cap_n][klen] = '\0';
+		memcpy(cap_vals[cap_n], val, vlen);
+		cap_vals[cap_n][vlen] = '\0';
+		cap_n++;
+	}
+	return PSSC_CAP_KEEP;
+}
+
 /* ---------------- running the pipeline ---------------- */
 
 typedef struct Run
@@ -520,6 +579,7 @@ typedef struct Run
 	const char *appname;		/* application_name; NULL = no appname pass */
 	bool		appname_twice;	/* pass the appname result twice (cache replay) */
 	const char *override;		/* tags_override (sqlcommenter); NULL = none */
+	int			cap;			/* fake_cap per-key cap; 0 = env.cap NULL */
 } Run;
 
 typedef struct Res
@@ -573,17 +633,20 @@ check_serialized(const char *name, const Run *cfg, Res *r)
 		size_t		kl = strnlen(k, r->len - i);
 		const char *v;
 		size_t		vl;
+		bool		isnull;
 
 		CHECK(i + kl < r->len, "%s: unterminated key", name);
 		if (i + kl >= r->len)
 			return;
 		i += kl + 1;
 		v = r->buf + i;
-		vl = strnlen(v, r->len - i);
+		/* a null value (step 8) is key \0 \0 \0 */
+		isnull = i + 1 < r->len && r->buf[i] == '\0' && r->buf[i + 1] == '\0';
+		vl = isnull ? 0 : strnlen(v, r->len - i);
 		CHECK(i + vl < r->len, "%s: unterminated value", name);
 		if (i + vl >= r->len)
 			return;
-		i += vl + 1;
+		i += isnull ? 2 : vl + 1;
 		CHECK(kl >= 1 && kl <= PSSC_MAX_KEY_LEN, "%s: key length %zu", name, kl);
 		CHECK(vl <= (size_t) cfg->max_value, "%s: value length %zu > %d", name, vl,
 			  cfg->max_value);
@@ -603,7 +666,10 @@ check_serialized(const char *name, const Run *cfg, Res *r)
 		fmt_bytes(t, k, kl);
 		t += strlen(t);
 		*t++ = '=';
-		fmt_bytes(t, v, vl);
+		if (isnull)
+			t += xsprintf(t, "\\N");	/* fmt_bytes never writes '\\' */
+		else
+			fmt_bytes(t, v, vl);
 		t += strlen(t);
 		n++;
 	}
@@ -664,6 +730,8 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	env.cliplen = utf8_cliplen;
 	env.regex = cfg.with_regex ? fake_regex : NULL;
 	env.normalize = cfg.with_normalize ? fake_normalize : NULL;
+	env.cap = cfg.cap > 0 ? fake_cap : NULL;
+	fake_cap_limit = cfg.cap;
 	/* exactly max_tagset_bytes, so ASan catches overruns */
 	buf = malloc(cfg.max_bytes ? cfg.max_bytes : 1);
 	memset(&out, 0x5a, sizeof(out));
@@ -2265,6 +2333,239 @@ test_override(void)
 	}
 }
 
+/* Step 8: per-key cardinality caps (backlog item 20261005-091225-32). */
+static void
+test_caps(void)
+{
+	Run			c = {0};
+	Res		   *r;
+	char		sql[256];
+
+	/* cap off (env.cap NULL): every value kept */
+	fake_cap_reset();
+	EXPECT("cap off", c, "SELECT 1 /*route:a*/", "route=a");
+	CHECK(cap_calls == 0, "cap off: %d calls", cap_calls);
+
+	/* flood one key: at most cap distinct strings, then null */
+	c.cap = 3;
+	for (int i = 0; i < 10; i++)
+	{
+		char		want[32];
+
+		xsprintf(sql, "SELECT 1 /*route:v%d,action:a%d*/", i, i % 2);
+		r = run("cap flood", c, sql);
+		if (i < 3)
+			xsprintf(want, "action=a%d|route=v%d", i % 2, i);
+		else
+			xsprintf(want, "action=a%d|route=\\N", i % 2);
+		CHECK(strcmp(r->text, want) == 0, "cap flood %d: got %s want %s", i,
+			  r->text, want);
+		CHECK(r->st.capped_tags == (i < 3 ? 0u : 1u) && r->st.cap_table_full == 0,
+			  "cap flood %d: capped %llu full %llu", i,
+			  (unsigned long long) r->st.capped_tags,
+			  (unsigned long long) r->st.cap_table_full);
+	}
+	/* admitted values stay strings; the cap is per key */
+	EXPECT("cap admitted stays", c, "SELECT 1 /*route:v1*/", "route=v1");
+	EXPECT("cap per key", c, "SELECT 1 /*job:j1*/", "job=j1");
+
+	/* the serialized null: key \0 \0 \0, unlike an empty string */
+	r = run("cap null bytes", c, "SELECT 1 /*route:zz*/");
+	CHECK(r->len == 8 && memcmp(r->buf, "route\0\0\0", 8) == 0 && r->ntags == 1,
+		  "cap null bytes: len %zu", r->len);
+	fake_cap_reset();
+	c.cap = 1;
+	EXPECT("cap empty string admitted", c, "SELECT 1 /*route=''*/", "route=");
+	r = run("cap empty string bytes", c, "SELECT 1 /*route=''*/");
+	CHECK(r->len == 7 && memcmp(r->buf, "route\0\0", 7) == 0,
+		  "cap empty string bytes: len %zu", r->len);
+	/* a client's literal "null" is a string like any other */
+	EXPECT("cap literal null", c, "SELECT 1 /*route='null'*/", "route=\\N");
+	fake_cap_reset();
+	EXPECT("cap literal null admitted", c, "SELECT 1 /*route='null'*/", "route=null");
+	/* sorted with the other keys, null between strings */
+	EXPECT("cap null sorted", c, "SELECT 1 /*a='1',route='x',z='2'*/",
+		   "a=1|route=\\N|z=2");
+
+	/* the cap sees the final key and the truncated value */
+	fake_cap_reset();
+	c.cap = 2;
+	c.max_value = 4;
+	{
+		XSpec		x = SC(PSSC_POS_APPEND);
+
+		x.rename = "r:route";
+		c.ex = mkex(1, &x);
+		EXPECT("cap after rename/truncation", c, "SELECT 1 /*r='abcdef'*/", "route=abcd");
+		CHECK(cap_calls == 1 && strcmp(cap_call_text[0], "route=abcd/1") == 0,
+			  "cap after rename/truncation: %d %s", cap_calls, cap_call_text[0]);
+		/* values that truncate to the same prefix are one value */
+		EXPECT("cap truncated same", c, "SELECT 1 /*r='abcdxyz'*/", "route=abcd");
+		EXPECT("cap truncated second", c, "SELECT 1 /*r='qqqq'*/", "route=qqqq");
+		EXPECT("cap truncated third", c, "SELECT 1 /*r='wwww'*/", "route=\\N");
+		c.ex = NULL;
+	}
+	c.max_value = 0;
+
+	/* the cap sees the normalized value */
+	fake_cap_reset();
+	c.with_normalize = true;
+	EXPECT("cap normalized 1", c, "SELECT 1 /*route:/u/1*/", "route=/u/:id");
+	EXPECT("cap normalized 2", c, "SELECT 1 /*route:/u/22*/", "route=/u/:id");
+	EXPECT("cap normalized 3", c, "SELECT 1 /*route:/p/3*/", "route=/p/:id");
+	EXPECT("cap normalized 4", c, "SELECT 1 /*route:/q/3*/", "route=\\N");
+	c.with_normalize = false;
+
+	/* only tags that are stored are admitted: max_tags drops never count */
+	fake_cap_reset();
+	c.cap = 1;
+	c.tags = "a,b";
+	c.max_tags = 1;
+	cap_calls = 0;
+	EXPECT("cap max_tags", c, "SELECT 1 /*a:1,b:1*/", "a=1");
+	CHECK(cap_calls == 1 && strcmp(cap_call_text[0], "a=1/1") == 0,
+		  "cap max_tags: %d calls (%s)", cap_calls, cap_call_text[0]);
+	c.max_tags = 2;
+	EXPECT("cap max_tags later", c, "SELECT 1 /*a:1,b:2*/", "a=1|b=2");
+	c.tags = NULL;
+	c.max_tags = 0;
+
+	/*
+	 * A string that does not fit is not admitted; a collapsed value that
+	 * fits as null is kept as null (steps 8 then 9).
+	 */
+	fake_cap_reset();
+	c.cap = 1;
+	c.max_bytes = 128;
+	c.max_value = 4096;
+	EXPECT("cap fill a", c, "SELECT 1 /*k:x*/", "k=x");
+	cap_calls = 0;
+	memset(sql, 'v', 200);
+	memcpy(sql, "SELECT 1 /*k:", 13);
+	memcpy(sql + 13 + 126, "*/", 3);
+	r = run("cap long not admitted", c, sql);
+	CHECK(strcmp(r->text, "k=\\N") == 0 && r->st.capped_tags == 1 &&
+		  r->st.dropped_tags == 0,
+		  "cap long collapsed fits as null: %s capped %llu dropped %llu", r->text,
+		  (unsigned long long) r->st.capped_tags,
+		  (unsigned long long) r->st.dropped_tags);
+	CHECK(cap_calls == 1 && cap_call_text[0][strlen(cap_call_text[0]) - 1] == '0',
+		  "cap long: asked without admitting (%d: %s)", cap_calls,
+		  cap_calls ? cap_call_text[0] : "");
+	fake_cap_reset();
+	cap_calls = 0;
+	r = run("cap long under cap", c, sql);
+	CHECK(r->ntags == 0 && r->st.dropped_tags == 1 && r->st.capped_tags == 0 &&
+		  cap_n == 0,
+		  "cap long under cap: dropped, not admitted (ntags %d, admitted %d)",
+		  r->ntags, cap_n);
+	/* an empty string at the cap needs one more byte as null */
+	fake_cap_reset();
+	c.max_bytes = 128;
+	EXPECT("cap fill x", c, "SELECT 1 /*k='x'*/", "k=x");
+	memset(sql, 0, sizeof(sql));
+	{
+		/* a + 122 bytes = 125; then k "" (3 bytes) fits, k null (4) does not */
+		char	   *p = sql;
+
+		p += xsprintf(p, "SELECT 1 /*a='");
+		memset(p, 'b', 122);
+		p += 122;
+		xsprintf(p, "',k=''*/");
+	}
+	/* the null that doesn't fit is dropped: counted as dropped, not capped */
+	r = run("cap empty null no room", c, sql);
+	CHECK(r->ntags == 1 && r->st.capped_tags == 0 && r->st.dropped_tags == 1,
+		  "cap empty null no room: ntags %d capped %llu dropped %llu", r->ntags,
+		  (unsigned long long) r->st.capped_tags,
+		  (unsigned long long) r->st.dropped_tags);
+	/* same when the tracking table is full: cap_table_full not counted */
+	fake_cap_reset();
+	c.cap = 100;
+	fake_cap_slots = 1;			/* taken by a's value */
+	r = run("cap empty null-full no room", c, sql);
+	CHECK(r->ntags == 1 && r->st.capped_tags == 0 &&
+		  r->st.cap_table_full == 0 && r->st.dropped_tags == 1,
+		  "cap empty null-full no room: ntags %d capped %llu full %llu dropped %llu",
+		  r->ntags, (unsigned long long) r->st.capped_tags,
+		  (unsigned long long) r->st.cap_table_full,
+		  (unsigned long long) r->st.dropped_tags);
+	c.cap = 1;
+	c.max_value = 0;
+	c.max_bytes = 0;
+
+	/* tracking structure full: fail closed, counted in both */
+	fake_cap_reset();
+	c.cap = 100;
+	fake_cap_slots = 2;
+	EXPECT("cap full 1", c, "SELECT 1 /*k:1*/", "k=1");
+	EXPECT("cap full 2", c, "SELECT 1 /*k:2*/", "k=2");
+	r = run("cap full 3", c, "SELECT 1 /*k:3,j:1*/");
+	CHECK(strcmp(r->text, "j=\\N|k=\\N") == 0 && r->st.capped_tags == 2 &&
+		  r->st.cap_table_full == 2,
+		  "cap full 3: %s capped %llu full %llu", r->text,
+		  (unsigned long long) r->st.capped_tags,
+		  (unsigned long long) r->st.cap_table_full);
+	EXPECT("cap full admitted", c, "SELECT 1 /*k:2*/", "k=2");
+
+	/* every source is capped: tags_override and application_name */
+	fake_cap_reset();
+	c.cap = 1;
+	{
+		XSpec		xs[2] = {SC(PSSC_POS_APPEND), AN(PSSC_EXTRACTOR_SQLCOMMENTER)};
+
+		c.ex = mkex(2, xs);
+		EXPECT("cap source comment", c, "SELECT 1 /*a='1',b='1',o='1'*/", "a=1|b=1|o=1");
+		c.appname = "a='2'";
+		c.override = "o='2'";
+		EXPECT("cap source appname/override", c, "SELECT 1 /*b='2'*/",
+			   "a=\\N|b=\\N|o=\\N");
+		c.appname = NULL;
+		c.override = NULL;
+		c.ex = NULL;
+	}
+
+	/* the iterator */
+	{
+		static const char set[] = "a\0" "1\0" "b\0" "\0" "c\0" "\0\0" "d\0" "\0\0";
+		size_t		off = 0;
+		PsscTagView t;
+		int			n = 0;
+		bool		ok = true;
+
+		while (pssc_tagset_next(set, sizeof(set) - 1, &off, &t))
+		{
+			switch (n++)
+			{
+				case 0:
+					ok &= t.klen == 1 && t.key[0] == 'a' && !t.isnull && t.vlen == 1 && t.val[0] == '1';
+					break;
+				case 1:
+					ok &= t.klen == 1 && t.key[0] == 'b' && !t.isnull && t.vlen == 0;
+					break;
+				case 2:
+					ok &= t.klen == 1 && t.key[0] == 'c' && t.isnull && t.val == NULL;
+					break;
+				case 3:
+					ok &= t.klen == 1 && t.key[0] == 'd' && t.isnull;
+					break;
+				default:
+					ok = false;
+			}
+		}
+		CHECK(ok && n == 4 && off == sizeof(set) - 1, "iterator: n %d off %zu", n, off);
+		/* truncated input stops */
+		off = 0;
+		n = 0;
+		while (pssc_tagset_next(set, 3, &off, &t))
+			n++;
+		CHECK(n == 0, "iterator truncated: %d", n);
+		off = 0;
+		CHECK(!pssc_tagset_next("\0x\0", 3, &off, &t), "iterator empty key");
+	}
+	fake_cap_reset();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2296,6 +2597,7 @@ main(int argc, char **argv)
 	test_normalize();
 	test_appname();
 	test_override();
+	test_caps();
 
 	if (failures)
 	{

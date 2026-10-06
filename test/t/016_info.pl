@@ -50,7 +50,7 @@ sql("CREATE EXTENSION $P; CREATE EXTENSION pssc_store_test; "
 sql('CREATE ROLE alice');
 
 my @cols = qw(entries max_entries dealloc evicted_entries buckets oldest_bucket
-  shmem_bytes invalid_tags dropped_tags heuristic_scans regex_compile_failures
+  shmem_bytes cap_shmem_bytes invalid_tags dropped_tags heuristic_scans regex_compile_failures
   utility_missing_queryid stats_reset);
 
 # The one row of _info() as a hash; NULLs as 'NULL'. $suffix (e.g. a
@@ -106,9 +106,10 @@ sub pin
 		'OUT entries bigint, OUT max_entries bigint, OUT dealloc bigint, '
 		  . 'OUT evicted_entries bigint, OUT buckets integer, '
 		  . 'OUT oldest_bucket timestamp with time zone, OUT shmem_bytes bigint, '
-		  . 'OUT invalid_tags bigint, OUT dropped_tags bigint, '
+		  . 'OUT cap_shmem_bytes bigint, OUT invalid_tags bigint, OUT dropped_tags bigint, '
 		  . 'OUT heuristic_scans bigint, OUT regex_compile_failures bigint, '
 		  . 'OUT utility_missing_queryid bigint, '
+		  . 'OUT capped_tags bigint, OUT cap_table_full bigint, '
 		  . 'OUT stats_reset timestamp with time zone -> record v f',
 		'_info(): exactly the §7 columns, one row, VOLATILE');
 	is(sql(qq{SELECT pg_get_function_arguments(p.oid) || ' -> ' || pg_get_function_result(p.oid)
@@ -131,8 +132,17 @@ sub pin
 	is($i->{shmem_bytes}, sql('SELECT shmem_bytes FROM pssc_store_test_counters()'),
 		'shmem_bytes equals the size the store recorded when it requested it');
 	ok( sql(qq{SELECT sum(allocated_size) BETWEEN 1 AND $i->{shmem_bytes}
-	           FROM pg_shmem_allocations WHERE name LIKE '$P%'}) eq 't',
-		'the named allocations fit within shmem_bytes');
+	           FROM pg_shmem_allocations WHERE name LIKE '$P%'
+	             AND name <> '$P cardinality caps'}) eq 't',
+		'the named allocations (but the cardinality caps table) fit within shmem_bytes');
+	is($i->{cap_shmem_bytes},
+		sql(qq{SELECT size FROM pg_shmem_allocations WHERE name = '$P cardinality caps'}),
+		'cap_shmem_bytes is the exact size requested for the cardinality caps table');
+	# default cardinality_cap_slots: 16384 value words plus 1024 two-word key
+	# slots, 8 bytes each (up to 16 with emulated 64-bit atomics)
+	ok( $i->{cap_shmem_bytes} > (16384 + 2 * 1024) * 8
+		  && $i->{cap_shmem_bytes} <= (16384 + 2 * 1024) * 16 + 64,
+		"cap_shmem_bytes ($i->{cap_shmem_bytes}) is the default table's words plus a small header");
 	is(sql(qq{SELECT stats_reset <= now() AND stats_reset > now() - interval '1 hour'
 	          FROM ${P}_info()}), 't', 'stats_reset is set at startup');
 	is(diag_counters() . ' ' . churn_counters(), '0 0 0 0 0 0 0 0',

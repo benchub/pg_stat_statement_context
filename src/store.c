@@ -90,6 +90,8 @@ typedef struct PsscSharedState
 	pg_atomic_uint64 dropped_tags;
 	pg_atomic_uint64 regex_compile_failures;
 	pg_atomic_uint64 heuristic_scans;
+	pg_atomic_uint64 capped_tags;
+	pg_atomic_uint64 cap_table_full;
 	pg_atomic_uint64 utility_missing_queryid;
 	pg_atomic_uint64 dropped_records;	/* new keys dropped: no room even
 										 * after an eviction pass */
@@ -336,6 +338,8 @@ store_shmem_startup(void)
 		pg_atomic_init_u64(&state->dropped_tags, 0);
 		pg_atomic_init_u64(&state->regex_compile_failures, 0);
 		pg_atomic_init_u64(&state->heuristic_scans, 0);
+		pg_atomic_init_u64(&state->capped_tags, 0);
+		pg_atomic_init_u64(&state->cap_table_full, 0);
 		pg_atomic_init_u64(&state->utility_missing_queryid, 0);
 		pg_atomic_init_u64(&state->dropped_records, 0);
 	}
@@ -684,7 +688,8 @@ static inline bool
 stats_nonzero(const PsscTagsetStats *s)
 {
 	return s->invalid_tags != 0 || s->dropped_tags != 0 ||
-		s->heuristic_scans != 0 || s->regex_compile_failures != 0;
+		s->heuristic_scans != 0 || s->regex_compile_failures != 0 ||
+		s->capped_tags != 0 || s->cap_table_full != 0;
 }
 
 /*
@@ -709,6 +714,10 @@ add_diagnostics_locked(PsscTagsetStats *stats, uint64 utility_missing_queryid)
 	if (stats->regex_compile_failures)
 		pg_atomic_fetch_add_u64(&store_state->regex_compile_failures,
 								stats->regex_compile_failures);
+	if (stats->capped_tags)
+		pg_atomic_fetch_add_u64(&store_state->capped_tags, stats->capped_tags);
+	if (stats->cap_table_full)
+		pg_atomic_fetch_add_u64(&store_state->cap_table_full, stats->cap_table_full);
 	if (utility_missing_queryid)
 		pg_atomic_fetch_add_u64(&store_state->utility_missing_queryid,
 								utility_missing_queryid);
@@ -905,6 +914,8 @@ pssc_store_reset(void)
 	pg_atomic_write_u64(&store_state->dropped_tags, 0);
 	pg_atomic_write_u64(&store_state->regex_compile_failures, 0);
 	pg_atomic_write_u64(&store_state->heuristic_scans, 0);
+	pg_atomic_write_u64(&store_state->capped_tags, 0);
+	pg_atomic_write_u64(&store_state->cap_table_full, 0);
 	pg_atomic_write_u64(&store_state->utility_missing_queryid, 0);
 	pg_atomic_write_u64(&store_state->dropped_records, 0);
 	/* current_bucket never decreases, and the epoch is fixed: both kept */
@@ -935,6 +946,8 @@ read_counters_locked(PsscStoreCounters *c)
 	c->regex_compile_failures =
 		(int64) pg_atomic_read_u64(&store_state->regex_compile_failures);
 	c->heuristic_scans = (int64) pg_atomic_read_u64(&store_state->heuristic_scans);
+	c->capped_tags = (int64) pg_atomic_read_u64(&store_state->capped_tags);
+	c->cap_table_full = (int64) pg_atomic_read_u64(&store_state->cap_table_full);
 	c->utility_missing_queryid =
 		(int64) pg_atomic_read_u64(&store_state->utility_missing_queryid);
 	c->dropped_records = (int64) pg_atomic_read_u64(&store_state->dropped_records);

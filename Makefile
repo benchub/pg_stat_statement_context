@@ -25,7 +25,8 @@ OBJS = \
 	src/counters.o \
 	src/store.o \
 	src/activity.o \
-	src/activity_fn.o
+	src/activity_fn.o \
+	src/cardcap.o
 PGFILEDESC = "pg_stat_statement_context - per-tag statement statistics from SQL comments"
 
 EXTENSION = pg_stat_statement_context

@@ -43,6 +43,15 @@
  * Footer fallback (§6.5): if the statement's own range yields no tag, the
  * whole chain is run again on the comments after the range, found with
  * pssc_scan_footer() (only reported if the statement is provably the last).
+ * Cardinality caps (step 8, env->cap; NULL: off): each deduplicated tag
+ * that serialization considers is first offered to env->cap, which keeps
+ * its value or collapses it to null (counted in capped_tags, and also in
+ * cap_table_full when the tracking table was full). The value is only
+ * admitted (env->cap with admit = true) when it is about to be stored as a
+ * string, so a tag that serialization drops never uses up a distinct
+ * value; when the string would not fit, env->cap is only asked (admit =
+ * false) whether the value would collapse, and the tag is then kept as
+ * null if that fits, like steps 8 and 9 in sequence.
  * Serialization: tags are taken in priority order, and each is kept if it
  * still fits both max_tags and max_tagset_bytes, otherwise dropped (counted
  * in dropped_tags); a lower-priority tag that fits is kept after a
@@ -51,7 +60,11 @@
  * when tags = '*' (so overflow is dropped in reverse sorted-key order). The
  * kept tags are sorted by key (bytewise, a prefix sorts first) and written
  * as key \0 value \0 ..., so the same tags in any order serialize to the same
- * bytes.
+ * bytes. A null value (step 8) is written as key \0 \0 \0: keys are never
+ * empty, so two NULs right after a key's terminator cannot start an empty
+ * string value (whose terminator is followed by the next key or the end),
+ * and a null never serializes, hashes or compares like any string. Read
+ * stored sets with pssc_tagset_next().
  */
 #ifndef PSSC_TAGSET_H
 #define PSSC_TAGSET_H
@@ -110,6 +123,26 @@ typedef PsscNormalizeResult (*PsscNormalizeFn) (void *arg,
 												size_t limit,
 												const char **out, size_t *outlen);
 
+/*
+ * Cardinality cap hook (step 8; backlog item 20261005-091225-32). Called
+ * with a final key (1..PSSC_MAX_KEY_LEN bytes) and its value after steps
+ * 1-7 (no NUL). Returns KEEP to keep the value, NULL to collapse it to null
+ * (its key is over its cap), or NULL_FULL to collapse it because the
+ * structure that tracks the distinct values is full (fail closed). With
+ * admit, a value that is kept must be counted as one of the key's distinct
+ * values from then on; without, nothing may change (the answer is what
+ * admit would return). Must not fail or throw.
+ */
+typedef enum PsscCapResult
+{
+	PSSC_CAP_KEEP = 0,
+	PSSC_CAP_NULL,
+	PSSC_CAP_NULL_FULL
+} PsscCapResult;
+
+typedef PsscCapResult (*PsscCapFn) (void *arg, const char *key, size_t klen,
+									const char *val, size_t vlen, bool admit);
+
 typedef struct PsscTagsetEnv
 {
 	void	   *arg;			/* passed to every callback */
@@ -136,6 +169,9 @@ typedef struct PsscTagsetEnv
 
 	/* Value normalization (step 6); NULL means no rules. */
 	PsscNormalizeFn normalize;
+
+	/* Per-key cardinality caps (step 8); NULL means no caps. */
+	PsscCapFn	cap;
 } PsscTagsetEnv;
 
 typedef struct PsscTagsetLimits
@@ -191,6 +227,14 @@ typedef struct PsscTagsetStats
 	 */
 	uint64_t	normalized_tags;
 	uint64_t	normalize_failures;
+
+	/*
+	 * Step 8: tags whose value was collapsed to null by a cardinality cap,
+	 * and among them those collapsed because the tracking structure was
+	 * full (PSSC_CAP_NULL_FULL). Both in _info().
+	 */
+	uint64_t	capped_tags;
+	uint64_t	cap_table_full;
 } PsscTagsetStats;
 
 typedef struct PsscTagsetOut
@@ -334,5 +378,56 @@ extern void pssc_tagset_build_with_override(const char *s, size_t start,
  */
 extern size_t pssc_tag_escaped_len(const char *s, size_t len);
 extern size_t pssc_tag_escape(const char *s, size_t len, char *dst);
+
+/* One tag of a serialized set, as pssc_tagset_next() returns it. */
+typedef struct PsscTagView
+{
+	const char *key;
+	size_t		klen;
+	const char *val;			/* NULL for a null value */
+	size_t		vlen;			/* 0 for a null value */
+	bool		isnull;
+} PsscTagView;
+
+/*
+ * Reads the tag at *off of the serialized set buf[0, len) into *t and
+ * advances *off past it. Returns false at the end, or on bytes that are not
+ * a well-formed tag (an empty key, or a key or value without its
+ * terminator); the rest is then ignored. A null value is key \0 \0 \0.
+ * Inline, so test modules and standalone builds can use it.
+ */
+static inline bool
+pssc_tagset_next(const char *buf, size_t len, size_t *off, PsscTagView *t)
+{
+	size_t		o = *off;
+	size_t		k = o;
+	size_t		v;
+
+	while (k < len && buf[k] != '\0')
+		k++;
+	if (k >= len || k == o)
+		return false;
+	t->key = buf + o;
+	t->klen = k - o;
+	v = k + 1;
+	if (v + 1 < len && buf[v] == '\0' && buf[v + 1] == '\0')
+	{
+		t->val = NULL;
+		t->vlen = 0;
+		t->isnull = true;
+		*off = v + 2;
+		return true;
+	}
+	o = v;
+	while (v < len && buf[v] != '\0')
+		v++;
+	if (v >= len)
+		return false;
+	t->val = buf + o;
+	t->vlen = v - o;
+	t->isnull = false;
+	*off = v + 1;
+	return true;
+}
 
 #endif							/* PSSC_TAGSET_H */

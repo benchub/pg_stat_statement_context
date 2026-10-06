@@ -44,9 +44,9 @@ SHOW pg_stat_statement_context.normalize;
 -- Both new counters are part of the result.
 SELECT pg_stat_statement_context_extract('SELECT 1 /*route:/users/42*/')
        - 'stmt_start' - 'stmt_end' AS full_result;
-                                                                                                                         full_result                                                                                                                          
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- {"oom": false, "tags": {"route": "/users/:id"}, "ntags": 1, "footer": false, "heuristic": false, "dropped_tags": 0, "invalid_tags": 0, "tagset_bytes": 17, "heuristic_scans": 0, "normalized_tags": 1, "normalize_failures": 0, "regex_compile_failures": 0}
+                                                                                                                                  full_result                                                                                                                                   
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"oom": false, "tags": {"route": "/users/:id"}, "ntags": 1, "footer": false, "heuristic": false, "capped_tags": 0, "dropped_tags": 0, "invalid_tags": 0, "tagset_bytes": 17, "heuristic_scans": 0, "normalized_tags": 1, "normalize_failures": 0, "regex_compile_failures": 0}
 (1 row)
 
 -- ---- one rule ----

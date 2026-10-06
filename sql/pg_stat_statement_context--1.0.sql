@@ -72,7 +72,9 @@ GRANT SELECT ON pg_stat_statement_context_activity TO PUBLIC;
 --   {"tags": {...}, "ntags", "tagset_bytes", "footer", "heuristic", "oom",
 --    "stmt_start", "stmt_end", "invalid_tags", "dropped_tags",
 --    "heuristic_scans", "regex_compile_failures", "normalized_tags",
---    "normalize_failures"}
+--    "normalize_failures", "capped_tags"}
+-- A value over its key's cardinality cap shows as JSON null (capped_tags
+-- counts them); the caps are only peeked at, no value is admitted.
 -- In a SQL_ASCII database, non-ASCII bytes and '\' in tag keys and values
 -- are escaped as \xHH and \\ (tagset_bytes counts the stored bytes).
 -- Records nothing and works even when pg_stat_statement_context.enabled is
@@ -92,8 +94,11 @@ REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PU
 -- max_entries, eviction passes (dealloc) and the entries they removed
 -- (evicted_entries), buckets (= bucket_count), oldest_bucket (start of the
 -- oldest live bucket of any entry; NULL if none), the exact shared memory
--- size requested at startup (shmem_bytes), the extraction counters, and
--- the time of the last reset (or of startup). Readable by everyone, like
+-- size requested at startup (shmem_bytes) and for the separate cardinality
+-- caps table (cap_shmem_bytes), the extraction counters, the
+-- values collapsed to null by the cardinality caps (capped_tags; of which
+-- cap_table_full because the tracking table was full), and the time of the
+-- last reset (or of startup). Readable by everyone, like
 -- pg_stat_statements_info.
 CREATE FUNCTION pg_stat_statement_context_info(
     OUT entries bigint,
@@ -103,19 +108,22 @@ CREATE FUNCTION pg_stat_statement_context_info(
     OUT buckets int,
     OUT oldest_bucket timestamptz,
     OUT shmem_bytes bigint,
+    OUT cap_shmem_bytes bigint,
     OUT invalid_tags bigint,
     OUT dropped_tags bigint,
     OUT heuristic_scans bigint,
     OUT regex_compile_failures bigint,
     OUT utility_missing_queryid bigint,
+    OUT capped_tags bigint,
+    OUT cap_table_full bigint,
     OUT stats_reset timestamptz
 )
 RETURNS record
 AS 'MODULE_PATHNAME', 'pg_stat_statement_context_info'
 LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
 
--- Removes every entry, zeroes every counter of _info() and sets
--- stats_reset. Superuser-only by default; GRANT EXECUTE to allow others.
+-- Removes every entry, zeroes every counter of _info(), sets stats_reset
+-- and empties the cardinality caps' sets of admitted values. Superuser-only by default; GRANT EXECUTE to allow others.
 CREATE FUNCTION pg_stat_statement_context_reset()
 RETURNS void
 AS 'MODULE_PATHNAME', 'pg_stat_statement_context_reset'

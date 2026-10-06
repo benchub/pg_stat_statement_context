@@ -546,3 +546,39 @@ pssc_store_test_fail_next_eviction_alloc(PG_FUNCTION_ARGS)
 	((void_fn) main_sym("pssc_store_debug_fail_next_eviction_alloc")) ();
 	PG_RETURN_VOID();
 }
+
+/* ------------------------------------------- cardinality caps (cardcap.h) */
+
+typedef void (*set_cap_hook_fn) (void (*) (void *), void *);
+
+PG_FUNCTION_INFO_V1(pssc_store_test_cap_near_wrap);
+Datum
+pssc_store_test_cap_near_wrap(PG_FUNCTION_ARGS)
+{
+	((void_fn) main_sym("pssc_cap_test_near_wrap")) ();
+	PG_RETURN_VOID();
+}
+
+static char cap_release_file[MAXPGPATH];
+
+static void
+stall_cap_clear_hook(void *arg)
+{
+	struct stat st;
+
+	for (int i = 0; i < 12000 && stat(cap_release_file, &st) != 0; i++)
+	{
+		(void) WaitLatch(MyLatch, WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 10L,
+						 WAIT_EVENT_PG_SLEEP);
+		ResetLatch(MyLatch);
+	}
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_stall_next_cap_clear);
+Datum
+pssc_store_test_stall_next_cap_clear(PG_FUNCTION_ARGS)
+{
+	strlcpy(cap_release_file, text_to_cstring(PG_GETARG_TEXT_PP(0)), MAXPGPATH);
+	((set_cap_hook_fn) main_sym("pssc_cap_set_reset_test_hook")) (stall_cap_clear_hook, NULL);
+	PG_RETURN_VOID();
+}

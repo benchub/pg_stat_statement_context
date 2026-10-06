@@ -40,9 +40,9 @@ SELECT has_function_privilege('public',
 -- Every key of the result (DESIGN.md §7).
 SELECT pg_stat_statement_context_extract(
          'SELECT 1 /*controller:users,action:show,application:app*/');
-                                                                                                                                        pg_stat_statement_context_extract                                                                                                                                        
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- {"oom": false, "tags": {"action": "show", "controller": "users"}, "ntags": 2, "footer": false, "stmt_end": 57, "heuristic": false, "stmt_start": 0, "dropped_tags": 0, "invalid_tags": 0, "tagset_bytes": 29, "heuristic_scans": 0, "normalized_tags": 0, "normalize_failures": 0, "regex_compile_failures": 0}
+                                                                                                                                                 pg_stat_statement_context_extract                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"oom": false, "tags": {"action": "show", "controller": "users"}, "ntags": 2, "footer": false, "stmt_end": 57, "heuristic": false, "stmt_start": 0, "capped_tags": 0, "dropped_tags": 0, "invalid_tags": 0, "tagset_bytes": 29, "heuristic_scans": 0, "normalized_tags": 0, "normalize_failures": 0, "regex_compile_failures": 0}
 (1 row)
 
 SELECT jsonb_pretty(pg_stat_statement_context_extract(
@@ -60,6 +60,7 @@ SELECT jsonb_pretty(pg_stat_statement_context_extract(
      "stmt_end": 45,            +
      "heuristic": false,        +
      "stmt_start": 0,           +
+     "capped_tags": 0,          +
      "dropped_tags": 0,         +
      "invalid_tags": 0,         +
      "tagset_bytes": 29,        +

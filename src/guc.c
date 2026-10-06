@@ -18,6 +18,7 @@
 #include "utils/guc.h"
 #include "utils/memutils.h"
 
+#include "cardcap.h"
 #include "compat.h"
 #include "guc.h"
 #include "pairs.h"
@@ -2016,6 +2017,9 @@ pssc_guc_define(void)
 							   check_tags_override,
 							   assign_tags_override,
 							   NULL);
+
+	/* cardinality caps (cardcap.c); before the prefix is reserved */
+	pssc_cap_define_gucs();
 
 	PSSC_MARK_GUC_PREFIX_RESERVED(PSSC_GUC_PREFIX);
 }

@@ -260,6 +260,9 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.tags` | `'action, controller, job'` | sighup | Allowlist of tag keys to keep, applied after `rename`. Tags not listed are discarded. `'*'` keeps all tags (not recommended, see §6.1). |
 | `pg_stat_statement_context.exclude_tags` | `'traceparent, tracestate, request_id'` | sighup | Denylist (high-cardinality). Only relevant when `tags = '*'`. |
 | `pg_stat_statement_context.normalize` | `''` | sighup | Per-key value rewrite rules `key: 'pattern' => 'replacement', …` (item -41). Rules apply in order, each like `regexp_replace(v COLLATE "C", p, r, 'g')`. Patterns may not contain back-references; replacements may use `\1`–`\9`, `\&`, `\\`. Limits: at most 32 rules, 1 kB per pattern or replacement. Validated at SET/reload (§6.11 step 6). |
+| `pg_stat_statement_context.cardinality_cap` | `0` | sighup | Default cap on distinct values per kept key, counted server-wide (item -32, §6.1). `0` = off; range 0..1000000. Once a key has had its cap of values, any other value is stored as JSON `null`. |
+| `pg_stat_statement_context.cardinality_cap_overrides` | `''` | sighup | Per-key caps `key:N[, key:N…]` that take precedence over `cardinality_cap` (the key is everything before the last `:`, matched after `rename`). `N = 0` exempts the key; an override applies even when the default is 0. |
+| `pg_stat_statement_context.cardinality_cap_slots` | `16384` | postmaster | Value slots in the shared cap-tracking table (about 9 bytes each, plus key slots). Always allocated, so caps can be turned on by a reload. |
 | `pg_stat_statement_context.untagged` | `skip` | sighup | `skip` statements without tags (default, decided 2026-10-05, §11 Q1) / `record` them with an empty tag set. |
 
 The configuration lives in GUCs only; there is no separate config file
@@ -668,10 +671,32 @@ example, an unnormalized route like `/users/123`), or if a buggy or malicious
 client sends random values for an allowed key.
 **Mitigation:** the restrictive default allowlist, a denylist of known
 high-cardinality keys for anyone who opts into `tags = '*'`,
-`max_tag_value_len` truncation, and `_info()` counters for evictions. Roadmap
-(§8): per-key value normalization rules, per-key cardinality caps that
-collapse overflow values to JSON `null`, plus exemplar storage. `null` cannot
-collide with a real value, because a client can only send strings.
+`max_tag_value_len` truncation, `_info()` counters for evictions, per-key value
+normalization rules (`normalize`, item -41), and per-key cardinality caps
+(item -32, below). Exemplar storage is on the roadmap (§8).
+
+**Cardinality caps** (item -32, landed 2026-10-06): `cardinality_cap` and
+`cardinality_cap_overrides` (§4.1) bound the distinct values per key, counted
+globally (not per bucket or `queryid`). Values beyond the cap collapse to JSON
+`null`, which cannot collide with a real value because a client can only send
+strings; the statements still count, in one `null` entry per query and
+remaining tags. The tracking table is a separate lock-free shared-memory area:
+open addressing with CAS on 64-bit words holding a generation number and a
+44-bit value fingerprint (false-positive rate about n/2^44). Values never
+decay: eviction does not free them; only `_reset()` or a restart does.
+Resets are serialized by an LWLock that lookups and admissions never take;
+`_reset()` bumps a 64-bit reset count (O(1)), and every admission re-checks
+that count before updating a key's count, so it never repeats in practice.
+The 20-bit generation stored in table words is derived from it; once every
+2^20−1 resets it wraps, and that reset clears the whole table under the lock
+(new values collapse to `null` during the clear). `_reset()` clears the caps
+before the store. A value is admitted when tags are extracted at statement
+start, so failed statements also use cap space. When the table is full, new
+values collapse to `null` (fail closed) and are counted in `cap_table_full`
+as well as `capped_tags`. Known narrow races: a value another backend is
+inserting at the same moment can briefly collapse, and two backends inserting
+the same value can collapse a third. The count never exceeds the cap except
+through fingerprint false positives.
 
 ### 6.2 Long queries (e.g., 10k-element `IN` lists)
 Even a linear scan costs something on a 1 MB query string.
@@ -878,8 +903,12 @@ some server version, it is omitted on that version rather than exposed as
      config change and counted in `regex_compile_failures`. The CPU and
      compile limits are the regex extractor's (§4.2).
   7. truncate on a character boundary (`pg_mbcliplen`)
-  8. *(roadmap)* per-key cardinality caps, collapsing overflow values to
-     JSON `null` (§8)
+  8. per-key cardinality caps (item -32, §6.1): a value beyond its key's cap
+     becomes `null`, stored internally as `key\0\0\0` (no client string can
+     produce this) and output as JSON `null`. A `null` counts as 2 bytes toward
+     `max_tagset_bytes`. Only tags that step 9 keeps are admitted to the cap,
+     so a dropped tag never uses up cap space; a capped value still counts as
+     "produced" for the extractor chain.
   9. sort and serialize within `max_tags` and `max_tagset_bytes`, using greedy
      fill (decided 2026-10-05):
      - Tags are considered in priority order: allowlist order, or sorted-key
@@ -976,9 +1005,10 @@ CREATE FUNCTION pg_stat_statement_context_info(
     OUT entries bigint, OUT max_entries bigint, OUT dealloc bigint,
     OUT evicted_entries bigint,
     OUT buckets int, OUT oldest_bucket timestamptz, OUT shmem_bytes bigint,
-    OUT invalid_tags bigint, OUT dropped_tags bigint,
+    OUT cap_shmem_bytes bigint, OUT invalid_tags bigint, OUT dropped_tags bigint,
     OUT heuristic_scans bigint, OUT regex_compile_failures bigint,
-    OUT utility_missing_queryid bigint, OUT stats_reset timestamptz) ...;
+    OUT utility_missing_queryid bigint, OUT capped_tags bigint,
+    OUT cap_table_full bigint, OUT stats_reset timestamptz) ...;
 ```
 
 Debug function (item -11, ships in 1.0):
@@ -994,7 +1024,8 @@ REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PU
   `tags`, `ntags`, `tagset_bytes`, `footer`, `heuristic`, `oom`, `stmt_start`,
   `stmt_end` (byte offsets), and this call's `invalid_tags`, `dropped_tags`,
   `heuristic_scans`, `regex_compile_failures`, `normalized_tags`,
-  `normalize_failures`.
+  `normalize_failures`, `capped_tags`. Cardinality caps are only checked,
+  never admitted, so calling it doesn't use up cap space.
 - Restricted because it runs the regex engine on arbitrary input (CPU cost) and
   reveals the extractor configuration; superusers may `GRANT` it.
 - Works when `enabled = off`; errors if the library isn't preloaded.
@@ -1012,14 +1043,18 @@ The column set is deliberately minimal (§5.1, decided 2026-10-05): `calls` and
 `total_exec_time` only. Rows, buffers, WAL, I/O timing, JIT, and
 min/max/mean/stddev come from `pg_stat_statements`, joined on
 `(userid, dbid, queryid, toplevel)`. `tags` is `jsonb` (decided 2026-10-05,
-§11 Q2), with string values (and `null` for values collapsed by the roadmap
-cardinality caps, §8).
+§11 Q2), with string values (and `null` for values collapsed by the
+cardinality caps, §6.1).
 
 `_info()` columns added on 2026-10-05: `evicted_entries` (§5.3),
 `dropped_tags` (tags dropped because the tag set would exceed `max_tags` or
 `max_tagset_bytes`, §4.1), and `regex_compile_failures` (lazy-compile failures,
 §4.2). Regex failures happen per backend, so they are flushed into a shared
-counter in the header.
+counter in the header. Added on 2026-10-06 (item -32): `capped_tags` (values
+collapsed to `null` by a cardinality cap) and `cap_table_full` (of those, the
+ones collapsed because the cap-tracking table was full). `shmem_bytes` covers
+the store only; `cap_shmem_bytes` is the exact size of the separate cap table
+(it is allocated even when caps are off).
 
 SRF implementation (item -20): materialize mode, `STRICT VOLATILE PARALLEL
 SAFE`, C symbol `pg_stat_statement_context_1_0`. Under the shared lock only raw
@@ -1038,7 +1073,7 @@ writer rolls them over. Non-merged rows of an entry come out in bucket order.
   session sees its own activity. It is callable by `PUBLIC`, like
   `pg_stat_statements_info`.
 - `_reset()` (superuser-only by default) takes the exclusive lock, clears all
-  entries and header counters, sets `stats_reset`, and discards the caller's
+  entries, header counters and the cardinality-cap value sets, sets `stats_reset`, and discards the caller's
   own pending counters. Counts from statements running elsewhere land after
   the reset. A backend whose regex failed before the reset keeps that
   extractor disabled and doesn't count the failure again.
@@ -1086,12 +1121,9 @@ matches this extension's minimum supported version.
 ## 8. Roadmap
 
 **v1.x — hardening**
-- **Per-key cardinality caps.** Values beyond a key's cap collapse to JSON
-  `null` before the key is built (§6.11 step 8). `null` can't collide with a
-  real value, since clients can only send strings. Adopted configuration
-  (2026-10-05): a global default cap GUC plus optional per-key overrides, with
-  distinct values counted globally per key (not per bucket or per `queryid`).
-  Collapses are counted in `_info()`.
+- ~~**Per-key cardinality caps.**~~ Done (item -32, 2026-10-06; §4.1, §6.1,
+  §6.11 step 8). Possible follow-up: decay of values unused for a while, so a
+  long-running server doesn't keep old values' cap space until `_reset()`.
 - **Exemplars:** store the most recent value of a high-cardinality key, such
   as `traceparent`, per entry, so users can jump from an aggregate to a real
   trace without the key exploding. Exemplar keys are an explicit list in a

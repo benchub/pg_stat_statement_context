@@ -33,6 +33,7 @@
 #include "utils/guc.h"
 #include "utils/memutils.h"
 
+#include "cardcap.h"
 #include "extract.h"
 #include "guc.h"
 #include "regex_runtime.h"
@@ -279,7 +280,7 @@ override_tags_get(const PsscTagsetLimits *limits, const PsscTagsetEnv *env,
 static void
 extract_tags(const char *s, size_t start, size_t end, char *buf,
 			 size_t bufsize, PsscExtractResult *result,
-			 PsscTagsetStats *stats)
+			 PsscTagsetStats *stats, bool peek_caps)
 {
 	PsscTagsetEnv env;
 	PsscTagsetLimits limits;
@@ -311,6 +312,8 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 		env.arg = (void *) pssc_guc_normalize();
 		env.normalize = env_normalize;
 	}
+	/* caps apply after the cached appname/override passes (steps 1-7) */
+	env.cap = pssc_cap_hook(peek_caps);
 
 	limits.max_tags = pssc_max_tags;
 	limits.max_tag_value_len = pssc_max_tag_value_len;
@@ -340,7 +343,7 @@ void
 pssc_extract_tags(const char *s, size_t start, size_t end, char *buf,
 				  size_t bufsize, PsscExtractResult *result)
 {
-	extract_tags(s, start, end, buf, bufsize, result, &pending_stats);
+	extract_tags(s, start, end, buf, bufsize, result, &pending_stats, false);
 }
 
 void
@@ -351,7 +354,7 @@ pssc_extract_tags_debug(const char *s, size_t start, size_t end, char *buf,
 	uint64		compile_failures = pending_stats.regex_compile_failures;
 
 	memset(stats, 0, sizeof(*stats));
-	extract_tags(s, start, end, buf, bufsize, result, stats);
+	extract_tags(s, start, end, buf, bufsize, result, stats, true);
 	stats->regex_compile_failures =
 		pending_stats.regex_compile_failures - compile_failures;
 }
@@ -392,6 +395,8 @@ pssc_extract_take_stats(PsscTagsetStats *stats)
 	stats->dropped_tags += pending_stats.dropped_tags;
 	stats->heuristic_scans += pending_stats.heuristic_scans;
 	stats->regex_compile_failures += pending_stats.regex_compile_failures;
+	stats->capped_tags += pending_stats.capped_tags;
+	stats->cap_table_full += pending_stats.cap_table_full;
 	memset(&pending_stats, 0, sizeof(pending_stats));
 }
 

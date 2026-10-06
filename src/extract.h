@@ -48,7 +48,8 @@ extern PGDLLEXPORT void pssc_extract_tags(const char *s, size_t start,
  * up in _info(). The exception is regex_compile_failures: a lazy compile
  * failure disables the extractor for the backend (the hooks will not fail,
  * and count, again), so it stays counted in the pending stats as well and
- * *stats reports it too.
+ * *stats reports it too. Cardinality caps (step 8) are only peeked at: a
+ * value is shown as null if it would collapse, but nothing is admitted.
  */
 extern void pssc_extract_tags_debug(const char *s, size_t start, size_t end,
 									char *buf, size_t bufsize,

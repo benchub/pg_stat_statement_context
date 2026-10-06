@@ -10,6 +10,7 @@
 #include "miscadmin.h"
 
 #include "activity.h"
+#include "cardcap.h"
 #include "compat.h"
 #include "context.h"
 #include "executor.h"
@@ -42,6 +43,7 @@ _PG_init(void)
 	pssc_regex_init();
 	pssc_store_init();
 	pssc_activity_init();
+	pssc_cap_init();
 	pssc_context_init();
 	pssc_executor_init();
 	pssc_utility_init();

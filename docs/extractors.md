@@ -101,7 +101,8 @@ an extractor, and an override pair the pipeline drops blocks nothing).
 An extractor *produces* when at least one of its tags is still a candidate
 after [pipeline](#the-tag-pipeline) steps 1–7 (validation, the allowlists and
 denylist, `rename`, normalization, truncation). That is decided **before** the
-final `max_tags` / `max_tagset_bytes` limits (step 8). If those limits then drop the
+cardinality caps and the final `max_tags` / `max_tagset_bytes` limits (steps 8
+and 9). A value a cap turns into `null` still counts as produced. If those limits then drop the
 winner's tags, the skipped extractors are not tried again. The statement can
 end up with fewer tags, or none at all. With `untagged = skip`, a statement
 left with no tags is not recorded.
@@ -109,7 +110,7 @@ left with no tags is not recorded.
 For example, with `max_tag_value_len = 1024` and `max_tagset_bytes = 128`, the
 statement `SELECT 1 /*controller='xxx…'*/ /*action:show*/`, with a 200-byte
 value, gets no tags at all (`dropped_tags` = 1). `sqlcommenter` wins with the
-oversized `controller` tag, which step 8 then drops, so the `marginalia`
+oversized `controller` tag, which step 9 then drops, so the `marginalia`
 comment `action:show` is never used. To avoid this, keep `max_tagset_bytes`
 comfortably above the largest possible tag set: the sum over your allowlisted
 keys of `length(key) + max_tag_value_len + 2`. (The defaults give 217 bytes
@@ -450,7 +451,13 @@ extractor finds goes through these steps:
    rules for its (final) key, in order. A pair whose normalization fails is
    dropped (counted in the debug function's `normalize_failures`).
 7. Truncate the value to `max_tag_value_len` bytes on a character boundary.
-8. Sort and store within `max_tags` and `max_tagset_bytes`: tags are taken in
+8. Apply the key's [cardinality cap](configuration.md#cardinality_cap), if
+   it has one: once the key has had its cap of distinct values (counted
+   server-wide, after the steps above), any other value is stored as JSON
+   `null` (counted in `capped_tags`). In `max_tagset_bytes` a `null` value
+   counts as 2 bytes (a string as its length plus 1). Only tags that step 9
+   keeps are admitted, so a dropped tag never uses up a cap.
+9. Sort and store within `max_tags` and `max_tagset_bytes`: tags are taken in
    priority order (`tags` list order, or sorted key order with `tags = '*'`).
    A tag is kept if it still fits; otherwise it is dropped (counted in
    `dropped_tags`) and the next one is tried, so an oversized tag never
@@ -510,7 +517,19 @@ can fill the table within seconds, evicting the useful entries.
   `max_prepared_statements`). See
   [Prepared statements](limitations.md#prepared-statements-carry-the-comment-from-prepare-time).
 
-Value normalization rules and per-key cardinality caps are not in v1.
+- **Cap the number of values per key** as a last line of defense:
+  [`cardinality_cap`](configuration.md#cardinality_cap) (and per-key
+  [`cardinality_cap_overrides`](configuration.md#cardinality_cap_overrides))
+  let each key keep its first N distinct values and record any other value
+  as JSON `null`. The statements still count, in a single `null` entry per
+  query and remaining tags, rather than in thousands of entries:
+
+  ```sql
+  SELECT tags, calls FROM pg_stat_statement_context_totals
+   WHERE tags->'route' = 'null';
+  ```
+
+  `_info().capped_tags` counts the values collapsed this way.
 
 [marginalia]: https://github.com/basecamp/marginalia
 [SQLCommenter]: https://google.github.io/sqlcommenter/

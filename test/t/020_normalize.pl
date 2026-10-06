@@ -211,7 +211,7 @@ sq("SELECT pssc_extract_test_regex_inject('norm_exec', 0, 'espace', 1)");
 is( sq(q{SELECT pg_stat_statement_context_extract('SELECT 1 /*route:/r/1,action:/a/1*/') }
 		  . q{- 'stmt_start' - 'stmt_end' - 'tagset_bytes'}),
 	'{"oom": false, "tags": {"action": "/a/A"}, "ntags": 1, "footer": false, "heuristic": false, '
-	  . '"dropped_tags": 0, "invalid_tags": 0, "heuristic_scans": 0, "normalized_tags": 1, '
+	  . '"capped_tags": 0, "dropped_tags": 0, "invalid_tags": 0, "heuristic_scans": 0, "normalized_tags": 1, '
 	  . '"normalize_failures": 1, "regex_compile_failures": 0}',
 	'the extract function reports normalize_failures');
 

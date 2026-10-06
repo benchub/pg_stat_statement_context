@@ -12,8 +12,15 @@
  *					oldest bucket_start the stats view can show; NULL if no
  *					slot is live (empty table, or every entry expired)
  *	shmem_bytes		exactly the size requested at startup (§5.1)
+ *	cap_shmem_bytes	exactly the size requested for the separate cardinality
+ *					caps table (cardinality_cap_slots; allocated even
+ *					when caps are off)
  *	invalid_tags, dropped_tags, heuristic_scans, regex_compile_failures,
- *	utility_missing_queryid, stats_reset
+ *	utility_missing_queryid
+ *	capped_tags, cap_table_full	values collapsed to null by the cardinality
+ *					caps (§6.11 step 8), and of those the ones collapsed
+ *					because the tracking table was full
+ *	stats_reset
  * Finding oldest_bucket scans the whole table under the shared lock, as the
  * stats SRF does. Like every reader, _info() first raises current_bucket to
  * the clock.
@@ -26,17 +33,22 @@
  * they end.
  *
  * _reset() (superuser by default: REVOKE ... FROM PUBLIC in the script)
- * removes every entry and zeroes every counter under the exclusive lock,
- * and sets stats_reset. Concurrent writers wait for the lock and record
- * after it; that includes each statement's flush of its diagnostic counters
- * (and its utility_missing_queryid), which is added under the shared lock as
- * a whole, so a reset never splits one statement's counters. The calling
+ * first empties the cardinality caps' sets of admitted values (see
+ * cardcap.h), so every key may take its cap of distinct values again;
+ * doing it first keeps values admitted before the reset out of the emptied
+ * store (except those of statements already in flight). It then removes
+ * every entry and zeroes every counter under the exclusive lock, and sets
+ * stats_reset. Concurrent writers wait for the lock and record after it;
+ * that includes each statement's flush of its diagnostic counters (and its
+ * utility_missing_queryid), which is added under the shared lock as a
+ * whole, so a reset never splits one statement's counters. The calling
  * backend's pending extraction counters belong to the reset statement
- * itself, which started before the reset: they are discarded. Other backends' pending counters (statements in flight during
- * the reset) are added after it, when those statements end. A backend whose
- * regex extractor failed to compile before the reset keeps it disabled
- * until the next configuration change and does not count the failure
- * again, so after a reset regex_compile_failures only counts new failures.
+ * itself, which started before the reset: they are discarded. Other
+ * backends' pending counters (statements in flight during the reset) are
+ * added after it, when those statements end. A backend whose regex
+ * extractor failed to compile before the reset keeps it disabled until the
+ * next configuration change and does not count the failure again, so after
+ * a reset regex_compile_failures only counts new failures.
  *
  * Both raise ERROR if the library was not preloaded, as the stats SRF does.
  * Both are PARALLEL RESTRICTED: the pending counters they flush or discard
@@ -49,12 +61,13 @@
 #include "funcapi.h"
 #include "utils/timestamp.h"
 
+#include "cardcap.h"
 #include "counters.h"
 #include "executor.h"
 #include "extract.h"
 #include "store.h"
 
-#define INFO_COLS	13
+#define INFO_COLS	16
 
 static void
 require_preloaded(void)
@@ -98,11 +111,14 @@ pg_stat_statement_context_info(PG_FUNCTION_ARGS)
 	else
 		values[i++] = TimestampTzGetDatum(pssc_store_bucket_start(oldest));
 	values[i++] = Int64GetDatum((int64) c.shmem_bytes);
+	values[i++] = Int64GetDatum((int64) pssc_cap_shmem_bytes());
 	values[i++] = Int64GetDatum(c.invalid_tags);
 	values[i++] = Int64GetDatum(c.dropped_tags);
 	values[i++] = Int64GetDatum(c.heuristic_scans);
 	values[i++] = Int64GetDatum(c.regex_compile_failures);
 	values[i++] = Int64GetDatum(c.utility_missing_queryid);
+	values[i++] = Int64GetDatum(c.capped_tags);
+	values[i++] = Int64GetDatum(c.cap_table_full);
 	values[i++] = TimestampTzGetDatum(c.stats_reset);
 	Assert(i == INFO_COLS);
 
@@ -120,6 +136,7 @@ pg_stat_statement_context_reset(PG_FUNCTION_ARGS)
 	require_preloaded();
 	memset(&discard, 0, sizeof(discard));
 	pssc_extract_take_stats(&discard);
+	pssc_cap_reset();
 	pssc_store_reset();
 	PG_RETURN_VOID();
 }

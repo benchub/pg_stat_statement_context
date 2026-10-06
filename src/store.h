@@ -131,6 +131,8 @@ typedef struct PsscStoreCounters
 	int64		dropped_tags;
 	int64		regex_compile_failures;
 	int64		heuristic_scans;
+	int64		capped_tags;	/* values collapsed to null by caps */
+	int64		cap_table_full; /* of which: the cap table was full */
 	int64		utility_missing_queryid;
 	int64		dropped_records;	/* records lost: no room after eviction */
 	TimestampTz stats_reset;

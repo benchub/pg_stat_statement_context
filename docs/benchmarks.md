@@ -123,6 +123,8 @@ The configurations per workload:
 | `prepend/ext` | `extractors = '…(position=prepend), …'` |
 | `ext-window-1MB` | `scan_window = '1MB'`: the window covers the whole 59 KB statement, so the scan is exact rather than heuristic |
 | `ext-max1000`, `ext-max10000` | `max_entries` = 1000 or 10000, with sustained eviction |
+| `ext-cap` | `cardinality_cap = 100` (see [Cardinality caps](#cardinality-caps)) |
+| `evict/ext-cap100`, `evict/ext-cap-full` | `cardinality_cap = 100`; or `cardinality_cap = 1000000` with `cardinality_cap_slots = 256` (a full table) |
 
 ## Results: PostgreSQL 18.6, full run
 
@@ -282,6 +284,52 @@ against −4.6%. Reproduce with:
 
 ```sh
 bench/run.sh --runs 6 --only '^append/(pgss|ext|ext-activity-reader)$'
+```
+
+## Cardinality caps
+
+With a [cardinality cap](configuration.md#cardinality_cap) set, each kept
+tag costs a lookup in a shared, lock-free hash table: a hash of key and
+value, then a few atomic reads (one compare-and-swap more for a new value).
+No lock is taken. Measured on PG 18.6 (Docker on an M1).
+
+**Microbenchmark**: 200,000 calls of
+[`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract)
+on `SELECT 1 /*action='show',controller='users'*/` (2 kept tags) in a
+PL/pgSQL loop; median of 5 alternating rounds per case. `_extract()` only
+peeks at the caps, but for an admitted value that is the hooks' path too:
+
+| Case | ns per call | vs caps off |
+|---|---:|---:|
+| caps off (`cardinality_cap = 0`: no check at all) | 3244 | |
+| both values admitted (steady state) | 3305 | +61 ns (≈ 30 ns per tag) |
+| `controller` over its cap (collapses to `null`) | 3282 | +38 ns |
+| table full (`cardinality_cap_slots = 256`, 64 probes per tag) | 3463 | +144 ns (vs 3319 off in the same run) |
+
+That is about 0.03% of a 0.12 ms point select per capped tag, and well
+under 0.2% even in the worst case of a full table.
+
+**pgbench A/B** (6 rounds; `ext-cap`: `cardinality_cap = 100`;
+`evict/ext-cap100`: the `evict` workload's random `controller` collapses
+after 100 values; `evict/ext-cap-full`: `cardinality_cap = 1000000`,
+`cardinality_cap_slots = 256`, so nearly every value fails closed):
+
+| Configuration | ΔTPS vs pgss [min, max] | Δp99 | Checks |
+|---|---:|---:|---|
+| `append/ext` | −7.0% [−9.6%, +9.2%] | +16.2% | |
+| `append/ext-cap` | −7.1% [−16.9%, +3.0%] | +15.6% | 1 entry, `capped_tags` 0 |
+| `evict/ext-max10000` | −12.3% [−19.1%, +11.2%] | +60.0% | 1630 eviction passes |
+| `evict/ext-cap100` | −4.4% [−24.4%, +24.6%] | +0.2% | 100 distinct values + `null`, no eviction |
+| `evict/ext-cap-full` | +1.9% [−6.5%, +20.7%] | −18.4% | 255 values, the rest `cap_table_full` |
+
+Ten other containers were running, and the baselines' TPS spread was up to
+59%, so these deltas are noise apart from their sign. The microbenchmark is
+the measurement. As expected, a cap on a flooded key removes the eviction
+churn: the entries stay at about 100 instead of turning over the whole
+table. Reproduce with:
+
+```sh
+bench/run.sh --runs 6 --only '^(append/(pgss|ext|ext-cap)|evict/(pgss|ext-max10000|ext-cap100|ext-cap-full))$'
 ```
 
 ## Findings

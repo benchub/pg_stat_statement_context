@@ -143,3 +143,15 @@ AS 'MODULE_PATHNAME' LANGUAGE C CALLED ON NULL INPUT;
 -- (pssc_store_debug_fail_next_eviction_alloc(); test/t/009_eviction.pl).
 CREATE FUNCTION pssc_store_test_fail_next_eviction_alloc() RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Cardinality caps (src/cardcap.h; test/t/024_cardinality_caps.pl): the
+-- next _reset() wraps the cap table's generation around (and so clears the
+-- whole table).
+CREATE FUNCTION pssc_store_test_cap_near_wrap() RETURNS void
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- One-shot (this backend): the next wrapping _reset() of the cap table
+-- sleeps in the middle of clearing it (wait event PgSleep) until
+-- release_file exists (at most two minutes).
+CREATE FUNCTION pssc_store_test_stall_next_cap_clear(release_file text) RETURNS void
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

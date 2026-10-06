@@ -140,6 +140,11 @@ Every distinct label combination is a separate time series.
   them out of the extension's allowlist (`pg_stat_statement_context.tags`); see
   [docs/extractors.md](../extractors.md).
 * Missing keys become `""`, so that every series has the same label set.
+  A value collapsed to JSON `null` by a
+  [cardinality cap](../configuration.md#cardinality_cap) becomes `""` too
+  (`->>` returns SQL `NULL`); to tell them apart, label it explicitly, e.g.
+  `CASE WHEN c.tags -> 'route' = 'null' THEN '(capped)' ELSE coalesce(c.tags ->> 'route', '') END`.
+  Caps are also a way to bound a label's values server-side.
 * The `job` tag would collide with Prometheus's `job` target label; the
   `tag_` prefix avoids that (`tag_job`).
 * `queryid` is exported only for the **top 5 query ids per tag set** (by time

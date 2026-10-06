@@ -156,8 +156,9 @@ sub pgbench
 		  . ($f2 - $f1) . ')');
 	is(sql(qq{SELECT string_agg(name, ',' ORDER BY name COLLATE "C")
 	            FROM pg_shmem_allocations WHERE name LIKE '$P%'}),
-		"$P,$P activity,$P hash",
-		'named allocations: the store header and hash table, and the activity slots');
+		"$P,$P activity,$P cardinality caps,$P hash",
+		'named allocations: the store header and hash table, the activity slots '
+		  . 'and the cardinality caps table');
 }
 
 # --------------------------------------------------------- boundary values

@@ -35,6 +35,9 @@ The GUCs exist only when the library is in `shared_preload_libraries`.
 | [`untagged`](#untagged) | enum | `skip` | `skip`, `record` | sighup |
 | [`normalize`](#normalize) | string | `''` | rule list | sighup |
 | [`tags_override`](#tags_override) | string | `''` | `key='value'` pairs | user |
+| [`cardinality_cap`](#cardinality_cap) | integer | `0` (off) | 0 – 1000000 | sighup |
+| [`cardinality_cap_overrides`](#cardinality_cap_overrides) | string | `''` | `key:N` list | sighup |
+| [`cardinality_cap_slots`](#cardinality_cap_slots) | integer | `16384` | 256 – 67108864 | postmaster |
 
 Every name has the prefix `pg_stat_statement_context.`. The contexts mean:
 
@@ -129,7 +132,8 @@ dropped.
 
 A hard cap on the size of an entry's serialized tag set, which is part of the
 hash key. The size of a tag set is the sum of
-`length(key) + 1 + length(value) + 1` bytes over its tags. Tags are kept
+`length(key) + 1 + length(value) + 1` bytes over its tags (a value
+[capped](#cardinality_cap) to `null` counts as 2 bytes). Tags are kept
 greedily in priority order (`tags` list order, or sorted key order with
 `tags = '*'`). A tag that doesn't fit is dropped and counted in
 `_info().dropped_tags`, and smaller lower-priority tags may still be kept.
@@ -330,6 +334,91 @@ comment's.
 Like comments, the override is supplied by the client: any user can
 attribute their statements to any tags, so tags are not a security
 boundary.
+
+### `cardinality_cap`
+
+The maximum number of distinct values of each tag key; `0` (the default)
+means no cap. Overridden per key by
+[`cardinality_cap_overrides`](#cardinality_cap_overrides). It is a last line
+of defense against a key whose values explode, from an unnormalized route,
+a bug, or a client sending random values (see
+[cardinality](extractors.md#allowlist-denylist-and-cardinality)):
+
+```
+pg_stat_statement_context.cardinality_cap = 100
+```
+
+- **Counted server-wide, per key.** Values are counted across all
+  databases, users, queries and buckets. A key's first N distinct values
+  (in the order statements bring them) are **admitted**; any other value is
+  recorded as JSON `null`, so all its statements share one entry per query
+  and other tags. Admitted values stay admitted: a value isn't forgotten
+  when its entries are evicted, only by
+  [`pg_stat_statement_context_reset()`](sql-interface.md#pg_stat_statement_context_reset)
+  or a restart. Lowering the cap doesn't remove values already admitted.
+- **Where it applies**: step 8 of the
+  [tag pipeline](extractors.md#the-tag-pipeline), after `rename`,
+  [`normalize`](#normalize) and truncation, to tags from every source
+  (comments, `application_name`, [`tags_override`](#tags_override)), and
+  only to tags that are then kept within `max_tags` and `max_tagset_bytes`.
+  Values are compared byte for byte; the cap is per **final** (renamed) key.
+- **`null` is unambiguous**: a client can only send strings (`'null'` and
+  `''` stay strings), so `tags->'route' = 'null'` finds exactly the collapsed
+  statements; `tags->>'route'` is SQL `NULL` for them.
+- **Counters**: each collapsed value is counted in `_info().capped_tags`;
+  [`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract)
+  shows what would collapse without admitting anything.
+- **When**: a value is admitted when its tags are extracted, at
+  `ExecutorStart`, so it takes its place even if the statement then fails.
+  `ExecutorStart` also runs for statements that are never executed or
+  recorded: a portal that is bound but never executed (extended protocol
+  `Bind` without `Execute`) and a plain `EXPLAIN` (without `ANALYZE`). Their
+  values use cap space too. Under concurrency a key
+  can very rarely collapse one value too many while two sessions admit its
+  last values at the same time; it never exceeds its cap. While a `_reset()`
+  clears the whole table (needed about once every million resets, when
+  its generation number wraps around), new values collapse to `null` for
+  that moment.
+- **Cost**: the check is a lock-free lookup in a shared hash table (a few
+  atomic reads, plus a compare-and-swap for a new value), with no lock
+  taken; see [benchmarks](benchmarks.md#cardinality-caps). With no cap
+  configured, nothing is checked.
+
+### `cardinality_cap_overrides`
+
+Per-key caps that take precedence over
+[`cardinality_cap`](#cardinality_cap): a comma-separated list of `key:N`
+entries. `N = 0` exempts the key from the default cap. Empty by default.
+
+```
+pg_stat_statement_context.cardinality_cap = 100
+pg_stat_statement_context.cardinality_cap_overrides = 'route:500, job:0'
+```
+
+Whitespace around entries, keys and numbers is ignored. The key is
+everything before the entry's last `:` (so `a:b:3` caps the key `a:b`), at
+most 63 bytes, without whitespace or `*`; it is matched exactly against the
+final (renamed) key. `N` is 0 – 1000000. A malformed list (an entry without
+`:N`, an empty entry, a key listed twice, more than 1024 entries) is
+rejected and the previous value stays in effect. Overrides work without a
+default cap (`cardinality_cap = 0`): then only the listed keys are capped.
+
+### `cardinality_cap_slots`
+
+The number of distinct (key, value) pairs the caps can track, server-wide,
+in a shared table allocated at startup (8 bytes per slot, plus 16 bytes per
+key slot, one key slot per 16 value slots and at least 64; about 144 kB at
+the default). It is allocated even while no cap is set, so caps can be
+turned on with a reload. This memory is not part of `_info().shmem_bytes`;
+`_info().cap_shmem_bytes` reports its exact size (about 576 MiB at the
+maximum of 2^26 slots).
+
+Size it above the sum of the caps of the keys you expect, with headroom
+(the table is an open-addressing hash table that slows down and fills
+early when nearly full). When a new value finds no room (or a new key finds
+no key slot), the value is recorded as `null`, as if over its cap, and
+counted in both `_info().capped_tags` and `_info().cap_table_full`: the
+caps fail closed. `pg_stat_statement_context_reset()` empties the table.
 
 ## Changing the configuration from SQL
 

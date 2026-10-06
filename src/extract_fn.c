@@ -11,7 +11,10 @@
  * regex compile failure, which is per-backend state; see extract.h). It
  * works whatever "enabled" says: it is a debugging tool. EXECUTE is revoked
  * from PUBLIC by the install script, because it runs the regex engine on
- * arbitrary input and reveals the extractor configuration.
+ * arbitrary input and reveals the extractor configuration. The cardinality
+ * caps (§6.11 step 8) are only peeked at: a value that would collapse shows
+ * as null (counted in capped_tags), but no value is admitted, so calling it
+ * does not use up any key's cap.
  *
  * The statement is located as the parser reports it: stmt_location -1
  * means the whole string, stmt_len 0 means to the end; both are in bytes.
@@ -131,6 +134,7 @@ pg_stat_statement_context_extract(PG_FUNCTION_ARGS)
 	push_int(&st, "regex_compile_failures", (int64) stats.regex_compile_failures);
 	push_int(&st, "normalized_tags", (int64) stats.normalized_tags);
 	push_int(&st, "normalize_failures", (int64) stats.normalize_failures);
+	push_int(&st, "capped_tags", (int64) stats.capped_tags);
 
 	result = pushJsonbValue(&st, WJB_END_OBJECT, NULL);
 

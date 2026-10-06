@@ -47,9 +47,9 @@ DETAIL:  Extractor "appname" requires parameter "keys".
 -- The result has the same keys as without appname extractors.
 SELECT string_agg(k, ', ' ORDER BY k) AS result_keys
   FROM jsonb_object_keys(pg_stat_statement_context_extract('SELECT 1')) k;
-                                                                                    result_keys                                                                                    
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- dropped_tags, footer, heuristic, heuristic_scans, invalid_tags, normalize_failures, normalized_tags, ntags, oom, regex_compile_failures, stmt_end, stmt_start, tags, tagset_bytes
+                                                                                          result_keys                                                                                           
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ capped_tags, dropped_tags, footer, heuristic, heuristic_scans, invalid_tags, normalize_failures, normalized_tags, ntags, oom, regex_compile_failures, stmt_end, stmt_start, tags, tagset_bytes
 (1 row)
 
 SET application_name = 'controller=''users'',action=''sh%20ow''';

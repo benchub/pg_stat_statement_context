@@ -196,6 +196,7 @@ CONFIGS=(
 	"append/ext|append|ext||tagged|append/pgss"
 	"append/ext-any|append|ext|$ANY|tagged|append/pgss"
 	"append/ext-activity-reader|append|ext||tagged,reader|append/pgss|activity"
+	"append/ext-cap|append|ext|$EXT.cardinality_cap = 100|tagged,cap100|append/pgss"
 	"append/ext-1s-buckets|append|ext|$EXT.bucket_interval = '1s';$EXT.bucket_count = $BOUNDARY_BUCKETS|tagged,buckets|append/pgss"
 	"prepend/pgss|prepend|pgss||pgss|prepend/pgss"
 	"prepend/ext|prepend|ext|$PREPEND|tagged|prepend/pgss"
@@ -209,6 +210,8 @@ CONFIGS=(
 	"evict/pgss|evict|pgss||pgss|evict/pgss"
 	"evict/ext-max1000|evict|ext|$EXT.max_entries = 1000|evict|evict/pgss"
 	"evict/ext-max10000|evict|ext|$EXT.max_entries = 10000|evict|evict/pgss"
+	"evict/ext-cap100|evict|ext|$EXT.cardinality_cap = 100|capped,cap100|evict/pgss"
+	"evict/ext-cap-full|evict|ext|$EXT.cardinality_cap = 1000000;$EXT.cardinality_cap_slots = 256|capped,capfull|evict/pgss"
 )
 
 # Runs the checks for one measured run; prints a JSON object, fails on error.
@@ -278,6 +281,24 @@ check_run() {
 			[ "$d" -gt 0 ] && [ "$e" -gt 0 ] || fail "no evictions (dealloc $d, evicted_entries $e)"
 			[ "$n" -le "$m" ] || fail "entries $n > max_entries $m"
 			[ "$rows" -gt 100 ] || fail "only $rows distinct controller values: random tag not substituted?"
+			;;
+		capped | cap100 | capfull)
+			# cardinality caps: the random controller collapses to null
+			info=$(q "SELECT capped_tags || ' ' || cap_table_full FROM ${EXT}_info()")
+			read -r d e <<< "$info"
+			rows=$(q "SELECT count(DISTINCT tags->>'controller') FROM ${EXT}_totals")
+			add capped_tags "$d"; add cap_table_full "$e"; add distinct_controllers "$rows"
+			case $c in
+			capped)
+				[ "$d" -gt 0 ] || fail "capped_tags is 0: no value collapsed"
+				[ "$rows" -le 256 ] || fail "$rows distinct controller values > 256"
+				;;
+			cap100)
+				[ "$rows" -le 100 ] || fail "$rows distinct controller values > cap 100"
+				[ "$e" = 0 ] || fail "cap_table_full $e != 0"
+				;;
+			capfull) [ "$e" -gt 0 ] || fail "cap_table_full is 0: table never full" ;;
+			esac
 			;;
 		*) fail "unknown check $c" ;;
 		esac
