@@ -582,6 +582,7 @@ typedef struct Run
 	int			cap;			/* fake_cap per-key cap; 0 = env.cap NULL */
 	const char *exemplar;		/* exemplar_keys list; NULL = none */
 	int			ex_len;			/* limits.exemplar_value_len */
+	bool		cands;			/* want_cands: keep the result's cands */
 } Run;
 
 typedef struct Res
@@ -599,6 +600,8 @@ typedef struct Res
 	size_t		override_ntags;
 	bool		override_oom;
 	char		extext[4096];	/* captured exemplars: "i=v|i=v" */
+	char		cands[16384];	/* with Run.cands */
+	size_t		cands_len;
 } Res;
 
 static const char *
@@ -745,6 +748,7 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	buf = malloc(cfg.max_bytes ? cfg.max_bytes : 1);
 	memset(&out, 0x5a, sizeof(out));
 	out.buf = buf;
+	out.want_cands = cfg.cands;
 	if (cfg.appname)
 	{
 		memset(&at, 0x5a, sizeof(at));
@@ -821,6 +825,18 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	if (r.len <= (size_t) cfg.max_bytes)
 		memcpy(r.buf, buf, r.len);
 	check_serialized(name, &cfg, &r);
+	CHECK(!cfg.cands || out.oom || out.ntags == 0 || out.cands != NULL,
+		  "%s: %d tags without cands", name, out.ntags);
+	if (cfg.cands && out.cands != NULL)
+	{
+		CHECK(out.cands_len > 0 && !out.oom, "%s: cands", name);
+		assert(out.cands_len <= sizeof(r.cands));
+		memcpy(r.cands, out.cands, out.cands_len);
+		r.cands_len = out.cands_len;
+	}
+	else
+		CHECK(out.cands_len == 0 && (!cfg.cands || out.oom || out.len == 0),
+			  "%s: no cands for %zu bytes", name, out.len);
 	free(buf);
 	arena_free(a);
 	free(a);
@@ -833,6 +849,70 @@ static Res *
 run(const char *name, Run cfg, const char *s)
 {
 	return run_range(name, cfg, s, 0, strlen(s));
+}
+
+/*
+ * pssc_tagset_recap() of src (a run with cfg.cands) with cfg's limits and
+ * the fake cap if cfg.cap: as if src's build had run with this cap state.
+ */
+static Res *
+run_recap(const char *name, Run cfg, const Res *src)
+{
+	static Res	r;
+	Arena	   *a = calloc(1, sizeof(Arena));
+	PsscTagsetLimits lim;
+	PsscTagsetEnv env;
+	PsscTagsetOut out;
+	char	   *buf;
+	char	   *tags = malloc(src->len ? src->len : 1);
+	char	   *cands = malloc(src->cands_len ? src->cands_len : 1);
+
+	apply_defaults(&cfg);
+	memcpy(tags, src->buf, src->len);
+	memcpy(cands, src->cands, src->cands_len);
+	memset(&r, 0, sizeof(r));
+	memset(&lim, 0x5a, sizeof(lim));
+	lim.max_tags = cfg.max_tags;
+	lim.max_tagset_bytes = cfg.max_bytes;
+	memset(&env, 0, sizeof(env));
+	env.arg = a;
+	env.alloc = arena_alloc;
+	env.cap = cfg.cap > 0 ? fake_cap : NULL;
+	fake_cap_limit = cfg.cap;
+	a->fail_at = cfg.fail_at > 0 ? cfg.fail_at - 1 : -1;
+	buf = malloc(cfg.max_bytes ? cfg.max_bytes : 1);
+	memset(&out, 0x5a, sizeof(out));
+	out.buf = buf;
+	out.want_cands = true;
+	pssc_tagset_recap(tags, src->len, cands, src->cands_len, &lim, &env,
+					  &out, &r.st);
+	r.len = out.len;
+	r.ntags = out.ntags;
+	r.footer = out.footer;
+	r.oom = out.oom;
+	CHECK(!out.footer, "%s: footer", name);
+	for (int i = 0; i < PSSC_MAX_EXEMPLAR_KEYS; i++)
+		CHECK(!out.exemplars[i].set, "%s: exemplar %d", name, i);
+	if (r.len <= (size_t) cfg.max_bytes)
+		memcpy(r.buf, buf, r.len);
+	check_serialized(name, &cfg, &r);
+	CHECK(out.oom || out.ntags == 0 || out.cands != NULL,
+		  "%s: %d tags without cands", name, out.ntags);
+	if (out.cands != NULL)
+	{
+		CHECK(out.cands_len > 0 && !out.oom, "%s: cands", name);
+		memcpy(r.cands, out.cands, out.cands_len);
+		r.cands_len = out.cands_len;
+	}
+	else
+		CHECK(out.cands_len == 0 && r.len == 0 && r.ntags == 0,
+			  "%s: no cands for %zu bytes", name, r.len);
+	free(buf);
+	free(tags);
+	free(cands);
+	arena_free(a);
+	free(a);
+	return &r;
 }
 
 #define EXPECT(name, cfg, sql, exp) \
@@ -2358,6 +2438,185 @@ test_override(void)
 	}
 }
 
+#define EXPECT_RECAP(name, cfg, src, exp) \
+	do { \
+		Res *r_ = run_recap(name, cfg, src); \
+		CHECK(strcmp(r_->text, exp) == 0, "%s: got \"%s\", want \"%s\"", \
+			  name, r_->text, exp); \
+	} while (0)
+
+/*
+ * Steps 8-9 again under another cap state (pssc_tagset_recap, DESIGN.md
+ * §6.1 "Identity", backlog item 20261007-070036-2).
+ */
+static void
+test_recap(void)
+{
+	Run			c = {0};
+	Res		   *src = malloc(sizeof(Res));
+	Res		   *r;
+	char		sql[512];
+
+	c.cap = 1;
+	c.cands = true;
+
+	/* all kept as strings: the compact form, collapsed under another scope */
+	fake_cap_reset();
+	*src = *run("recap build", c, "SELECT 1 /*k:a1,j:x*/");
+	CHECK(strcmp(src->text, "j=x|k=a1") == 0 && src->cands_len == 3 &&
+		  src->cands[0] == 'P',
+		  "recap build: %s, cands %zu", src->text, src->cands_len);
+	fake_cap_reset();
+	EXPECT("recap admit b1", c, "SELECT 1 /*k:b1*/", "k=b1");
+	r = run_recap("recap other scope", c, src);
+	CHECK(strcmp(r->text, "j=x|k=\\N") == 0 && r->st.capped_tags == 1 &&
+		  r->st.cap_table_full == 0 && r->st.dropped_tags == 0,
+		  "recap other scope: %s capped %llu", r->text,
+		  (unsigned long long) r->st.capped_tags);
+	CHECK(cap_calls == 3, "recap other scope: %d cap calls", cap_calls);
+	/* the collapsed value is kept, so a later recap can admit it again */
+	*src = *r;
+	CHECK(src->cands_len > 0 && src->cands[0] == 'L', "recap explicit form");
+	fake_cap_reset();
+	EXPECT_RECAP("recap back", c, src, "j=x|k=a1");
+
+	/* a value collapsed at extraction is admitted where there is room */
+	fake_cap_reset();
+	EXPECT("recap fill b1", c, "SELECT 1 /*k:b1*/", "k=b1");
+	*src = *run("recap collapsed build", c, "SELECT 1 /*k:a1*/");
+	CHECK(strcmp(src->text, "k=\\N") == 0, "recap collapsed build: %s", src->text);
+	EXPECT_RECAP("recap same scope", c, src, "k=\\N");
+	fake_cap_reset();
+	EXPECT_RECAP("recap collapsed admitted", c, src, "k=a1");
+	/* cap off: everything a string */
+	c.cap = 0;
+	EXPECT_RECAP("recap cap off", c, src, "k=a1");
+	c.cap = 1;
+
+	/* drop priority (tags order) survives: b before a */
+	fake_cap_reset();
+	c.tags = "b,a";
+	c.max_bytes = 12;
+	*src = *run("recap prio build", c, "SELECT 1 /*a:1,b:vvvvvvvv*/");
+	CHECK(strcmp(src->text, "b=vvvvvvvv") == 0 && src->st.dropped_tags == 1,
+		  "recap prio build: %s", src->text);
+	fake_cap_reset();
+	r = run_recap("recap prio same", c, src);
+	CHECK(strcmp(r->text, "b=vvvvvvvv") == 0 && r->st.dropped_tags == 1,
+		  "recap prio same: %s dropped %llu", r->text,
+		  (unsigned long long) r->st.dropped_tags);
+	/* b collapsed: its null leaves room for a */
+	fake_cap_reset();
+	EXPECT("recap prio fill", c, "SELECT 1 /*b:w*/", "b=w");
+	EXPECT_RECAP("recap prio collapsed", c, src, "a=1|b=\\N");
+
+	/* compact form too: an empty b outranks a when nulls grow the set */
+	fake_cap_reset();
+	c.max_bytes = 7;
+	*src = *run("recap compact prio build", c, "SELECT 1 /*a='1',b=''*/");
+	CHECK(strcmp(src->text, "a=1|b=") == 0 && src->cands[0] == 'P',
+		  "recap compact prio build: %s", src->text);
+	fake_cap_reset();
+	EXPECT("recap compact prio fill a", c, "SELECT 1 /*a='x'*/", "a=x");
+	EXPECT("recap compact prio fill b", c, "SELECT 1 /*b='y'*/", "b=y");
+	r = run_recap("recap compact prio", c, src);
+	CHECK(strcmp(r->text, "b=\\N") == 0 && r->st.dropped_tags == 1 &&
+		  r->st.capped_tags == 1,
+		  "recap compact prio: %s dropped %llu capped %llu", r->text,
+		  (unsigned long long) r->st.dropped_tags,
+		  (unsigned long long) r->st.capped_tags);
+	c.tags = NULL;
+	c.max_bytes = 0;
+
+	/* tags that never fit are not kept; ones that might are */
+	fake_cap_reset();
+	c.max_bytes = 16;
+	c.max_value = 4096;
+	memset(sql, 'v', sizeof(sql));
+	/* not even as null: key \0 \0 \0 needs 19 bytes */
+	memcpy(sql, "SELECT 1 /*a:1,longlonglonglong:", 32);
+	memcpy(sql + 32 + 40, "*/", 3);
+	*src = *run("recap long build", c, sql);
+	CHECK(strcmp(src->text, "a=1") == 0 && src->cands[0] == 'L' &&
+		  src->cands_len == 1 + 4,
+		  "recap long build: %s cands %zu", src->text, src->cands_len);
+	c.max_bytes = 0;
+	c.max_value = 0;
+
+	/* at most 1 + 2 * max_tagset_bytes of candidates, in priority order */
+	fake_cap_reset();
+	c.max_bytes = 16;
+	*src = *run("recap budget build", c,
+				"SELECT 1 /*a:1,b:1,c:1,d:1,e:1,f:1,g:1,h:1,i:1,j:1,k:1,l:1*/");
+	CHECK(strcmp(src->text, "a=1|b=1|c=1|d=1") == 0 && src->cands[0] == 'L' &&
+		  src->cands_len == 33 && memcmp(src->cands + 29, "h\0" "1\0", 4) == 0,
+		  "recap budget build: %s cands %zu", src->text, src->cands_len);
+	fake_cap_reset();
+	EXPECT("recap budget fill", c, "SELECT 1 /*a:x,b:x,c:x,d:x,e:x,f:x*/",
+		   "a=x|b=x|c=x|d=x");
+	EXPECT("recap budget fill 2", c, "SELECT 1 /*e:x,f:x*/", "e=x|f=x");
+	/* a-f collapse and their nulls fill the set: g, h never needed */
+	EXPECT_RECAP("recap budget", c, src, "a=\\N|b=\\N|c=\\N|d=\\N");
+	c.max_bytes = 0;
+
+	/*
+	 * A kept tag after the budget ran out still gets cands (here none fit
+	 * the budget): no cands would mean the tags never need a recap.
+	 */
+	fake_cap_reset();
+	c.max_bytes = 128;
+	c.max_value = 4096;
+	memset(sql, 'v', sizeof(sql));
+	memcpy(sql, "SELECT 1 /*a:", 13);
+	memcpy(sql + 13 + 300, ",k:a1*/", 8);
+	*src = *run("recap budget first build", c, sql);
+	CHECK(strcmp(src->text, "k=a1") == 0 && src->cands_len == 1 &&
+		  src->cands[0] == 'L',
+		  "recap budget first build: %s cands %zu", src->text, src->cands_len);
+	fake_cap_reset();
+	EXPECT("recap budget first fill", c, "SELECT 1 /*k:b1*/", "k=b1");
+	EXPECT_RECAP("recap budget first", c, src, "");
+	c.max_bytes = 0;
+	c.max_value = 0;
+
+	/* max_tags still applies */
+	fake_cap_reset();
+	c.max_tags = 2;
+	*src = *run("recap max_tags build", c, "SELECT 1 /*a:1,b:2,c:3*/");
+	CHECK(strcmp(src->text, "a=1|b=2") == 0, "recap max_tags build: %s", src->text);
+	fake_cap_reset();
+	EXPECT_RECAP("recap max_tags", c, src, "a=1|b=2");
+	c.max_tags = 0;
+
+	/* no tags, or none that can fit: nothing to recap */
+	fake_cap_reset();
+	r = run("recap empty build", c, "SELECT 1");
+	CHECK(r->len == 0 && r->cands_len == 0, "recap empty build: %zu", r->cands_len);
+	c.max_bytes = 4;
+	r = run("recap none fit build", c, "SELECT 1 /*abcd:1*/");
+	CHECK(r->len == 0 && r->cands_len == 0 && r->st.dropped_tags == 1,
+		  "recap none fit build: %zu", r->cands_len);
+	c.max_bytes = 0;
+
+	/* allocation failure: empty, no cands */
+	fake_cap_reset();
+	*src = *run("recap oom build", c, "SELECT 1 /*k:a1*/");
+	for (int k = 1; k <= 3; k++)
+	{
+		c.fail_at = k;
+		r = run_recap("recap oom", c, src);
+		CHECK(r->oom && r->len == 0, "recap oom %d", k);
+	}
+	c.fail_at = 0;
+
+	/* a build that fails keeps no cands */
+	c.fail_at = 1;
+	r = run("recap build oom", c, "SELECT 1 /*k:a1*/");
+	CHECK(r->oom && r->cands_len == 0, "recap build oom");
+	c.fail_at = 0;
+	free(src);
+}
+
 /* Step 8: per-key cardinality caps (backlog item 20261005-091225-32). */
 static void
 test_caps(void)
@@ -2707,6 +2966,7 @@ main(int argc, char **argv)
 	test_appname();
 	test_override();
 	test_caps();
+	test_recap();
 	test_exemplars();
 
 	if (failures)

@@ -579,6 +579,11 @@ cmp_prio(const void *a, const void *b)
 	return 0;
 }
 
+static void place_tags(Ctx *c, Tag *tag, size_t n, Tag **order,
+					   PsscTagsetOut *out);
+static void encode_cands(Ctx *c, const Tag *tag, size_t n, Tag *const *order,
+						 bool all_strings, size_t maxbytes, PsscTagsetOut *out);
+
 /* Adds the tags of a pre-built source (appname or tags_override). */
 static void
 add_source(Ctx *c, const PsscSourceTags *src)
@@ -626,16 +631,14 @@ pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
 	Ctx			c;
 	size_t		base;
 	size_t		n = 0;
-	size_t		maxtags,
-				maxbytes,
-				used = 0,
-				kept = 0;
 	Tag		  **order;
 
 	out->len = 0;
 	out->ntags = 0;
 	out->footer = false;
 	out->oom = false;
+	out->cands = NULL;
+	out->cands_len = 0;
 	memset(out->exemplars, 0, sizeof(out->exemplars));
 
 	memset(&c, 0, sizeof(c));
@@ -680,15 +683,6 @@ pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
 		c.tag[n++] = c.tag[i];
 	}
 
-	/*
-	 * Greedy fill in priority order: keep each tag that still fits both
-	 * limits, drop the others. Step 8 runs on each tag just before it is
-	 * placed, so only values that are stored as strings are admitted (a
-	 * dropped tag never uses up one of its key's distinct values); when the
-	 * string does not fit, the cap is only asked whether the value would
-	 * collapse, and the tag is then kept as null if that fits: the result is
-	 * that of step 8 on every tag followed by step 9.
-	 */
 	order = ctx_alloc(&c, n * sizeof(Tag *));
 	if (order == NULL)
 		goto done;
@@ -697,24 +691,65 @@ pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
 	/* with tags = '*' the priority is the sorted key order: nothing to do */
 	if (!c.match_all)
 		qsort(order, n, sizeof(Tag *), cmp_prio);
-	maxtags = limits->max_tags > 0 ? (size_t) limits->max_tags : 0;
-	maxbytes = limits->max_tagset_bytes > 0 ? (size_t) limits->max_tagset_bytes : 0;
+	place_tags(&c, c.tag, n, order, out);
+
+done:
+	if (c.oom)
+	{
+		out->len = 0;
+		out->ntags = 0;
+		out->footer = false;
+		out->oom = true;
+		out->cands = NULL;
+		out->cands_len = 0;
+	}
+	else
+		memcpy(out->exemplars, c.exs, sizeof(out->exemplars));
+}
+
+/* The bytes a tag takes as a string or as null (step 9). */
+#define TAG_NEED(t)			((t)->klen + 1 + (t)->vlen + 1)
+#define TAG_NEED_NULL(t)	((t)->klen + 3) /* key \0 \0 \0 */
+
+/*
+ * Steps 8 and 9 on the deduplicated tags tag[0, n) (in key order; order:
+ * the same in priority order) into out, and out->cands if wanted.
+ *
+ * Greedy fill in priority order: keep each tag that still fits both
+ * limits, drop the others. Step 8 runs on each tag just before it is
+ * placed, so only values that are stored as strings are admitted (a
+ * dropped tag never uses up one of its key's distinct values); when the
+ * string does not fit, the cap is only asked whether the value would
+ * collapse, and the tag is then kept as null if that fits: the result is
+ * that of step 8 on every tag followed by step 9.
+ */
+static void
+place_tags(Ctx *c, Tag *tag, size_t n, Tag **order, PsscTagsetOut *out)
+{
+	size_t		maxtags,
+				maxbytes,
+				used = 0,
+				kept = 0,
+				strings = 0;
+
+	maxtags = c->lim->max_tags > 0 ? (size_t) c->lim->max_tags : 0;
+	maxbytes = c->lim->max_tagset_bytes > 0 ? (size_t) c->lim->max_tagset_bytes : 0;
 	for (size_t i = 0; i < n; i++)
 	{
 		Tag		   *t = order[i];
-		size_t		need = t->klen + 1 + t->vlen + 1;
-		size_t		need_null = t->klen + 3;	/* key \0 \0 \0 */
+		size_t		need = TAG_NEED(t);
+		size_t		need_null = TAG_NEED_NULL(t);
 		size_t		room = maxbytes - used;
 		PsscCapResult r;
 
 		if (kept >= maxtags)
 			break;
 		if (need <= room)
-			r = cap_result(&c, t, true);
-		else if (need_null <= room && c.env->cap != NULL)
+			r = cap_result(c, t, true);
+		else if (need_null <= room && c->env->cap != NULL)
 		{
 			/* kept only as null: never admitted */
-			r = cap_result(&c, t, false);
+			r = cap_result(c, t, false);
 			if (r == PSSC_CAP_KEEP)
 				continue;
 		}
@@ -727,18 +762,20 @@ pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
 				continue;
 			need = need_null;
 			t->isnull = true;
-			count_collapse(&c, r);
+			count_collapse(c, r);
 		}
+		else
+			strings++;
 		t->keep = true;
 		used += need;
 		kept++;
 	}
-	stats->dropped_tags += n - kept;
+	c->stats->dropped_tags += n - kept;
 
 	/* Serialize the kept tags in key order. */
 	for (size_t i = 0; i < n; i++)
 	{
-		const Tag  *t = &c.tag[i];
+		const Tag  *t = &tag[i];
 
 		if (!t->keep)
 			continue;
@@ -760,16 +797,206 @@ pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
 		out->ntags++;
 	}
 
+	if (out->want_cands)
+		encode_cands(c, tag, n, order, strings == n, maxbytes, out);
+}
+
+/*
+ * The input of steps 8-9 for pssc_tagset_recap() (format in tagset.h):
+ * with every tag kept as a string, their positions in out->buf; else the
+ * tags that can fit max_tagset_bytes at all (as a string or a null), up
+ * to PSSC_TAGSET_CANDS_MAX bytes: a prefix of them, so a recap keeps what a
+ * build would have kept of that prefix (possibly nothing). None only for
+ * an empty set, which needs no recap.
+ */
+static bool
+cand_fits(const Tag *t, size_t maxbytes)
+{
+	return TAG_NEED(t) <= maxbytes || TAG_NEED_NULL(t) <= maxbytes;
+}
+
+static void
+encode_cands(Ctx *c, const Tag *tag, size_t n, Tag *const *order,
+			 bool all_strings, size_t maxbytes, PsscTagsetOut *out)
+{
+	char	   *p;
+	size_t		len = 1;
+
+	/* an empty set obeys every cap; any other set needs cands */
+	if (out->ntags == 0)
+		return;
+	if (all_strings)
+	{
+		p = ctx_alloc(c, 1 + n);
+		if (p == NULL)
+			return;
+		p[0] = 'P';
+		for (size_t i = 0; i < n; i++)
+			p[len++] = (char) (unsigned char) (order[i] - tag);
+	}
+	else
+	{
+		for (size_t i = 0; i < n; i++)
+		{
+			if (!cand_fits(order[i], maxbytes))
+				continue;
+			if (len + TAG_NEED(order[i]) > PSSC_TAGSET_CANDS_MAX(maxbytes))
+				break;
+			len += TAG_NEED(order[i]);
+		}
+		p = ctx_alloc(c, len);
+		if (p == NULL)
+			return;
+		p[0] = 'L';
+		len = 1;
+		for (size_t i = 0; i < n; i++)
+		{
+			const Tag  *t = order[i];
+
+			if (!cand_fits(t, maxbytes))
+				continue;
+			if (len + TAG_NEED(t) > PSSC_TAGSET_CANDS_MAX(maxbytes))
+				break;
+			memcpy(p + len, t->key, t->klen);
+			len += t->klen;
+			p[len++] = '\0';
+			if (t->vlen > 0)
+				memcpy(p + len, t->val, t->vlen);
+			len += t->vlen;
+			p[len++] = '\0';
+		}
+	}
+	out->cands = p;
+	out->cands_len = len;
+}
+
+/* Reads one "key \0 value \0" of s[*pos, len) into t (no null values). */
+static bool
+read_pair(const char *s, size_t len, size_t *pos, Tag *t)
+{
+	const char *k = s + *pos;
+	const char *z = memchr(k, '\0', len - *pos);
+	const char *v;
+	const char *vz;
+
+	if (z == NULL || z == k)
+		return false;
+	v = z + 1;
+	if ((size_t) (v - s) >= len)
+		return false;
+	vz = memchr(v, '\0', len - (size_t) (v - s));
+	if (vz == NULL)
+		return false;
+	memset(t, 0, sizeof(*t));
+	t->key = k;
+	t->klen = (size_t) (z - k);
+	t->val = v;
+	t->vlen = (size_t) (vz - v);
+	*pos = (size_t) (vz - s) + 1;
+	return true;
+}
+
+void
+pssc_tagset_recap(const char *tags, size_t tags_len,
+				  const char *cands, size_t cands_len,
+				  const PsscTagsetLimits *limits,
+				  const PsscTagsetEnv *env,
+				  PsscTagsetOut *out,
+				  PsscTagsetStats *stats)
+{
+	Ctx			c;
+	Tag		  **order = NULL;
+	size_t		n = 0;
+	size_t		pos;
+
+	out->len = 0;
+	out->ntags = 0;
+	out->footer = false;
+	out->oom = false;
+	out->cands = NULL;
+	out->cands_len = 0;
+	memset(out->exemplars, 0, sizeof(out->exemplars));
+
+	memset(&c, 0, sizeof(c));
+	c.lim = limits;
+	c.env = env;
+	c.stats = stats;
+
+	if (cands_len == 0 || (cands[0] != 'P' && cands[0] != 'L'))
+		goto done;
+	if (cands[0] == 'P')
+	{
+		/* the serialized set holds them all, in key order, as strings */
+		n = cands_len - 1;
+		c.tag = ctx_alloc(&c, (n ? n : 1) * sizeof(Tag));
+		if (c.tag == NULL)
+			goto done;
+		pos = 0;
+		for (size_t i = 0; i < n; i++)
+		{
+			if (!read_pair(tags, tags_len, &pos, &c.tag[i]))
+			{
+				n = i;
+				break;
+			}
+			c.tag[i].seq = i;
+		}
+		for (size_t i = 1; i < cands_len; i++)
+		{
+			size_t		j = (unsigned char) cands[i];
+
+			if (j < n)
+				c.tag[j].prio = i - 1;
+		}
+	}
+	else
+	{
+		for (pos = 1; pos < cands_len; n++)
+		{
+			const char *z = memchr(cands + pos, '\0', cands_len - pos);
+
+			if (z == NULL)
+				break;
+			pos = (size_t) (z - cands) + 1;
+			z = memchr(cands + pos, '\0', cands_len - pos);
+			if (z == NULL)
+				break;
+			pos = (size_t) (z - cands) + 1;
+		}
+		c.tag = ctx_alloc(&c, (n ? n : 1) * sizeof(Tag));
+		if (c.tag == NULL)
+			goto done;
+		pos = 1;
+		for (size_t i = 0; i < n; i++)
+		{
+			if (!read_pair(cands, cands_len, &pos, &c.tag[i]))
+			{
+				n = i;
+				break;
+			}
+			c.tag[i].seq = i;
+			c.tag[i].prio = i;
+		}
+		/* keys are unique (deduplicated by the build) */
+		qsort(c.tag, n, sizeof(Tag), cmp_key_seq);
+	}
+	order = ctx_alloc(&c, (n ? n : 1) * sizeof(Tag *));
+	if (order == NULL)
+		goto done;
+	for (size_t i = 0; i < n; i++)
+		order[i] = &c.tag[i];
+	qsort(order, n, sizeof(Tag *), cmp_prio);
+	place_tags(&c, c.tag, n, order, out);
+
 done:
 	if (c.oom)
 	{
 		out->len = 0;
 		out->ntags = 0;
-		out->footer = false;
 		out->oom = true;
+		out->cands = NULL;
+		out->cands_len = 0;
 	}
-	else
-		memcpy(out->exemplars, c.exs, sizeof(out->exemplars));
 }
 
 /* The tags of a source pass (c->stats is out->stats) into *out. */

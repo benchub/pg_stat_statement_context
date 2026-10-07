@@ -26,7 +26,8 @@
  *	  (pg_stat_statements.track_utility and .track, read by name; this
  *	  extension's track_utility and track when pgss is not loaded),
  *	  PSSC_PGSS_NESTS_ONLY_TRACKED_UTILITIES;
- *	  frame and level are restored in PG_FINALLY.
+ *	  frame and level are restored after the chained call, on error too
+ *	  (PG_CATCH, which also releases the frame snapshot).
  * Whether the utility is recorded is decided by this extension's settings
  * alone.
  * The elapsed time is measured around the chained call, as pgss measures
@@ -219,13 +220,19 @@ pssc_ProcessUtility(PSSC_PROCESS_UTILITY_PARAMS)
 	{
 		chain(PSSC_PROCESS_UTILITY_ARGS);
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
 		if (alter_system)
 			pssc_regex_note_alter_system(false);
 		pssc_frame_leave(&save);
+		if (frame != NULL)
+			pssc_utility_frame_release(&uf);
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	if (alter_system)
+		pssc_regex_note_alter_system(false);
+	pssc_frame_leave(&save);
 
 	/* pstmt may be gone (COMMIT/ROLLBACK): only the snapshot from here on. */
 	if (frame != NULL)
@@ -246,6 +253,7 @@ pssc_ProcessUtility(PSSC_PROCESS_UTILITY_PARAMS)
 		else if (tracked && frame->recordable)
 			record_frame(frame, INSTR_TIME_GET_MILLISEC(duration), &pending);
 		pssc_store_add_tagset_stats(&pending);
+		pssc_utility_frame_release(&uf);
 	}
 }
 

@@ -71,8 +71,9 @@ extern void pssc_cap_init(void);
  * The env->cap hook for this backend's configuration, or NULL when no key
  * has a cap. With peek, the hook never admits (the debug function). The
  * hook checks values in the scope (cardinality_cap_scope) of userid and
- * dbid, which must be those the entry is recorded under; it stays valid
- * until the next call.
+ * dbid: the current ones at extraction, and the receiving user's when a
+ * tag set is re-capped for another user (context.h); it stays valid until
+ * the next call.
  */
 extern PsscCapFn pssc_cap_hook(bool peek, Oid userid, Oid dbid);
 

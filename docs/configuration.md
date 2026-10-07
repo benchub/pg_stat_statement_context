@@ -455,8 +455,8 @@ Takes effect at server start.
 
 - **`role`** (the default): per (role, database), the key of
   pg_stat_statements entries. Each role has its own cap for each key in each
-  database, and its own set of admitted values. The role is the current
-  user when the statement's tags are extracted, at `ExecutorStart`.
+  database, and its own set of admitted values. The role is the one the
+  entry is recorded under (see below).
 - **`database`**: per database, shared by all roles in it.
 - **`server`**: one cap per key for the whole server.
 
@@ -491,21 +491,28 @@ When the table is (nearly) full, new values of every scope become `null`,
 which any role can observe; like `pg_stat_statements.max`, it's a shared
 limit, so size it for all roles and databases.
 
-Two exceptions follow from the role being taken when the tags are
-extracted, which can differ from the role the entry is recorded under:
+Tags are capped when they are extracted, for the current user. When they
+end up recorded or shown under another role, the caps are applied again
+for that role first, so every row obeys the caps of the role it belongs
+to:
 
-- A cursor opened under one role and run to completion under another
-  (`SET ROLE` in between) is capped under the first and recorded under the
-  second.
-- Nested statements that inherit the caller's tags
-  ([`nested_tags = inherit`](#nested_tags)), as in a `SECURITY DEFINER`
-  function, keep the caller's cap decisions but are recorded under the
-  definer. Conversely, a cursor that a `SECURITY DEFINER` function opens
-  and the caller then fetches from is capped under the definer but recorded
-  in the caller's rows.
+- a cursor opened under one role and run to completion under another
+  (`SET ROLE` in between), or opened by a `SECURITY DEFINER` function and
+  fetched or closed by its caller, is recorded under the role that
+  finishes it (as in pg_stat_statements), with that role's caps;
+- statements that inherit the caller's tags
+  ([`nested_tags = inherit`](#nested_tags)) inside a `SECURITY DEFINER`
+  function are recorded under the definer, with the definer's caps;
+- a tagged `SET ROLE` (with [`track_utility`](#track_utility)) is recorded
+  under the new role, with its caps, and so is the
+  [activity view](sql-interface.md#pg_stat_statement_context_activity) row
+  of a portal run after a `SET ROLE`.
 
-Either way, observing one role's cap decisions from another needs
-membership in both roles, or a function whose owner controls the tag text.
+Applying the caps again admits the values kept as strings in that role's
+scope and counts collapses in `capped_tags` again. It uses the cap settings
+in effect at that moment. This costs nothing under `database` and `server`
+or while caps are off, and little memory otherwise (DESIGN.md §6.1
+"Identity").
 
 ### `cardinality_cap_slots`
 

@@ -48,6 +48,12 @@
  * without source text gets only those tags), so an inheriting nested
  * statement keeps the value its top-level statement started with.
  *
+ * Under cardinality_cap_scope = role, the caps a tag set obeys depend on
+ * the user (§6.1 "Identity"). A frame whose tags are inherited by,
+ * published as the activity row of, or recorded under (after
+ * pssc_frame_refresh()) another user than the one its caps were applied
+ * for gets them re-applied for that user first.
+ *
  * Nothing here throws, except that the executor frame is allocated with
  * palloc semantics turned into "no frame" on out-of-memory.
  */
@@ -94,18 +100,36 @@ typedef struct PsscFrame
 	uint32		exemplars_len;
 	char	   *exemplars;
 
+	/*
+	 * Role-scoped cardinality caps (DESIGN.md §6.1 "Identity"): the tags
+	 * obey the caps of cap_userid. cands (NULL: the tags do not depend on
+	 * the identity) is their input, for a recap (pssc_extract_recap()) when
+	 * they are published or recorded under, or inherited by, another user.
+	 */
+	Oid			cap_userid;
+	uint32		cands_len;
+	char	   *cands;
+	void	   *recap_mem;		/* chunk of a recapped executor frame's tags */
+
 	/* executor frames only */
 	const QueryDesc *queryDesc; /* lookup key */
 	dlist_node	node;			/* registry link */
 	MemoryContextCallback unlink_cb;	/* on es_query_cxt */
 } PsscFrame;
 
-/* Storage for a utility frame snapshot; declare it on the hook's stack. */
+/* cands of a utility frame up to this size are stored inline */
+#define PSSC_UTILITY_CANDS_INLINE 72
+
+/*
+ * Storage for a utility frame snapshot; declare it on the hook's stack and
+ * pass it to pssc_utility_frame_release() when done, on error too.
+ */
 typedef struct PsscUtilityFrame
 {
 	PsscFrame	frame;
 	char		tagbuf[PSSC_TAGSET_BYTES_MAX];
 	char		exbuf[PSSC_EXEMPLARS_BUF_MAX];
+	char		candbuf[PSSC_UTILITY_CANDS_INLINE];
 } PsscUtilityFrame;
 
 /* What pssc_frame_enter() saves and pssc_frame_leave() restores. */
@@ -158,6 +182,9 @@ extern PGDLLEXPORT void pssc_utility_frame_init(PsscUtilityFrame *uf,
 												const PlannedStmt *pstmt,
 												const char *queryString);
 
+/* Frees what *uf allocated outside itself. Never fails. */
+extern PGDLLEXPORT void pssc_utility_frame_release(PsscUtilityFrame *uf);
+
 /*
  * The range of statement (stmt_location, stmt_len) of src that the hooks scan
  * for tags: the parser range (pssc_stmt_range) extended back over its owned
@@ -209,7 +236,8 @@ extern PGDLLEXPORT void pssc_frame_leave(const PsscFrameSave *save);
  * it records (at ExecutorEnd, or after a utility returns), which can differ
  * from those at ExecutorStart (e.g. a cursor opened in a function or under
  * SET ROLE and ended by a later statement, or a SECURITY DEFINER utility);
- * a recording hook calls this first so its key matches pgss's.
+ * a recording hook calls this first so its key matches pgss's. Re-applies
+ * role-scoped caps to the tags for a changed user (see above).
  */
 extern PGDLLEXPORT void pssc_frame_refresh(PsscFrame *frame);
 

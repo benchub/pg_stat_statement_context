@@ -223,6 +223,7 @@ ExecutorRun/Finish:
   PG_TRY: chain  PG_FINALLY: nesting_level--; active_frame = save
 
 ExecutorEnd:
+  refresh userid, level; recap tags if userid changed (role-scoped caps, §6.1)
   if frame recordable (track, toplevel, untagged policy):
     store_record(frame.key, 1 call, totaltime)   -- §5.4
   chain
@@ -919,8 +920,8 @@ values of its own (under its own cap, in a sparse table) and learn from one
 more value whether the candidate's slot is taken. Under `server` this probe
 still works, which is acceptable there since `server` shares the admitted
 sets anyway. userid and dbid are `GetUserId()` and `MyDatabaseId` when the
-tags are extracted, which is what the frame records at creation (§3.3); the
-debug function peeks in the caller's scope. The table and its size
+tags are extracted, re-applied for another user where needed (see
+"Identity" below); the debug function peeks in the caller's scope. The table and its size
 (`cardinality_cap_slots`, one shared limit like `pg_stat_statements.max`) do
 not change: scoping only fills it faster (each scope takes its own key slot
 and up to the cap of value slots), so busy multi-tenant servers may need more
@@ -928,16 +929,62 @@ slots. A (nearly) full table collapses new values of every scope to `null`,
 observable by any role: the accepted residual of a shared limit, as with
 `pg_stat_statements.max`. `_reset()` empties every scope.
 
-Residual (identity at extraction): the scope's role is taken when the tags are
-extracted (`ExecutorStart`), but the recorded userid is refreshed at
-`ExecutorEnd` (executor.c), and nested statements under `nested_tags =
-inherit` copy their caller's already-capped tags (context.c). So a cursor
-opened under role A and finished under role B (`SET ROLE`) is capped under A
-and recorded under B; a `SECURITY DEFINER` child inherits the caller's cap
-decisions and records them under the definer; and a cursor a definer's
-function opens and the caller fetches shows the definer's cap decisions in
-the caller's rows. Exploiting these needs membership in both roles or a
-function whose owner controls the tag text; a follow-up item tracks them.
+**Identity** (item 20261007-070036-2): every tag set that is recorded or
+published obeys the caps of the role it is recorded or published under.
+Under `role` scope that role can differ from the one the caps were applied
+for at extraction: the recorded userid is refreshed at `ExecutorEnd` and
+after a utility (pgss's end-time userid, kept unchanged), so a cursor opened
+under role A can be finished under role B (`SET ROLE`), or a cursor a
+`SECURITY DEFINER` function opens is fetched and closed by its caller (with
+`nested_tags = scan`); a tagged `SET ROLE` is recorded under its new role;
+nested statements under `nested_tags = inherit` copy their caller's tags into
+a `SECURITY DEFINER` body run as the definer; and the activity row is
+published under `GetUserId()` when a top-level portal runs, which can follow
+a `SET ROLE` after the portal was created. In each case the caps are
+re-applied (a *recap*) for the receiving role first: steps 8 and 9 run
+again, under that role's caps as configured at that moment, on the input
+step 8 had at extraction, so the result is the tag set extraction would
+have produced for that role. Like extraction, a recap admits the values it
+keeps as strings in the receiving role's scope, and counts its collapses in
+`capped_tags`/`cap_table_full` again (not its drops, already counted).
+
+To recap, a frame keeps the input of step 8 next to its tags (`cands`) and
+the role its tags were capped for (`cap_userid`); the check at each of the
+three points (inheritance into a new frame, activity publication, the
+refresh before recording) is `cands != NULL && cap_userid != userid`, so the
+unchanged-identity path costs one comparison, with no copy or allocation.
+`cands` is only kept when it can matter: when caps were on (`env.cap`) under
+`role` scope at extraction. Under `database` and `server` scope, or with caps
+off, it is NULL and nothing changes (a backend's database never changes).
+Two encodings keep it small:
+
+- When every candidate was kept as a string (the common case: no cap
+  collapsed a value and nothing was dropped for size or `max_tags`), the
+  tag set holds all of them, so `cands` is `P` and one byte per tag, its
+  index in the serialized set in priority order: at most 65 bytes.
+- Otherwise, `L` and the candidates (`key\0value\0`, original values) in
+  priority order, skipping those that cannot fit `max_tagset_bytes` even
+  alone, the longest prefix that fits in `1 + 2 × max_tagset_bytes` bytes
+  (possibly none: `L` alone). The fill of a prefix keeps exactly what the
+  full fill keeps of it, so a recap keeps the tags the receiving role's
+  extraction would have kept from the prefix and drops the rest: fewer
+  tags, never one past a cap.
+- `cands` is NULL only for an empty tag set, which obeys every cap. Any
+  non-empty set has one, even when the budget left it no candidates (it then
+  recaps to an empty set), so a non-empty set never skips a recap.
+
+Executor frames store `cands` after their tags and exemplars in the frame's
+allocation; a recap writes the new tags and `cands` into a new chunk in the
+frame's `es_query_cxt` (freeing the previous recap chunk). Utility frames
+keep `cands` of up to 72 bytes inline in the stack snapshot and longer ones
+in `TopMemoryContext`, freed when the utility hook returns or errors. A
+recap or storage allocation failure fails closed: the frame gets no tags,
+counted as out of memory, rather than tags that escaped a recap. A recap
+uses the caps' configuration at its time (a `SIGHUP` between extraction and
+recap applies), but caps turned on after extraction don't apply to a frame
+extracted with caps off. Inherited tags are recapped for the child's role
+and a new `cands` stored with them, so a chain of definers recaps at each
+change of role.
 
 ### 6.2 Long queries (e.g., 10k-element `IN` lists)
 Even a linear scan costs something on a 1 MB query string.
@@ -1171,8 +1218,11 @@ some server version, it is omitted on that version rather than exposed as
      poisoning; use them only when the roles sharing a scope trust each other.
      Under the scoped modes, slot positions are keyed with a secret, so a
      role can't aim its own values at another scope's slots; what stays
-     observable is a (nearly) full shared table, and the identity residual
-     of §6.1 (cursors finished under another role, `SECURITY DEFINER`).
+     observable is a (nearly) full shared table. Under `role` scope, a tag
+     set recorded, published or inherited under another role than the one
+     it was extracted for (cursors finished under another role, `SECURITY
+     DEFINER`) gets steps 8 and 9 re-applied for that role first (§6.1
+     "Identity").
   9. sort and serialize within `max_tags` and `max_tagset_bytes`, using greedy
      fill (decided 2026-10-05):
      - Tags are considered in priority order: allowlist order, or sorted-key

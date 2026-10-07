@@ -316,12 +316,34 @@ exemplars_serialize(const PsscExemplar *exemplars, char *ex, size_t exsize)
 	return pos;
 }
 
+/*
+ * Copies out->cands to cands (candsize bytes). They always fit a buffer of
+ * PSSC_TAGSET_CANDS_MAX(max_tagset_bytes); if not, the result is emptied
+ * as on oom, so no tag set escapes a later recap.
+ */
+static void
+cands_copy(PsscTagsetOut *out, char *cands, size_t candsize,
+		   size_t *cands_len)
+{
+	if (out->cands_len > candsize)
+	{
+		Assert(false);
+		out->len = 0;
+		out->ntags = 0;
+		out->oom = true;
+		return;
+	}
+	memcpy(cands, out->cands, out->cands_len);
+	*cands_len = out->cands_len;
+}
+
 /* pssc_extract_tags_ex() with the pipeline counters added to *stats. */
 static void
 extract_tags(const char *s, size_t start, size_t end, char *buf,
 			 size_t bufsize, PsscExtractResult *result,
 			 PsscTagsetStats *stats, bool peek_caps,
-			 char *ex, size_t exsize, size_t *exlen)
+			 char *ex, size_t exsize, size_t *exlen,
+			 char *cands, size_t candsize, size_t *cands_len)
 {
 	const PsscTagList *exemplar_keys = pssc_guc_exemplar_keys();
 
@@ -336,6 +358,8 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 	memset(result, 0, sizeof(*result));
 	if (exlen != NULL)
 		*exlen = 0;
+	if (cands_len != NULL)
+		*cands_len = 0;
 	if (extract_cxt == NULL)	/* not preloaded: pssc_extract_init() not run */
 	{
 		result->oom = true;
@@ -384,12 +408,17 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 
 	memset(&out, 0, sizeof(out));
 	out.buf = buf;
+	/* only role-scoped caps depend on the identity (DESIGN.md §6.1) */
+	out.want_cands = cands != NULL && env.cap != NULL &&
+		pssc_cardinality_cap_scope == PSSC_CAP_SCOPE_ROLE;
 	pssc_tagset_build_with_override(s, start, end, pssc_guc_extractors(),
 									pssc_guc_tags(), pssc_guc_exclude_tags(),
 									&limits, &env, appname, override, &out,
 									stats);
 	if (ex != NULL && !out.oom)
 		*exlen = exemplars_serialize(out.exemplars, ex, exsize);
+	if (out.cands != NULL)
+		cands_copy(&out, cands, candsize, cands_len);
 	MemoryContextReset(extract_cxt);
 
 	result->len = out.len;
@@ -404,16 +433,61 @@ pssc_extract_tags(const char *s, size_t start, size_t end, char *buf,
 				  size_t bufsize, PsscExtractResult *result)
 {
 	extract_tags(s, start, end, buf, bufsize, result, &pending_stats, false,
-				 NULL, 0, NULL);
+				 NULL, 0, NULL, NULL, 0, NULL);
 }
 
 void
 pssc_extract_tags_ex(const char *s, size_t start, size_t end, char *buf,
 					 size_t bufsize, PsscExtractResult *result,
-					 char *ex, size_t exsize, size_t *exlen)
+					 char *ex, size_t exsize, size_t *exlen,
+					 char *cands, size_t candsize, size_t *cands_len)
 {
 	extract_tags(s, start, end, buf, bufsize, result, &pending_stats, false,
-				 ex, exsize, exlen);
+				 ex, exsize, exlen, cands, candsize, cands_len);
+}
+
+void
+pssc_extract_recap(const char *tags, size_t tags_len, const char *cands,
+				   size_t cands_len, Oid userid, char *buf, size_t bufsize,
+				   PsscExtractResult *result, char *newcands,
+				   size_t candsize, size_t *newcands_len)
+{
+	PsscTagsetEnv env;
+	PsscTagsetLimits limits;
+	PsscTagsetOut out;
+	PsscTagsetStats stats;
+
+	memset(result, 0, sizeof(*result));
+	*newcands_len = 0;
+	if (extract_cxt == NULL)
+	{
+		result->oom = true;
+		result->hash = pssc_tagset_hash(buf, 0);
+		return;
+	}
+	memset(&env, 0, sizeof(env));
+	env.alloc = env_alloc;
+	env.cap = pssc_cap_hook(false, userid, MyDatabaseId);
+	memset(&limits, 0, sizeof(limits));
+	limits.max_tags = pssc_max_tags;
+	limits.max_tagset_bytes = (int) Min((size_t) pssc_max_tagset_bytes, bufsize);
+	memset(&out, 0, sizeof(out));
+	out.buf = buf;
+	out.want_cands = true;
+	memset(&stats, 0, sizeof(stats));
+	pssc_tagset_recap(tags, tags_len, cands, cands_len, &limits, &env, &out,
+					  &stats);
+	if (out.cands != NULL)
+		cands_copy(&out, newcands, candsize, newcands_len);
+	MemoryContextReset(extract_cxt);
+	/* the statement's dropped tags were counted when it was extracted */
+	pending_stats.capped_tags += stats.capped_tags;
+	pending_stats.cap_table_full += stats.cap_table_full;
+
+	result->len = out.len;
+	result->ntags = out.ntags;
+	result->oom = out.oom;
+	result->hash = pssc_tagset_hash(buf, out.len);
 }
 
 void
@@ -425,7 +499,7 @@ pssc_extract_tags_debug(const char *s, size_t start, size_t end, char *buf,
 
 	memset(stats, 0, sizeof(*stats));
 	extract_tags(s, start, end, buf, bufsize, result, stats, true,
-				 NULL, 0, NULL);
+				 NULL, 0, NULL, NULL, 0, NULL);
 	stats->regex_compile_failures =
 		pending_stats.regex_compile_failures - compile_failures;
 }

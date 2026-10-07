@@ -51,6 +51,10 @@ static size_t owned_end = 0;
 /* Executor-frame tags are extracted here, then copied into the frame. */
 static char extract_buf[PSSC_TAGSET_BYTES_MAX];
 static char extract_exbuf[PSSC_EXEMPLARS_BUF_MAX];
+/* Cap input of a new frame (both kinds), and a recap's output. */
+static char extract_cands[PSSC_CANDS_BUF_MAX];
+static char recap_buf[PSSC_TAGSET_BYTES_MAX];
+static char recap_cands[PSSC_CANDS_BUF_MAX];
 
 static void
 xact_end_check(void *arg)
@@ -165,13 +169,42 @@ set_no_tags(PsscFrame *frame, char *buf, char *exbuf)
 	frame->ntags = 0;
 	frame->tags_oom = false;
 	frame->tags_hash = pssc_tagset_hash(buf, 0);
+	frame->cands = NULL;
+	frame->cands_len = 0;
+}
+
+static void
+set_result(PsscFrame *frame, char *buf, const PsscExtractResult *res)
+{
+	frame->tags = buf;
+	frame->tags_len = (uint32) res->len;
+	frame->ntags = res->ntags;
+	frame->tags_hash = res->hash;
+	frame->tags_oom = res->oom;
+}
+
+/*
+ * Fails closed when a tag set cannot be kept with its cap input: no tags,
+ * counted as out of memory, rather than tags that might escape a recap.
+ */
+static void
+set_tags_oom(PsscFrame *frame)
+{
+	frame->tags_len = 0;
+	frame->ntags = 0;
+	frame->tags_oom = true;
+	frame->tags_hash = pssc_tagset_hash(frame->tags, 0);
+	frame->cands = NULL;
+	frame->cands_len = 0;
 }
 
 /*
  * Resolves the tags of a new frame into buf (bufsize bytes) per §6.4 and
  * sets frame->nested and the tag fields (frame->tags = buf), and its
  * exemplars into exbuf (PSSC_EXEMPLARS_BUF_MAX bytes): an inheriting frame
- * inherits them with the tags.
+ * inherits them with the tags, re-capped for the current user if needed.
+ * The cap input goes to extract_cands (frame->cands, which the caller
+ * copies into the frame's storage).
  */
 static void
 resolve_tags(PsscFrame *frame, char *buf, size_t bufsize, char *exbuf,
@@ -181,24 +214,45 @@ resolve_tags(PsscFrame *frame, char *buf, size_t bufsize, char *exbuf,
 	PsscStmtRange r;
 	PsscExtractResult res;
 	size_t		exlen = 0;
+	size_t		clen = 0;
 
 	frame->nested = (active != NULL);
+	frame->cap_userid = GetUserId();
 	if (active != NULL && pssc_nested_tags != PSSC_NESTED_SCAN)
 	{
 		if (pssc_nested_tags == PSSC_NESTED_INHERIT &&
 			active->tags_len <= bufsize)
 		{
-			memcpy(buf, active->tags, active->tags_len);
-			frame->tags = buf;
-			frame->tags_len = active->tags_len;
-			frame->ntags = active->ntags;
-			frame->tags_hash = active->tags_hash;
-			frame->tags_oom = active->tags_oom;
+			if (active->cands != NULL && active->cap_userid != frame->cap_userid)
+			{
+				/* e.g. a SECURITY DEFINER function's statements */
+				pssc_extract_recap(active->tags, active->tags_len,
+								   active->cands, active->cands_len,
+								   frame->cap_userid, buf, bufsize, &res,
+								   extract_cands, sizeof(extract_cands),
+								   &clen);
+				set_result(frame, buf, &res);
+			}
+			else
+			{
+				memcpy(buf, active->tags, active->tags_len);
+				frame->tags = buf;
+				frame->tags_len = active->tags_len;
+				frame->ntags = active->ntags;
+				frame->tags_hash = active->tags_hash;
+				frame->tags_oom = active->tags_oom;
+				clen = active->cands != NULL ? active->cands_len : 0;
+				Assert(clen <= sizeof(extract_cands));
+				if (clen > 0)
+					memcpy(extract_cands, active->cands, clen);
+			}
 			Assert(active->exemplars_len <= PSSC_EXEMPLARS_BUF_MAX);
 			if (active->exemplars_len > 0)
 				memcpy(exbuf, active->exemplars, active->exemplars_len);
 			frame->exemplars = exbuf;
 			frame->exemplars_len = active->exemplars_len;
+			frame->cands = clen > 0 ? extract_cands : NULL;
+			frame->cands_len = (uint32) clen;
 		}
 		else
 			set_no_tags(frame, buf, exbuf);
@@ -208,21 +262,105 @@ resolve_tags(PsscFrame *frame, char *buf, size_t bufsize, char *exbuf,
 	{
 		/* no text, so no comment: appname extractors may still tag it */
 		pssc_extract_tags_ex("", 0, 0, buf, bufsize, &res,
-							 exbuf, PSSC_EXEMPLARS_BUF_MAX, &exlen);
+							 exbuf, PSSC_EXEMPLARS_BUF_MAX, &exlen,
+							 extract_cands, sizeof(extract_cands), &clen);
 	}
 	else
 	{
 		r = owned_range(src, stmt_location, stmt_len, is_client_stmt(src));
 		pssc_extract_tags_ex(src, r.start, r.end, buf, bufsize, &res,
-							 exbuf, PSSC_EXEMPLARS_BUF_MAX, &exlen);
+							 exbuf, PSSC_EXEMPLARS_BUF_MAX, &exlen,
+							 extract_cands, sizeof(extract_cands), &clen);
 	}
 	frame->exemplars = exbuf;
 	frame->exemplars_len = (uint32) exlen;
-	frame->tags = buf;
-	frame->tags_len = (uint32) res.len;
-	frame->ntags = res.ntags;
-	frame->tags_hash = res.hash;
-	frame->tags_oom = res.oom;
+	set_result(frame, buf, &res);
+	frame->cands = clen > 0 ? extract_cands : NULL;
+	frame->cands_len = (uint32) clen;
+}
+
+/*
+ * Stores a utility frame's cap input cands[0, len) (len 0: none) in uf,
+ * inline or in TopMemoryContext (uf->frame.recap_mem). The previous
+ * allocation, if any, is freed after the copy (cands may point into it).
+ */
+static void
+utility_set_cands(PsscUtilityFrame *uf, const char *cands, size_t len)
+{
+	PsscFrame  *frame = &uf->frame;
+	void	   *old = frame->recap_mem;
+	char	   *dst = NULL;
+
+	frame->recap_mem = NULL;
+	if (len > sizeof(uf->candbuf))
+	{
+		dst = MemoryContextAllocExtended(TopMemoryContext, len,
+										 MCXT_ALLOC_NO_OOM);
+		frame->recap_mem = dst;
+	}
+	else if (len > 0)
+		dst = uf->candbuf;
+	if (dst != NULL)
+		memmove(dst, cands, len);
+	if (old != NULL)
+		pfree(old);
+	frame->cands = dst;
+	frame->cands_len = dst != NULL ? (uint32) len : 0;
+	if (len > 0 && dst == NULL)
+		set_tags_oom(frame);
+}
+
+/*
+ * Re-applies the role-scoped caps of frame's tags for userid (see
+ * context.h): rebuilds them from frame->cands into the frame's storage.
+ */
+static void
+frame_recap(PsscFrame *frame, Oid userid)
+{
+	PsscExtractResult res;
+	size_t		clen;
+
+	pssc_extract_recap(frame->tags, frame->tags_len, frame->cands,
+					   frame->cands_len, userid, recap_buf, sizeof(recap_buf),
+					   &res, recap_cands, sizeof(recap_cands), &clen);
+	frame->cap_userid = userid;
+	if (frame->utility)
+	{
+		PsscUtilityFrame *uf = (PsscUtilityFrame *) frame;
+
+		memcpy(uf->tagbuf, recap_buf, res.len);
+		set_result(frame, uf->tagbuf, &res);
+		utility_set_cands(uf, recap_cands, clen);
+	}
+	else
+	{
+		char	   *mem;
+
+		mem = MemoryContextAllocExtended(GetMemoryChunkContext(frame),
+										 Max(res.len + clen, 1),
+										 MCXT_ALLOC_NO_OOM);
+		if (mem == NULL)
+		{
+			set_tags_oom(frame);
+			return;
+		}
+		memcpy(mem, recap_buf, res.len);
+		memcpy(mem + res.len, recap_cands, clen);
+		if (frame->recap_mem != NULL)
+			pfree(frame->recap_mem);
+		frame->recap_mem = mem;
+		set_result(frame, mem, &res);
+		frame->cands = clen > 0 ? mem + res.len : NULL;
+		frame->cands_len = (uint32) clen;
+	}
+}
+
+/* frame's tags as they are under userid's caps: usually nothing to do */
+static inline void
+frame_cap_for(PsscFrame *frame, Oid userid)
+{
+	if (unlikely(frame->cands != NULL) && frame->cap_userid != userid)
+		frame_recap(frame, userid);
 }
 
 static void
@@ -237,6 +375,7 @@ void
 pssc_frame_refresh(PsscFrame *frame)
 {
 	frame->userid = GetUserId();
+	frame_cap_for(frame, frame->userid);
 	frame->nesting_level = pssc_nesting_level;
 	frame->toplevel = (pssc_nesting_level == 0);
 	frame->recordable = pssc_enabled && frame->queryId != 0 &&
@@ -262,7 +401,8 @@ pssc_frame_create(QueryDesc *queryDesc)
 				 pstmt->stmt_len);
 
 	frame = MemoryContextAllocExtended(cxt,
-									   hdr + tmp.tags_len + tmp.exemplars_len,
+									   hdr + tmp.tags_len + tmp.exemplars_len +
+									   tmp.cands_len,
 									   MCXT_ALLOC_NO_OOM);
 	if (frame == NULL)
 		return NULL;
@@ -271,6 +411,11 @@ pssc_frame_create(QueryDesc *queryDesc)
 	memcpy(frame->tags, extract_buf, tmp.tags_len);
 	frame->exemplars = frame->tags + tmp.tags_len;
 	memcpy(frame->exemplars, extract_exbuf, tmp.exemplars_len);
+	if (tmp.cands != NULL)
+	{
+		frame->cands = frame->exemplars + tmp.exemplars_len;
+		memcpy(frame->cands, extract_cands, tmp.cands_len);
+	}
 	set_metadata(frame, pstmt->queryId);
 	pssc_frame_refresh(frame);
 
@@ -316,8 +461,19 @@ pssc_utility_frame_init(PsscUtilityFrame *uf, const PlannedStmt *pstmt,
 	frame->utility = true;
 	resolve_tags(frame, uf->tagbuf, sizeof(uf->tagbuf), uf->exbuf, queryString,
 				 pstmt->stmt_location, pstmt->stmt_len);
+	utility_set_cands(uf, frame->cands, frame->cands_len);
 	set_metadata(frame, pstmt->queryId);
 	pssc_frame_refresh(frame);
+}
+
+void
+pssc_utility_frame_release(PsscUtilityFrame *uf)
+{
+	if (uf->frame.recap_mem != NULL)
+		pfree(uf->frame.recap_mem);
+	uf->frame.recap_mem = NULL;
+	uf->frame.cands = NULL;
+	uf->frame.cands_len = 0;
 }
 
 void
@@ -361,7 +517,11 @@ pssc_frame_enter(PsscFrameSave *save, PsscFrame *frame, bool nest)
 	if (save->activity)
 	{
 		if (frame != NULL)
+		{
+			/* published under GetUserId() (activity.c) */
+			frame_cap_for(frame, GetUserId());
 			frame->activity_seq = pssc_activity_publish(frame);
+		}
 		else
 			pssc_activity_clear();
 	}

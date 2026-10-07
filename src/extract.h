@@ -48,18 +48,46 @@ extern PGDLLEXPORT void pssc_extract_tags(const char *s, size_t start,
 #define PSSC_EXEMPLARS_BUF_MAX \
 	(PSSC_MAX_EXEMPLAR_KEYS * (1 + 2 + PSSC_EXEMPLAR_VALUE_MAX))
 
+/* Bytes pssc_extract_tags_ex() and pssc_extract_recap() may write to cands. */
+#define PSSC_CANDS_BUF_MAX	PSSC_TAGSET_CANDS_MAX(PSSC_TAGSET_BYTES_MAX)
+
 /*
  * pssc_extract_tags(), and also the exemplar values (§6.13) of the
  * statement written to ex (exsize bytes, PSSC_EXEMPLARS_BUF_MAX suffices)
  * in the format pssc_store_record_ex() takes; *exlen is their length (0:
  * none, as when exemplar_keys is empty or the store is not set up).
+ *
+ * When cardinality caps applied under cardinality_cap_scope = role (the
+ * only scope that depends on the identity, GetUserId()), the input of the
+ * caps is written to cands (candsize bytes, PSSC_CANDS_BUF_MAX suffices;
+ * NULL: not wanted) for pssc_extract_recap(), and *cands_len is its
+ * length; otherwise *cands_len is 0 and the tag set never needs a recap.
  */
 extern PGDLLEXPORT void pssc_extract_tags_ex(const char *s, size_t start,
 											 size_t end, char *buf,
 											 size_t bufsize,
 											 PsscExtractResult *result,
 											 char *ex, size_t exsize,
-											 size_t *exlen);
+											 size_t *exlen, char *cands,
+											 size_t candsize,
+											 size_t *cands_len);
+
+/*
+ * Re-applies the cardinality caps to a tag set from pssc_extract_tags_ex()
+ * (or an earlier recap), tags[0, tags_len) with its cands, in the scope of
+ * userid (DESIGN.md §6.1 "Identity"): the result, in buf (bufsize bytes, at
+ * least the original's, not overlapping the inputs), is the tag set the
+ * extraction would have produced under userid's caps as configured now.
+ * Its cands (*newcands_len bytes, possibly 0) go to newcands, as for
+ * pssc_extract_tags_ex(). Counts collapses in the pending stats.
+ */
+extern PGDLLEXPORT void pssc_extract_recap(const char *tags, size_t tags_len,
+										   const char *cands,
+										   size_t cands_len, Oid userid,
+										   char *buf, size_t bufsize,
+										   PsscExtractResult *result,
+										   char *newcands, size_t candsize,
+										   size_t *newcands_len);
 
 /*
  * pssc_extract_tags() for the debug function pg_stat_statement_context_extract()

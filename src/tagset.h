@@ -288,11 +288,20 @@ typedef struct PsscExemplar
 typedef struct PsscTagsetOut
 {
 	char	   *buf;			/* caller's buffer, >= max_tagset_bytes */
+	bool		want_cands;		/* input: also set cands (pssc_tagset_recap()) */
 	size_t		len;			/* bytes written: k \0 v \0 ... */
 	int			ntags;
 	bool		footer;			/* tags came from the trailing footer */
 	bool		oom;			/* env->alloc failed: empty result */
 	PsscExemplar exemplars[PSSC_MAX_EXEMPLAR_KEYS]; /* none set on oom */
+
+	/*
+	 * With want_cands, the input of steps 8-9 (allocated with env->alloc),
+	 * for pssc_tagset_recap() together with buf[0, len). Set whenever
+	 * ntags > 0; NULL for an empty set (which obeys every cap) and on oom.
+	 */
+	const char *cands;
+	size_t		cands_len;
 } PsscTagsetOut;
 
 /*
@@ -413,6 +422,33 @@ extern void pssc_tagset_build_with_override(const char *s, size_t start,
 											const PsscSourceTags *override,
 											PsscTagsetOut *out,
 											PsscTagsetStats *stats);
+
+/*
+ * Steps 8 and 9 again, with another env->cap (DESIGN.md §6.1 "Identity"):
+ * the tag set a build (or an earlier recap) wrote, tags[0, tags_len) with
+ * its out->cands, is rebuilt into out->buf (which must not overlap them) as
+ * if the build had run with this env->cap. limits->max_tags and
+ * max_tagset_bytes must be the build's; the other limits and env fields
+ * are not used except env->alloc and env->cap. Sets out->cands (with
+ * want_cands) for the next recap, and counts steps 8-9 in stats as a build
+ * does; no footer or exemplars. Never fails (oom: empty result).
+ *
+ * cands holds the deduplicated tags after steps 1-7 that could fit
+ * max_tagset_bytes, in priority order: "P" then, for each, its index in
+ * the serialized set (when every one was kept as a string, so the set
+ * holds them all), else "L" then key \0 value \0 for each, the longest
+ * prefix that fits in PSSC_TAGSET_CANDS_MAX(max_tagset_bytes) bytes (maybe
+ * none: "L" alone). The rest are left out: a recap keeps what a build
+ * would have kept of the prefix, so it can only keep fewer tags.
+ */
+#define PSSC_TAGSET_CANDS_MAX(max_tagset_bytes) (1 + 2 * (size_t) (max_tagset_bytes))
+
+extern void pssc_tagset_recap(const char *tags, size_t tags_len,
+							  const char *cands, size_t cands_len,
+							  const PsscTagsetLimits *limits,
+							  const PsscTagsetEnv *env,
+							  PsscTagsetOut *out,
+							  PsscTagsetStats *stats);
 
 /*
  * Output escaping of tag text stored from a SQL_ASCII database (DESIGN.md
