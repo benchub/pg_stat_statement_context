@@ -1176,6 +1176,48 @@ Fix options: block SIGALRM around the snapshot and postponement, or expose deadl
 - It never decays usage or evicts live entries, counts what it removes in `reclaimed_entries`, and does not increment `dealloc` (passes forced by a full table) or `evicted_entries`.
 **Status:** done
 
+### 20261005-091225-35: Roadmap: persist stats across clean restarts
+
+**Description:** Dump the stats at shutdown and load them at startup, like `pg_stat_statements.save` (§8 v1.x). Use a versioned file format with a header that records the extension version, epoch, `bucket_interval`, `bucket_count`, and sizing. Follow pgss's lead on mismatches:
+- On a file-format or extension-version mismatch, discard the file.
+- If `bucket_interval` or `bucket_count` changed, discard the file (pgss has no bucket analogue).
+- If `max_entries` shrank, load what fits and evict the rest using the §5.3 order.
+- Otherwise keep the stored epoch, so `bucket_id`s stay valid, and drop slots that expired during the downtime.
+
+*Design note* (non-blocking): `max_tagset_bytes` changes are not covered by the decision. Proposed: load entries whose tag set still fits the new limit and skip (and log a count of) the rest.
+
+**Acceptance criteria:**
+- Stats survive a clean restart.
+- Each mismatch case above behaves as specified, with a log message.
+- A crash or a corrupt file starts empty with a log message.
+- The behavior is controlled by a GUC.
+
+**Decisions:**
+- 2026-10-05: Follow pg_stat_statements: discard on format/version mismatch; if `max_entries` shrank, load what fits and evict the rest; if `bucket_interval` or `bucket_count` changed, discard.
+- 2026-10-07 (implementation, DESIGN.md §5.5):
+  - **GUC:** `pg_stat_statement_context.save` is on by default and `sighup`, matching `pg_stat_statements.save` for familiarity.
+  - **File:** `pg_stat/pg_stat_statement_context.stat`. It is written as `.tmp` and then renamed with `durable_rename()`.
+  - **Who saves:** only the postmaster saves, from an `on_shmem_exit` callback registered when `!IsUnderPostmaster`, as in pgss. Backends do not save.
+  - **When it saves:** only if the exit code is 0 and `pg_control` says `DB_SHUTDOWNED` or `DB_SHUTDOWNED_IN_RECOVERY`. All children have then exited and the shutdown checkpoint is done, so the store is immutable and is read without locks.
+    - This is stricter than pgss, which also saves after an immediate shutdown with a possibly torn store.
+    - `pg_control` is read directly rather than with `get_controlfile()`, because an ERROR inside `proc_exit()` would be promoted to FATAL.
+  - **Header:** a magic number, a binary format version separate from the SQL version, `PG_MAJORVERSION_NUM`, the extension version (injected from the control file by the Makefile), epoch, interval, `bucket_count`, `max_entries`, `max_tagset_bytes`, the watermark, and every header counter plus `stats_reset`.
+  - **Body and checksum:** the records follow in eviction-array order, each carrying the stored `tags_hash`, usage, totals, `stats_since`, `encoding`, and the whole ring. A CRC-32C trailer covers the file, and nothing may follow it.
+  - **Load:** happens when the postmaster creates the store, and the file is unlinked whatever the outcome.
+    - A missing file loads silently.
+    - Every other failure LOGs and starts empty. This covers save off, bad magic, CRC, truncation, a malformed record, a duplicate key, or trailing bytes; a version mismatch; and a bucket-setting change.
+  - **Epoch and watermark:** the epoch is kept. `current_bucket` becomes max(the saved value, the clock's bucket).
+  - **Expiry:** entries that are dead at that watermark are dropped and counted in `reclaimed_entries`. Expired slots are cleared.
+  - **`max_tagset_bytes` design note** (implemented as proposed): entries whose tag set exceeds the current `max_tagset_bytes` are skipped, with one LOG line giving the count.
+  - **`max_entries` shrink:** the excess live entries are chosen with `pssc_evict_sort()` in §5.3 order (last_bucket, usage, saved array order; no decay). This counts as one eviction pass (`dealloc` +1, `evicted_entries` += the excess) and is logged.
+  - **Not persisted:** the cardinality-cap tracking table, the debug clock and collision mode, and `bucket_advances`.
+  - **Load safety:** tag sets are validated with `pssc_tagset_next()`, so capped-null values round-trip. File-sized allocations use `MCXT_ALLOC_NO_OOM`, and an allocation failure discards the file (LOG) rather than failing startup.
+  - **Existing tests:** `007_store` and `024_cardinality_caps` expect each restart to start from an empty store, so they set `save = off`.
+
+**Depends on:** 20261005-091225-15, 20261005-091225-21
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
