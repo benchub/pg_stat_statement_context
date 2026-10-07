@@ -202,9 +202,7 @@ The two `append/ext` variants (−11.0% and −0.2%) differ by more than any rea
 
 The [activity view](sql-interface.md#pg_stat_statement_context_activity) adds a write to the backend's shared slot at the start and end of each top-level statement. Readers never block writers: the slot uses a change counter, like `pg_stat_activity`. Measured on PG 18.6 (Docker on an M1, `max_connections = 100`, so 136 slots).
 
-**Microbenchmark** (`pssc_context_test_activity_bench(loops, tags_bytes)` in
-`test/modules/pssc_context_test`; the cost of one publish plus one
-set-idle, the pair a statement causes, and of reading all slots):
+**Microbenchmark** (`pssc_context_test_activity_bench(loops, tags_bytes)` in `test/modules/pssc_context_test`; the cost of one publish plus one set-idle, the pair a statement causes, and of reading all slots):
 
 | Tag set size | Writer, per pair | Reader, all 136 slots |
 |---:|---:|---:|
@@ -264,8 +262,7 @@ bench/run.sh --runs 6 --only '^(append/(`pg_stat_statements`|ext|ext-cap)|evict/
 
 ## Findings
 
-1. **Steady-state overhead is not resolved by this setup. It is at most about
-   10–15% on a 0.12 ms point select and possibly much less.**
+1. **Steady-state overhead is not resolved by this setup. It is at most about 10–15% on a 0.12 ms point select and possibly much less.**
    - In the full run, every `ext` configuration of the short-statement workloads is slower than `pg_stat_statements` alone: `append/ext` −8.8%, `prepend/ext` −11.7%, `plain/ext` (no comment) −13.1%, `append/ext-1s-buckets` −15.5%. That is about 10–20 µs per transaction.
    - `append/ext-any` shows −27.0%, but its two pair values are −47.9% and −6.2%. The first pair contains a round at −71% that coincided with interference.
    - With two pairs per configuration these figures are fragile, and they contradict a dedicated run. That run had 9 rounds (4 pairs) of only `plain/`pg_stat_statements`` and `plain/ext`, and gave **+1.9% [−7.2%, +23.2%]** for the configuration the full run put at −13.1%.
@@ -279,8 +276,7 @@ bench/run.sh --runs 6 --only '^(append/(`pg_stat_statements`|ext|ext-cap)|evict/
    - Heuristic append mode (the default, 2 kB window): `inlist/ext` −1.6% [−6.2%, +3.0%] and `inlist0/ext` −7.0% [−16.9%, +3.0%]. Both ranges include zero.
    - Exact scans of the whole statement:
      - `inlist/ext-any` −4.8% [−5.2%, −4.3%]: consistent, about 0.5 ms per 59 KB statement.
-     - `inlist/ext-window-1MB` −11.0% [−23.5%, +1.5%] and `inlist0/ext-any`
-       −11.3% [−23.4%, +0.8%]: noisy.
+     - `inlist/ext-window-1MB` −11.0% [−23.5%, +1.5%] and `inlist0/ext-any` −11.3% [−23.4%, +0.8%]: noisy.
    - So `position=any` or a large `scan_window` costs on the order of 0.5–1 ms per 59 KB statement. The default heuristic mode avoids that.
    - `heuristic_scans` confirms which path each configuration took.
 4. **Sustained eviction raises p99 latency about 2.7× (PG 18, paired) to 5× (PG 14, single round) at `max_entries = 10000`.** This is the one clear performance finding. It was measured before the two updates at the end of this item, which bring the PG 18 ratio down to about 1.3–1.5×.
@@ -310,8 +306,7 @@ bench/run.sh --runs 6 --only '^(append/(`pg_stat_statements`|ext|ext-cap)|evict/
      - Single pass, PG 18.6, 10,000 live entries, 500 victims, 80 passes per build in two alternating rounds (timed around the record call that triggered the pass):
        - median 733 and 719 µs before, 273 and 270 µs after;
        - p90 1,019 and 898 µs before, 344 and 317 µs after.
-     - Two paired runs of
-       `bench/run.sh --major 18 --only '^evict/(`pg_stat_statements`|ext-max10000)$' --runs 5`      per build. The baseline is the parent commit, run just before. No foreign containers were running.
+     - Two paired runs of `bench/run.sh --major 18 --only '^evict/(`pg_stat_statements`|ext-max10000)$' --runs 5`      per build. The baseline is the parent commit, run just before. No foreign containers were running.
 
        | Run | Build | `pg_stat_statements` p99 (ms) | ext p99 (ms) | Δp99 vs `pg_stat_statements` | ΔTPS vs `pg_stat_statements` |
        |---|---|---:|---:|---:|---:|
