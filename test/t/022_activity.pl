@@ -273,8 +273,11 @@ is(sql(qq{SELECT concat_ws('|', c.state, c.tags::text, c.queryid = a.query_id)
 	'active|{"action": "look", "controller": "self"}|t',
 	'own running statement: active, its tags and queryid');
 
-my $locker = session_open('postgres');
-my $obs = session_open('postgres');   # stays connected: reads after exits
+# The bootstrap superuser is the OS user that ran initdb: postgres in the
+# Docker harness, but not on a host run.
+my $su = sql('SELECT current_user');
+my $locker = session_open($su);
+my $obs = session_open($su);   # stays connected: reads after exits
 my $a = session_open('alice');
 sq($locker, 'SELECT pg_advisory_lock(42)');
 
@@ -345,7 +348,7 @@ is(act($a->{pid}), 'idle|{"action": "commit", "controller": "cursor"}|qid',
 	'COMMIT is the row, not the cursor dropped at commit');
 
 # ------------------------------------------------------ nested statements
-my $b = session_open('postgres');
+my $b = session_open($su);
 sq($b, qq{SET $P.nested_tags = scan; SET $P.track = 'all'; SELECT ${P}_reset()});
 sq($locker, 'SELECT pg_advisory_lock(42)');
 sq_send($b, q{SELECT nested_wait() /*controller='outer',action='top'*/});

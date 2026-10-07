@@ -20,6 +20,7 @@ use File::Basename qw(dirname);
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use PsscTest;
 
 my $P = 'pg_stat_statement_context';
 my $root = dirname(__FILE__) . '/../..';
@@ -27,9 +28,7 @@ my $root = dirname(__FILE__) . '/../..';
 my $node = PostgreSQL::Test::Cluster->new('sql_surface');
 $node->init;
 $node->start;
-my $pkglibdir = $node->safe_psql('postgres',
-	q{SELECT setting FROM pg_config WHERE name = 'PKGLIBDIR'});
-if (!-e "$pkglibdir/pg_stat_statements.so")
+if (!defined pgss_suffix($node))
 {
 	plan skip_all => 'pg_stat_statements not installed';
 }

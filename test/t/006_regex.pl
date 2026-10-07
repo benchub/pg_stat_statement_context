@@ -644,10 +644,42 @@ for my $action (qw(sleep regsleep))
 # attempt stopped by the limit after the real engine allocated (PG16+ throw
 # out of pg_regcomp() before its cleanup, PG14/15 return REG_CANCEL) and
 # then retried must not keep the abandoned allocations. 'expire' makes the
-# limit (60 s here) expire 300 ms into $MID, which takes about 1 s to
-# compile; the attempt used little CPU time, so it is retried and compiles.
+# limit (60 s here) expire into the compile of $MID, at half the time a
+# clean compile took on this host (0.5-1 s), so that the abandoned attempt
+# has allocated about half of what the compile needs whatever the host's
+# speed; the attempt used little CPU time, so it is retried and compiles.
 # The backend's memory growth from the lazy compile (and the check hook's
-# test compile before it) must match a clean compile's.
+# test compile before it) must match a clean compile's. That the expiry
+# landed mid-compile is checked directly: the test module counts the
+# attempts (hook calls) and, of those, the engine calls that did not
+# complete (PG16+ threw the cancel, PG14/15 returned REG_CANCEL). Two
+# attempts of which one was interrupted is the case under test. An expiry
+# after the engine completed is not: a trivial pattern, whose lazy compile
+# ends long before the expiry, is accepted in one attempt; and an expiry
+# made to fire right after the engine returned, before the limit is
+# disarmed ('expireafter'), makes the strict check hook retry, but nothing
+# was interrupted.
+{
+	my $s = session_open();
+	sq($s, 'SELECT pssc_extract_test_regex_compile_limit(60000)');
+	sq($s, "SELECT pssc_extract_test_set_local('$P.extractors', " . sqlq(q{regex(pattern='zz=(\w+)', keys=zz)}) . ')');
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, 'expire', 1)");
+	sex($s, sqlq(q{SELECT 1 /* zz=a */}));
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, 'expiry after the compile finished: injected once');
+	is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '1|0',
+		'expiry after the compile finished: one attempt, not interrupted');
+	is(rstats($s), '1|0|1|0', 'expiry after the compile finished: one regex live');
+	is(sq($s, 'SELECT pg_sleep(0.4), 42'), '|42', 'expiry after the compile finished: no cancel left pending');
+
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'expireafter', 1)");
+	my (undef, $err) = sq_err($s, "SELECT pssc_extract_test_set_local('$P.extractors', " . sqlq(q{regex(pattern='yy=(\w+)', keys=yy)}) . ')');
+	is($err, '', 'check hook, expiry after the engine completed: accepted');
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, 'check hook, expiry after the engine completed: injected once');
+	is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '2|0',
+		'check hook, expiry after the engine completed: retried, but not interrupted');
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', 'check hook, expiry after the engine completed: no cancel left pending');
+	session_close($s);
+}
 my $MID = q{((?:(?:$)|\Zda|(?<!1)|\S){0,14})};
 for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(position=any, merge=on)", undef, 'compile' ],
 	[ 'normalize rule', 'sqlcommenter(position=any)', "a: '$MID' => 'y'", 'norm_compile' ])
@@ -663,7 +695,11 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 		};
 		my $m0 = $mem->();
 		sq($s, 'SELECT pssc_extract_test_regex_compile_limit(60000)');
-		sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'expire', 1)") if $expire;
+		if ($expire)
+		{
+			sq($s, 'SELECT pssc_extract_test_regex_expire_ms(' . int(1000 * $res{0}[1] / 2 + 1) . ')');
+			sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'expire', 1)");
+		}
 		my (undef, $err) = sq_err($s, "SELECT pssc_extract_test_set_local('$P.extractors', " . sqlq($ext) . ')');
 		if (defined $norm)
 		{
@@ -671,7 +707,12 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 			$err .= $err2;
 		}
 		is($err, '', "$what, check hook" . ($expire ? ', attempt expired mid-compile' : '') . ': accepted');
-		is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "$what, check hook: expired once") if $expire;
+		if ($expire)
+		{
+			is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "$what, check hook: expired once");
+			is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '2|1',
+				"$what, check hook: the attempt was stopped mid-compile and retried");
+		}
 		sq($s, "SELECT pssc_extract_test_regex_inject('$phase', 0, 'expire', 1)") if $expire;
 		my $t0 = time;
 		my $r = sex($s, sqlq(q{SELECT 1 /* x */ /*a='x'*/}));
@@ -680,12 +721,16 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 		my $name = "$what, " . ($expire ? 'attempt expired mid-compile, retried' : 'clean compile');
 		is($r->{regex_fail}, 0, "$name: compiled, not counted");
 		is(rstats($s), '1|0|1|0', "$name: one regex live");
-		is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "$name: expired once") if $expire;
+		if ($expire)
+		{
+			is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "$name: expired once");
+			is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '2|1',
+				"$name: stopped mid-compile and retried");
+		}
 		note "$name: ${dt}s, backend grew by $grew bytes";
 		$res{$expire} = [ $grew, $dt ];
 		session_close($s);
 	}
-	cmp_ok($res{0}[1], '>', 0.6, "$what: compiling takes long enough to be interrupted mid-compile ($res{0}[1]s)");
 	cmp_ok($res{1}[0] - $res{0}[0], '<', $res{0}[0] / 4,
 		"$what: the interrupted attempt's allocations were released ($res{1}[0] vs $res{0}[0] bytes)");
 }
@@ -929,6 +974,32 @@ config(tags => '*', exclude_tags => '',
 	alter_and_reload("SET $P.extractors = 'sqlcommenter(position=any)'");
 	is(stq($s, q{SELECT 1 /*x='1'*/}), 'x=1', 'config without regex');
 	is(rstats($s), '2|2|0|0', 'regexes of a replaced config are freed even if no regex runs');
+	session_close($s);
+}
+
+# The malloc probe used below (and above) must see malloc'd memory where the
+# platform has a source for it: glibc >= 2.33 (mallinfo2) and macOS
+# (malloc_zone_statistics). PG14/15's regex engine mallocs directly, so
+# without it the leak check below would see nothing there.
+SKIP:
+{
+	my $rt = $^O eq 'linux' ? `getconf GNU_LIBC_VERSION 2>/dev/null` : '';
+	my $want = $^O eq 'darwin'
+	  || ($rt =~ /^glibc (\d+)\.(\d+)/ && ($1 > 2 || ($1 == 2 && $2 >= 33)));
+	skip "no malloc statistics source known for $^O" . ($rt ne '' ? " ($rt)" : ''), 3
+	  unless $want;
+	my $s = session_open();
+	my $mu = sub { sq($s, 'SELECT malloc_used FROM pssc_extract_test_mem()') };
+	my $m0 = $mu->();
+	isnt($m0, '', "malloc probe: malloc_used available on $^O");
+	my $n = 8 * 1024 * 1024;
+	sq($s, "SELECT pssc_extract_test_malloc_hold($n)");
+	my $m1 = $mu->();
+	sq($s, 'SELECT pssc_extract_test_malloc_hold(0)');
+	my $m2 = $mu->();
+	cmp_ok(($m1 || 0) - ($m0 || 0), '>=', $n, "malloc probe: sees a $n-byte malloc (grew by "
+		  . (($m1 || 0) - ($m0 || 0)) . ' bytes)');
+	cmp_ok(($m1 || 0) - ($m2 || 0), '>=', $n, 'malloc probe: sees it freed');
 	session_close($s);
 }
 

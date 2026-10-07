@@ -110,6 +110,15 @@ typedef int (*PsscRegexTestHook) (int phase, int index);
 extern PGDLLEXPORT PsscRegexTestHook pssc_regex_test_hook;
 
 /*
+ * TEST-ONLY: for the *COMPILE and CHECK phases, called with the engine's
+ * return code when the engine returns (not when it throws), still inside
+ * the compile time limit. Lets tests tell an engine call that was
+ * interrupted from one that completed.
+ */
+typedef void (*PsscRegexTestEngineHook) (int phase, int index, int rc);
+extern PGDLLEXPORT PsscRegexTestEngineHook pssc_regex_test_engine_hook;
+
+/*
  * Compile time limit per pattern, in milliseconds (backlog
  * 20261006-021334-1): some patterns take seconds or minutes to compile
  * (e.g. ((?:(?:$)|\Zda|(?<!1)|\S){0,255}) ). pssc_regex_compile_limit_ms

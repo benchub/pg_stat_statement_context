@@ -177,7 +177,8 @@ and how to replay a failure.
 CI (`.github/workflows/ci.yml`) runs the same `scripts/docker-test.sh` commands
 for its Linux cells (PG 14–18 from PGDG, assert builds of 14–18, Valgrind
 on 18), runs `docker/run-tests.sh` directly on macOS against PostgreSQL
-built by `docker/build-postgres.sh`, and runs a short fuzz smoke job. The TAP tests use the PG 15+ module names
+built by `docker/build-postgres.sh` (after `scripts/test-run-tests.sh`, a
+quick self-test of the harness on the host), and runs a short fuzz smoke job. The TAP tests use the PG 15+ module names
 (`PostgreSQL::Test::Cluster`/`Utils`). PG 14 ships them as aliases of
 `PostgresNode`/`TestLib` from 14.3 but only installs them from 14.6, so
 14.0–14.5 can't run the TAP suite.

@@ -16,6 +16,7 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use PsscTest;
 
 my $P = 'pg_stat_statement_context';
 
@@ -26,8 +27,7 @@ $node->start;
 
 sub sql { return $node->safe_psql('postgres', $_[0]); }
 
-my $pkglibdir = sql(q{SELECT setting FROM pg_config WHERE name = 'PKGLIBDIR'});
-my $have_pgss = -e "$pkglibdir/pg_stat_statements.so";
+my $have_pgss = defined pgss_suffix($node);
 note("pg_stat_statements available: " . ($have_pgss ? 'yes' : 'no'));
 if ($have_pgss)
 {
@@ -142,12 +142,14 @@ is(sql("SELECT ($P\_extract(\$q\$SELECT 1 /*back='a%5Cb',k='%C3%A9'*/\$q\$))->'t
 # leading trivia (PG18 reports stmt_location at the first token, PG14-17 at
 # the string start). The parser's location is taken from pg_stat_statements'
 # text (the statement has no constants to normalize).
+# (The extractors setting is also what the scan_window checks after this
+# block rely on.)
+set_conf('extractors', q{'marginalia(position=prepend)'},
+	'marginalia(position=prepend)');
 SKIP:
 {
 	skip 'pg_stat_statements not installed', 3 unless $have_pgss;
 
-	set_conf('extractors', q{'marginalia(position=prepend)'},
-		'marginalia(position=prepend)');
 	for my $pad (100, 3000)
 	{
 		my $q = qq{'/*controller:head*/' || repeat(' ', $pad) || 'SELECT current_user'};

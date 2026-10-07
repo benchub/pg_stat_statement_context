@@ -103,12 +103,32 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_extract_test_regex_injected() RETURNS int
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- How many times the injection's phase (and index) was reached since it was
+-- set, fired or not: for a compile phase, the number of attempts.
+CREATE FUNCTION pssc_extract_test_regex_attempts() RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Of those, how many engine calls were let run but did not complete (threw,
+-- or returned an error such as REG_CANCEL): interrupted mid-compile.
+CREATE FUNCTION pssc_extract_test_regex_interrupted() RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- How long into the attempt the 'expire' injection makes the compile time
+-- limit expire (default 300 ms), in this backend. Returns the old value.
+CREATE FUNCTION pssc_extract_test_regex_expire_ms(ms int) RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
 -- Backend-local regex runtime bookkeeping (pssc_regex_debug_stats).
 CREATE FUNCTION pssc_extract_test_regex_stats(OUT compiles bigint, OUT frees bigint,
                                               OUT live int, OUT failed int)
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
--- This backend's malloc'd bytes in use (NULL without glibc >= 2.33) and
--- bytes allocated by all its memory contexts.
+-- This backend's malloc'd bytes in use (glibc >= 2.33 and macOS, NULL
+-- elsewhere) and bytes allocated by all its memory contexts.
 CREATE FUNCTION pssc_extract_test_mem(OUT malloc_used bigint, OUT context_bytes bigint)
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Hold a malloc'd block of the given size (0: none), freeing the previous
+-- one: a known allocation for checking malloc_used above.
+CREATE FUNCTION pssc_extract_test_malloc_hold(bytes bigint) RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

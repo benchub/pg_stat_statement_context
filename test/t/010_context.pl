@@ -26,6 +26,7 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use PsscTest;
 
 my $P = 'pg_stat_statement_context';
 
@@ -39,9 +40,7 @@ $node->start;
 
 # Load pg_stat_statements first (as recommended) where it is installed
 # (the harness images have it), for parity checks.
-my $pkglibdir = $node->safe_psql('postgres',
-	q{SELECT setting FROM pg_config WHERE name = 'PKGLIBDIR'});
-my $have_pgss = -e "$pkglibdir/pg_stat_statements.so";
+my $have_pgss = defined pgss_suffix($node);
 note("pg_stat_statements available: " . ($have_pgss ? 'yes' : 'no'));
 if ($have_pgss)
 {

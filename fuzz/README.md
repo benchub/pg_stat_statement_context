@@ -93,7 +93,8 @@ How a run is organised:
   * sets `extractors` (with keys, position and merge), `tags`,
     `exclude_tags` and `scan_window` with `ALTER SYSTEM` and a reload, and
     pins `normalize` to '' (no rules), so every result must report
-    `normalized_tags` = 0 and `normalize_failures` = 0;
+    `normalized_tags` = 0 and `normalize_failures` = 0. It sets no
+    `cardinality_cap*` parameters (no cap), so `capped_tags` must be 0;
   * calls `pg_stat_statement_context_extract()` on generated statements:
     comments that the pattern matches, nested and unterminated comments,
     strings, multibyte text and invalid arguments.
@@ -119,12 +120,15 @@ How a run is organised:
       dropped is caught.
 
     `perl fuzz/sql/regex_fuzz.pl --self-test` checks the oracle itself on
-    synthetic results, with no server.
+    synthetic results, with no server. It also checks that the driver's
+    list of result keys matches the keys `src/extract_fn.c` emits.
   * Backend crashes, assertion failures (`TRAP:`), hangs and unexpected
     errors fail the run.
 
 A failure prints the seed and the round, and saves the round's SQL, psql
 output, server log and parameters under `tmp/fuzz-sql/fail-round-N/`.
+The container hands these files to the owner of `tmp/fuzz-sql/` (the
+host user), so they are readable on the host and in CI.
 `params.txt` there has the replay command. Some patterns hit core regex resource limits in the pre-check:
 "invalid memory alloc request size" for huge NFAs, or a compile that
 outlasts `statement_timeout`. These are counted as resource-limited

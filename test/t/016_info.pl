@@ -33,6 +33,7 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use PsscTest;
 use IPC::Run;
 use Time::HiRes qw(usleep);
 
@@ -506,9 +507,8 @@ my $big = q{'SELECT 2 /*' || (SELECT string_agg('k' || i || '=''' || repeat('v',
 # ------------------------------------------- utility_missing_queryid
 SKIP:
 {
-	my $pkglibdir = sql(q{SELECT setting FROM pg_config WHERE name = 'PKGLIBDIR'});
 	skip 'pg_stat_statements is not installed', 2
-	  unless -e "$pkglibdir/pg_stat_statements.so";
+	  unless defined pgss_suffix($node);
 	$node->append_conf('postgresql.conf',
 		"shared_preload_libraries = '$P, pg_stat_statements'\n");
 	$node->restart;

@@ -188,6 +188,12 @@ jobs:
         with:
           path: ${{ env.PGPREFIX }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
+      # docker/run-tests.sh on the host: skips worktrees/, and stops its
+      # server when it fails. Seconds; builds nothing.
+      - name: Harness self-test
+        run: |
+          export PATH="$PGPREFIX/bin:$PATH"
+          scripts/test-run-tests.sh
       - name: Run tests
         env:
           PSSC_SRC: ${{ github.workspace }}
@@ -195,6 +201,11 @@ jobs:
           PSSC_BUILD: ${{ runner.temp }}/pssc-build
           PSSC_WORK: ${{ runner.temp }}/pssc-work
           PSSC_TEST_MODE: release
+          # 017 bounds our utility time by pgss's plus a slack (default 2 ms)
+          # that covers pgss's own pgss_store() of a new entry between our
+          # clock reads. On macos-latest runners that store took 3-14 ms
+          # (PG14/15; not reproducible on a local Mac), so allow more here.
+          PSSC_TEST_UTILITY_SLACK_MS: 50
         run: |
           export PATH="$PGPREFIX/bin:$PATH"
           docker/run-tests.sh
@@ -203,5 +214,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-pg${{ matrix.pg }}-logs
-          path: tmp/macos-${{ matrix.pg }}/
+          path: |
+            tmp/macos-${{ matrix.pg }}/
+            tmp/test-run-tests/*/output.log
           if-no-files-found: ignore

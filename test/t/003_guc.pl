@@ -319,15 +319,17 @@ $node->append_conf('postgresql.conf', "$P.tags = 'action, controller, job'\n"
 	  . "$P.exclude_tags = 'traceparent, tracestate, request_id'\n");
 my @big = map { my $c = $_; join(',', map { sprintf("$c%062d", $_) } 1 .. 1024) } ('p', 'q');
 my $m0_null = sq($s, 'SELECT pssc_guc_test_malloc_used() IS NULL');
-# The probe needs mallinfo2(), i.e. a module compiled against glibc >= 2.33.
-# Check that against the compile-time glibc version, so a NULL probe there is
-# never a silently skipped leak check.
+# The probe needs mallinfo2(), i.e. a module compiled against glibc >= 2.33,
+# or macOS's malloc_zone_statistics(). Check that against the compile-time
+# glibc version and the OS, so a NULL probe there is never a silently
+# skipped leak check.
 my $built_glibc = sq($s, 'SELECT coalesce(pssc_guc_test_glibc_version(), \'none\')');
-my $want_probe = $built_glibc =~ /^(\d+)\.(\d+)$/ && ($1 > 2 || ($1 == 2 && $2 >= 33));
+my $want_probe = $^O eq 'darwin'
+  || ($built_glibc =~ /^(\d+)\.(\d+)$/ && ($1 > 2 || ($1 == 2 && $2 >= 33)));
 note "module built against glibc: $built_glibc; malloc probe "
   . ($m0_null eq 't' ? 'NULL' : 'available');
 is($m0_null, $want_probe ? 'f' : 't',
-	'session: malloc probe available exactly when built against glibc >= 2.33');
+	'session: malloc probe available exactly when built against glibc >= 2.33 or on macOS');
 # Sanity check of the compile-time detection: a module running on glibc must
 # have been built against glibc. getconf is only an optional oracle.
 SKIP:
@@ -340,7 +342,7 @@ SKIP:
 }
 SKIP:
 {
-	skip 'malloc statistics need glibc >= 2.33 (mallinfo2); leak check not run', 2
+	skip 'malloc statistics need glibc >= 2.33 (mallinfo2) or macOS; leak check not run', 2
 	  if $m0_null eq 't';
 	for my $i (1 .. 4)
 	{

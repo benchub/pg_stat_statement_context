@@ -80,6 +80,7 @@ typedef struct Slot
 } Slot;
 
 PsscRegexTestHook pssc_regex_test_hook = NULL;
+PsscRegexTestEngineHook pssc_regex_test_engine_hook = NULL;
 int			pssc_regex_compile_limit_ms = PSSC_REGEX_COMPILE_LIMIT_MS;
 
 static Slot slots[PSSC_MAX_EXTRACTORS];
@@ -347,7 +348,10 @@ compile_deadline_disarm(void)
 }
 #endif
 
-/* The test hook for test_phase (if >= 0), then the engine. May throw. */
+/*
+ * The test hook for test_phase (if >= 0), then the engine, then the test
+ * engine hook. May throw.
+ */
 static int
 run_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat, size_t len,
 			int test_phase, int test_index)
@@ -357,7 +361,11 @@ run_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat, size_t len,
 	if (test_phase >= 0 && pssc_regex_test_hook != NULL)
 		rc = pssc_regex_test_hook(test_phase, test_index);
 	if (rc == REG_OKAY)
+	{
 		rc = pssc_regcomp(cxt, re, pat, len, REG_ADVANCED, C_COLLATION_OID);
+		if (test_phase >= 0 && pssc_regex_test_engine_hook != NULL)
+			pssc_regex_test_engine_hook(test_phase, test_index, rc);
+	}
 	return rc;
 }
 

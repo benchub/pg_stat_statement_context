@@ -1290,6 +1290,85 @@ Each case needs membership in both roles, or a function whose author controls th
 **Open questions:** none
 **Status:** done
 
+### 20261006-173342-1: CI fuzz smoke: oracle misses `capped_tags`; failure artifacts unreadable
+
+**Description:** The first CI run (run 37535041023) failed the "Fuzz smoke" job for two reasons:
+
+1. `fuzz/sql/regex_fuzz.pl` checks that the `_extract()` result has exactly `@RESULT_KEYS`. Item 20261005-091225-32 added `capped_tags` to the result (`src/extract_fn.c`) without updating the oracle, so every call reports `result keys ...`. Add the key. The driver sets no `cardinality_cap*` GUCs (the default cap is 0, meaning none), so the oracle should also require `capped_tags = 0`, and treat a negative value as a negative counter. The `--self-test` should catch this kind of drift in future: for example, compare `@RESULT_KEYS` with the keys that `src/extract_fn.c` pushes.
+2. The "Upload artifacts" step failed with `EACCES` on `tmp/fuzz-sql/fail-round-1/server.log`, which the container wrote as another user. The upload steps in `.github/workflows/ci.yml` that collect files the Docker harness wrote to `tmp/` (fuzz-smoke, linux and linux-source) need to make those files readable first, for example with a `sudo chown -R` step on failure, or by having the harness write them readable.
+
+**Acceptance criteria:**
+- `perl fuzz/sql/regex_fuzz.pl --self-test` fails before the fix (it detects the key drift) and passes after.
+- `fuzz/sql/run.sh --pgdg --pg 18 -- --duration 30` passes.
+- The failure-upload steps of the Docker-based jobs can read what the harness wrote.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
+### 20261006-192058-2: macOS: 022 superuser name, 006 malloc accounting, 017 utility slack in CI
+
+**Description:** These are the remaining failures in the macOS CI cells (run 37535041023):
+- **022:** `session_open('postgres')` (lines 276, 277, 348) assumes the bootstrap superuser is called `postgres`. On a host run it's the OS user (`FATAL: role "postgres" does not exist`). Use the cluster's actual superuser name.
+- **006 #209, #219, #305 (PG14/15):** `pssc_extract_test_mem()`'s `malloc_used` (and `pssc_guc_test_malloc_used()`) only works through glibc's `mallinfo2()`, so on macOS it is NULL. PG14/15's regex engine mallocs directly, so the memory checks see nothing (growth −7168 bytes, 16384 bytes per generation). PG16+ allocates regexes in memory contexts, so it isn't affected. Implement `malloc_used` on macOS with `malloc_zone_statistics(NULL, &st)` (`size_in_use`) in both test modules. The precondition check ("a leak of the compiled regexes would show") must keep failing loudly, not skip, when neither source sees the regexes.
+- **017 #10, #80 (PG14/15 CI only, not locally):** the utility-time excess, which is pgss's own `pgss_store()` of a new entry inside our clock reads, reached 3–14 ms on the `macos-latest` runners, against the 2 ms default slack. Set `PSSC_TEST_UTILITY_SLACK_MS` (for example 50) in the macOS job's "Run tests" step of `.github/workflows/ci.yml`, with a comment explaining why. Don't loosen the default.
+
+**Acceptance criteria:**
+- 022 passes on a host run where the superuser is not `postgres`, and still passes in Docker.
+- On macOS PG14, `pssc_extract_test_mem()` reports a non-null `malloc_used`, and 006 passes. A test shows `malloc_used` grows after a known large malloc-backed allocation (it must fail before the fix).
+- The Docker harness passes on PG14–18.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
+### 20261006-192058-1: TAP tests: detect pg_stat_statements portably; fix the macOS failures in 010–019
+
+**Description:** In CI run 37535041023, the macOS cells failed. Tests 010–019 detect pg_stat_statements with `-e "$pkglibdir/pg_stat_statements.so"`, but on PG16+ macOS the module suffix is `.dylib`. So on macOS PG16–18, every pgss parity check was silently skipped (`plan skip_all` in 014, 017 and 019). Fix the detection (any of `.so`, `.dylib`, `.dll`), ideally through one shared helper instead of eight copies. Make a missing pgss a hard failure when the harness sets `PSSC_REQUIRE_PGSS=1`, so this can't silently recur. Set that variable in `docker/run-tests.sh`, because every harness image and the macOS build install pgss. Then fix the failures that the corrected detection, or macOS itself, exposes:
+- **013 #19:** the `set_conf('extractors', marginalia(position=prepend))` that test 19 relies on sits inside the pgss `SKIP` block. Move the setup out of it so test 19 doesn't depend on pgss.
+- **014:** the real-load "spelling variant" cases hardcode `.so` (`pg_stat_statements.so`, `"$libdir/$P.so"`). Use the platform's suffix. The matcher-only cases (`pssc_guc_test_load_order_wrong`) stay as they are, because `src/utility.c` strips every known suffix.
+- **012 #17–20:** with `track_utility = off`, a CALL/DO only nests on PG14–16 when pgss tracks it. Without pgss loaded, that falls back to this extension's own settings (src/utility.c `pgss_nests_utility`), so the children are top level there. Today the expectation assumes pgss is loaded. Make it follow `$have_pgss` and the version (on PG17+ it always nests).
+- **012 #202:** `ORDER BY step, tags::text` depends on collation. In C or byte order, `tx_outer` sorts before `tx`. Make the order deterministic, e.g. `COLLATE "C"` with the expected list adjusted.
+
+Verified locally on macOS (arm64, source builds, `docker/run-tests.sh`): with `.dylib` detection on PG18, 013, 014, 016, 017 and 019 pass, and only 012 #202 and 022 still fail.
+
+**Acceptance criteria:**
+- On macOS PG18 (host run of `docker/run-tests.sh` with `PSSC_REQUIRE_PGSS=1`), the pgss-dependent tests run rather than skip, and 010–019 pass; 012 and 013 also pass with pgss absent on PG14–16 and PG17+.
+- The Docker harness passes on PG14–18 (`scripts/docker-test.sh <major>`).
+- With `PSSC_REQUIRE_PGSS=1` and pgss genuinely missing, the tests fail rather than skip.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
+### 20261006-192058-3: Host runs of docker/run-tests.sh: skip worktrees/, stop the server on failure
+
+**Description:** `docker/run-tests.sh` (used on the host by the macOS CI cells and locally) has two problems:
+- **It copies `worktrees/`.** The source copy excludes `./tmp` but not `./worktrees`, so the version-guard check scans every worktree's `src/compat.h` and fails. The same applies to `scripts/docker-test.sh` run from the main checkout, which mounts the whole repo. Exclude `./worktrees` (and keep the check scanning only the copied tree).
+- **It leaks a server on failure.** `fail()` exits without stopping the server that `pg_start` started. In Docker the container dies with it, but on a host it stays up on the default port, and the next run then fails with "Address already in use". Stop it (`pg_ctl -m immediate`, tolerating "not running") from the failure and exit paths.
+
+**Acceptance criteria:**
+- A run from a checkout that contains `worktrees/` passes the version-guard step (a test that fails before the fix).
+- After a failing host run, no postmaster from `$PSSC_WORK` is left running (a test that fails before the fix).
+- The Docker harness passes on PG14–18.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
+### 20261007-064749-1: 006: retry-cleanup precondition must not depend on runner speed
+
+**Description:** In `test/t/006_regex.pl` (around line 662), the "attempt expired mid-compile, retried" checks from 20261006-080948-1 assert `cmp_ok($res{0}[1], '>', 0.6, "...compiling takes long enough to be interrupted mid-compile")`. The 'expire' injection fires 300 ms into the compile of `$MID`, so the clean compile only has to outlast 300 ms (plus margin) for the interrupt to land mid-compile. On fast GitHub runners the clean compile took 0.56–0.59 s, which failed this precondition (CI run 37630525613: Linux PG14 assert #208, Linux PG15 PGDG #208 and #218) even though the interruption itself worked. Make the precondition check what actually matters, with margin that doesn't depend on how fast the runner is. For example: confirm the expiry happened while the compile was still in progress, scale the expiry point to the measured clean compile time, or use a pattern that is reliably several times slower than the expiry point without making the test much slower.
+
+**Acceptance criteria:**
+- The precondition no longer fails just because a clean compile takes 0.3–0.6 s. Demonstrate this with a failing-before test, for example by making the compile faster in a test-only way or by running the check against the recorded CI timings.
+- The precondition still fails, so the test is not vacuous, if the expiry lands after the compile has finished.
+- The Docker harness passes on PG14–18, and on the macOS host for PG18.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

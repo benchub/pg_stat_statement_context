@@ -19,6 +19,7 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use PsscTest;
 
 my $P = 'pg_stat_statement_context';
 my $warn_re =
@@ -34,9 +35,10 @@ $P.extractors = 'sqlcommenter(position=any)'
 });
 $node->start;
 
-my $pkglibdir = $node->safe_psql('postgres',
-	q{SELECT setting FROM pg_config WHERE name = 'PKGLIBDIR'});
-if (!-e "$pkglibdir/pg_stat_statements.so")
+# The platform's module suffix (.so, .dylib), used by the load-order spelling
+# variants below.
+my $SO = pgss_suffix($node);
+if (!defined $SO)
 {
 	plan skip_all => 'pg_stat_statements is not installed';
 }
@@ -118,15 +120,15 @@ sql('SELECT pg_reload_conf()');
 my @cases = (
 	[ qq{'$P, "\$libdir/pg_stat_statements"'}, 1,
 		'quoted $libdir path after this extension' ],
-	[ qq{'  $P  ,   pg_stat_statements.so  '}, 1,
-		'whitespace and .so suffix after this extension' ],
+	[ qq{'  $P  ,   pg_stat_statements$SO  '}, 1,
+		'whitespace and the platform suffix after this extension' ],
 	[ qq{'"\$libdir/$P", pg_stat_statements'}, 1,
 		'this extension as a quoted $libdir path, pgss after it' ],
-	[ qq{'"\$libdir/$P.so" , "\$libdir/pg_stat_statements.so"'}, 1,
+	[ qq{'"\$libdir/$P$SO" , "\$libdir/pg_stat_statements$SO"'}, 1,
 		'both quoted paths with suffix, pgss after' ],
-	[ qq{'"\$libdir/pg_stat_statements", "\$libdir/$P.so"'}, 0,
+	[ qq{'"\$libdir/pg_stat_statements", "\$libdir/$P$SO"'}, 0,
 		'quoted paths, pgss first' ],
-	[ qq{'pg_stat_statements.so,$P'}, 0,
+	[ qq{'pg_stat_statements$SO,$P'}, 0,
 		'suffix, no spaces, pgss first' ],
 	[ qq{'pg_stat_statements, $P, pg_stat_statements'}, 0,
 		'duplicate pgss entry after: first load decides the order' ],

@@ -65,6 +65,9 @@ PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
+# Shared TAP helpers (test/perl/PsscTest.pm).
+PG_PROVE_FLAGS += -I $(srcdir)/test/perl
+
 # TEST-ONLY modules: pssc_compat_test exercises the src/compat.h shims
 # (test/t/002_compat.pl); pssc_guc_test inspects the parsed GUC state of
 # src/guc.h (test/t/003_guc.pl) and runs the load-order matcher of

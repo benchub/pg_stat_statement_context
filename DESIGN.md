@@ -1742,6 +1742,16 @@ matches this extension's minimum supported version.
   output that contains characters whose psql display width varies between
   minor releases (for example emoji outside the last column) uses
   `\pset format unaligned`, which still compares the exact bytes.
+- **pgss detection** (`test/perl/PsscTest.pm`, on prove's include path via
+  the Makefile): the TAP tests find `pg_stat_statements` in `pkglibdir` with
+  any module suffix (`.so`; `.dylib` on macOS from PG16; `.dll`), and the
+  load-order spelling variants of 014 use that suffix. Without it, the parity
+  checks are skipped and 012/013 take the no-pgss paths (on PG14–16 a CALL/DO
+  then nests per this extension's own utility settings).
+  `docker/run-tests.sh` sets `PSSC_REQUIRE_PGSS=1`, which turns a missing
+  pgss into a test failure, since every harness server (PGDG images, source
+  builds, macOS) installs it. `PSSC_TEST_WITHOUT_PGSS=1` treats pgss as
+  absent, to run the no-pgss paths where it is installed.
 - **Harness source builds** (`docker/Dockerfile.source`) install
   `pg_stat_statements` too, so pgss parity checks run on them. They install
   bison/flex (needed by PG17+ tarballs), download the release tarball and its
@@ -1778,7 +1788,10 @@ matches this extension's minimum supported version.
     pg_regress suite; any Valgrind error fails the cell.
 
   macOS builds 14–18 with `docker/build-postgres.sh` and runs
-  `docker/run-tests.sh` on the host. Source builds are cached, keyed on
+  `docker/run-tests.sh` on the host. The harness skips `worktrees/` when it
+  copies the sources and stops its server on any failure, so a failed host
+  run doesn't leave a postmaster on `PGPORT`; `scripts/test-run-tests.sh`
+  checks both on the host first. Source builds are cached, keyed on
   release, flavor and a hash of the build scripts. A separate job runs
   `scripts/check-version-guards.sh` and `scripts/check-frozen-sql.sh` (§7);
   `docker/run-tests.sh` runs both too. TAP tests use the PG15+
@@ -1844,6 +1857,7 @@ pg_stat_statement_context/
 │   ├── reclaim.c                   # optional dead-entry reclaim worker
 │   └── store.c                     # shmem HTAB, buckets, eviction
 ├── test/{sql,expected,t}/          # pg_regress + TAP
+├── test/perl/PsscTest.pm           # shared TAP helpers (pgss detection)
 ├── fuzz/
 └── DESIGN.md
 ```

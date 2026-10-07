@@ -20,8 +20,11 @@ PGBIN=$(pg_config --bindir)
 
 finish() {
 	rc=$?
-	# Results go to the host-owned /out as root.
+	# Results are copied as root, and the server log keeps pg_ctl's 0600:
+	# give them to the owner of the bind-mounted /out (the host user) so the
+	# host and CI can read them.
 	cp -rf "$WORK"/out/. "$OUT"/ 2>/dev/null || true
+	chown -R "$(stat -c %u:%g "$OUT")" "$OUT" 2>/dev/null && chmod -R u+rwX "$OUT" 2>/dev/null || true
 	exit $rc
 }
 trap finish EXIT
