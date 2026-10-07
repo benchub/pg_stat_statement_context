@@ -108,7 +108,12 @@ CREATE FUNCTION pssc_extract_test_regex_stats(OUT compiles bigint, OUT frees big
                                               OUT live int, OUT failed int)
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
--- This backend's malloc'd bytes in use (NULL without glibc >= 2.33) and
--- bytes allocated by all its memory contexts.
+-- This backend's malloc'd bytes in use (glibc >= 2.33 and macOS, NULL
+-- elsewhere) and bytes allocated by all its memory contexts.
 CREATE FUNCTION pssc_extract_test_mem(OUT malloc_used bigint, OUT context_bytes bigint)
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- Hold a malloc'd block of the given size (0: none), freeing the previous
+-- one: a known allocation for checking malloc_used above.
+CREATE FUNCTION pssc_extract_test_malloc_hold(bytes bigint) RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

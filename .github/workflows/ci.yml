@@ -191,6 +191,11 @@ jobs:
           PSSC_BUILD: ${{ runner.temp }}/pssc-build
           PSSC_WORK: ${{ runner.temp }}/pssc-work
           PSSC_TEST_MODE: release
+          # 017 bounds our utility time by pgss's plus a slack (default 2 ms)
+          # that covers pgss's own pgss_store() of a new entry between our
+          # clock reads. On macos-latest runners that store took 3-14 ms
+          # (PG14/15; not reproducible on a local Mac), so allow more here.
+          PSSC_TEST_UTILITY_SLACK_MS: 50
         run: |
           export PATH="$PGPREFIX/bin:$PATH"
           docker/run-tests.sh

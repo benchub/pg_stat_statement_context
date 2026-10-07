@@ -12,12 +12,19 @@
  */
 #include "postgres.h"
 
-/* mallinfo2() arrived in glibc 2.33; features.h came in via postgres.h. */
+/*
+ * Sources of this backend's malloc'd bytes in use: mallinfo2() (arrived in
+ * glibc 2.33; features.h came in via postgres.h) or, on macOS,
+ * malloc_zone_statistics() over all zones.
+ */
 #if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
 #if __GLIBC_PREREQ(2, 33)
 #define PSSC_HAVE_MALLINFO2 1
 #include <malloc.h>
 #endif
+#elif defined(__APPLE__)
+#define PSSC_HAVE_MALLOC_ZONE 1
+#include <malloc/malloc.h>
 #endif
 
 #include "catalog/pg_type.h"
@@ -256,7 +263,7 @@ pssc_guc_test_glibc_version(PG_FUNCTION_ARGS)
 
 /*
  * Bytes of malloc'd memory in use in this backend (glibc >= 2.33, which has
- * mallinfo2()), NULL elsewhere.
+ * mallinfo2(), and macOS), NULL elsewhere.
  * GUC "extra" blobs are malloc'd on PG14/15 and live in GUCMemoryContext,
  * itself malloc-backed, on PG16+, so a leak of them shows up here.
  */
@@ -264,10 +271,15 @@ PG_FUNCTION_INFO_V1(pssc_guc_test_malloc_used);
 Datum
 pssc_guc_test_malloc_used(PG_FUNCTION_ARGS)
 {
-#ifdef PSSC_HAVE_MALLINFO2
+#if defined(PSSC_HAVE_MALLINFO2)
 	struct mallinfo2 mi = mallinfo2();
 
 	PG_RETURN_INT64((int64) (mi.uordblks + mi.hblkhd));
+#elif defined(PSSC_HAVE_MALLOC_ZONE)
+	malloc_statistics_t st;
+
+	malloc_zone_statistics(NULL, &st);
+	PG_RETURN_INT64((int64) st.size_in_use);
 #else
 	PG_RETURN_NULL();
 #endif

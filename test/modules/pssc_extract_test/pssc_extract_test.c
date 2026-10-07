@@ -33,12 +33,19 @@
 #include "regex_runtime.h"
 #include "scan.h"
 
-/* mallinfo2() arrived in glibc 2.33; features.h came in via postgres.h. */
+/*
+ * Sources of this backend's malloc'd bytes in use: mallinfo2() (arrived in
+ * glibc 2.33; features.h came in via postgres.h) or, on macOS,
+ * malloc_zone_statistics() over all zones.
+ */
 #if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
 #if __GLIBC_PREREQ(2, 33)
 #define PSSC_HAVE_MALLINFO2 1
 #include <malloc.h>
 #endif
+#elif defined(__APPLE__)
+#define PSSC_HAVE_MALLOC_ZONE 1
+#include <malloc/malloc.h>
 #endif
 
 PG_MODULE_MAGIC;
@@ -577,9 +584,9 @@ pssc_extract_test_regex_stats(PG_FUNCTION_ARGS)
 }
 
 /*
- * Memory held by this backend: malloc'd bytes in use (glibc >= 2.33, NULL
- * elsewhere; the regex engine mallocs on PG14/15) and bytes allocated by
- * all memory contexts (it pallocs on PG16+).
+ * Memory held by this backend: malloc'd bytes in use (glibc >= 2.33 and
+ * macOS, NULL elsewhere; the regex engine mallocs on PG14/15) and bytes
+ * allocated by all memory contexts (it pallocs on PG16+).
  */
 PG_FUNCTION_INFO_V1(pssc_extract_test_mem);
 Datum
@@ -591,15 +598,43 @@ pssc_extract_test_mem(PG_FUNCTION_ARGS)
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
-#ifdef PSSC_HAVE_MALLINFO2
+#if defined(PSSC_HAVE_MALLINFO2)
 	{
 		struct mallinfo2 mi = mallinfo2();
 
 		values[0] = Int64GetDatum((int64) (mi.uordblks + mi.hblkhd));
+	}
+#elif defined(PSSC_HAVE_MALLOC_ZONE)
+	{
+		malloc_statistics_t st;
+
+		malloc_zone_statistics(NULL, &st);
+		values[0] = Int64GetDatum((int64) st.size_in_use);
 	}
 #else
 	nulls[0] = true;
 #endif
 	values[1] = Int64GetDatum((int64) MemoryContextMemAllocated(TopMemoryContext, true));
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+PG_FUNCTION_INFO_V1(pssc_extract_test_malloc_hold);
+Datum
+pssc_extract_test_malloc_hold(PG_FUNCTION_ARGS)
+{
+	static char *held;
+	int64		bytes = PG_GETARG_INT64(0);
+
+	free(held);
+	held = NULL;
+	if (bytes < 0 || bytes > (int64) 1 << 30)
+		elog(ERROR, "malloc_hold: %lld bytes out of range", (long long) bytes);
+	if (bytes > 0)
+	{
+		held = malloc((size_t) bytes);
+		if (held == NULL)
+			elog(ERROR, "malloc_hold: out of memory");
+		memset(held, 0x5A, (size_t) bytes);
+	}
+	PG_RETURN_VOID();
 }

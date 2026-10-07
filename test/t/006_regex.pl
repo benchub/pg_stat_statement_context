@@ -906,6 +906,32 @@ config(tags => '*', exclude_tags => '',
 	session_close($s);
 }
 
+# The malloc probe used below (and above) must see malloc'd memory where the
+# platform has a source for it: glibc >= 2.33 (mallinfo2) and macOS
+# (malloc_zone_statistics). PG14/15's regex engine mallocs directly, so
+# without it the leak check below would see nothing there.
+SKIP:
+{
+	my $rt = $^O eq 'linux' ? `getconf GNU_LIBC_VERSION 2>/dev/null` : '';
+	my $want = $^O eq 'darwin'
+	  || ($rt =~ /^glibc (\d+)\.(\d+)/ && ($1 > 2 || ($1 == 2 && $2 >= 33)));
+	skip "no malloc statistics source known for $^O" . ($rt ne '' ? " ($rt)" : ''), 3
+	  unless $want;
+	my $s = session_open();
+	my $mu = sub { sq($s, 'SELECT malloc_used FROM pssc_extract_test_mem()') };
+	my $m0 = $mu->();
+	isnt($m0, '', "malloc probe: malloc_used available on $^O");
+	my $n = 8 * 1024 * 1024;
+	sq($s, "SELECT pssc_extract_test_malloc_hold($n)");
+	my $m1 = $mu->();
+	sq($s, 'SELECT pssc_extract_test_malloc_hold(0)');
+	my $m2 = $mu->();
+	cmp_ok(($m1 || 0) - ($m0 || 0), '>=', $n, "malloc probe: sees a $n-byte malloc (grew by "
+		  . (($m1 || 0) - ($m0 || 0)) . ' bytes)');
+	cmp_ok(($m1 || 0) - ($m2 || 0), '>=', $n, 'malloc probe: sees it freed');
+	session_close($s);
+}
+
 # Reloads alternating two configs of 16 expensive regexes must not grow the
 # backend's memory (malloc'd on PG14/15, palloc'd on PG16+). Each pattern
 # takes several ms of CPU time to compile; this is not a test of the compile
