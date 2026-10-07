@@ -103,6 +103,16 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_extract_test_regex_injected() RETURNS int
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- How many times the injection's phase (and index) was reached since it was
+-- set, fired or not: for a compile phase, the number of attempts.
+CREATE FUNCTION pssc_extract_test_regex_attempts() RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- How long into the attempt the 'expire' injection makes the compile time
+-- limit expire (default 300 ms), in this backend. Returns the old value.
+CREATE FUNCTION pssc_extract_test_regex_expire_ms(ms int) RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
 -- Backend-local regex runtime bookkeeping (pssc_regex_debug_stats).
 CREATE FUNCTION pssc_extract_test_regex_stats(OUT compiles bigint, OUT frees bigint,
                                               OUT live int, OUT failed int)

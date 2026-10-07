@@ -304,12 +304,16 @@ static int	inj_index = -1;
 static InjectAction inj_action = INJ_NONE;
 static int	inj_remaining = 0;	/* -1: unlimited */
 static int	inj_fired = 0;
+static int	inj_attempts = 0;	/* hook calls for the phase/index, fired or not */
 
 /* REG_CANCEL of the PG14/15 engine (21); PG16+ throws instead. */
 #define PSSC_TEST_REG_CANCEL 21
 
-/* INJ_EXPIRE: the compile time limit expires this long into the attempt. */
-#define PSSC_TEST_EXPIRE_MS 300
+/*
+ * INJ_EXPIRE: the compile time limit expires this long into the attempt
+ * (pssc_extract_test_regex_expire_ms()).
+ */
+static int	inj_expire_ms = 300;
 
 static double
 cpu_ms(void)
@@ -377,8 +381,10 @@ busy_past_limit(void)
 static int
 inject_hook(int phase, int index)
 {
-	if (phase != inj_phase || (inj_index >= 0 && index != inj_index) ||
-		inj_remaining == 0)
+	if (phase != inj_phase || (inj_index >= 0 && index != inj_index))
+		return REG_OKAY;
+	inj_attempts++;
+	if (inj_remaining == 0)
 		return REG_OKAY;
 	if (inj_remaining > 0)
 		inj_remaining--;
@@ -473,7 +479,7 @@ inject_hook(int phase, int index)
 			{
 				void		(*expire) (int) = (void (*) (int)) main_sym("pssc_regex_test_expire_in");
 
-				expire(PSSC_TEST_EXPIRE_MS);
+				expire(inj_expire_ms);
 				return REG_OKAY;
 			}
 	}
@@ -526,6 +532,7 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 	inj_action = (InjectAction) a;
 	inj_remaining = count;
 	inj_fired = 0;
+	inj_attempts = 0;
 	*hook = a == INJ_NONE ? NULL : inject_hook;
 	PG_RETURN_VOID();
 }
@@ -535,6 +542,31 @@ Datum
 pssc_extract_test_regex_injected(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(inj_fired);
+}
+
+/*
+ * How many times the hook ran for the injected phase (and index) since the
+ * injection was set, whether it fired or not. For a compile phase that is
+ * one per attempt, so 2 after one firing means the attempt it fired in was
+ * stopped and retried.
+ */
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_attempts);
+Datum
+pssc_extract_test_regex_attempts(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(inj_attempts);
+}
+
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_expire_ms);
+Datum
+pssc_extract_test_regex_expire_ms(PG_FUNCTION_ARGS)
+{
+	int			old = inj_expire_ms;
+
+	if (PG_GETARG_INT32(0) < 1)
+		elog(ERROR, "the expiry must be at least 1 ms");
+	inj_expire_ms = PG_GETARG_INT32(0);
+	PG_RETURN_INT32(old);
 }
 
 PG_FUNCTION_INFO_V1(pssc_extract_test_regex_compile_limit);
