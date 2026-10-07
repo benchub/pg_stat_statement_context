@@ -84,6 +84,10 @@ step "version-guard check"
 scripts/check-version-guards.sh --self-test >/dev/null || fail "version-guard self-test"
 scripts/check-version-guards.sh || fail "version-guard check"
 
+step "frozen SQL check"
+scripts/check-frozen-sql.sh --self-test >/dev/null || fail "frozen-sql self-test"
+scripts/check-frozen-sql.sh || fail "frozen-sql check"
+
 step "unit tests (src/scan.c lexer + statement scans, src/pairs.c parsers, src/tagset.c pipeline, src/counters.c slot + fuzz entry points, ASan/UBSan)"
 as_pg make unittest || fail "unit tests"
 

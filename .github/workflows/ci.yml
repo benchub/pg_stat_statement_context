@@ -35,6 +35,10 @@ jobs:
         run: scripts/check-version-guards.sh --self-test
       - name: Check tree
         run: scripts/check-version-guards.sh
+      - name: Frozen SQL self-test
+        run: scripts/check-frozen-sql.sh --self-test
+      - name: Frozen SQL check
+        run: scripts/check-frozen-sql.sh
 
   linux:
     name: Linux PG${{ matrix.pg }} (PGDG)

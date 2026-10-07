@@ -82,7 +82,7 @@ TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test \
 	test/modules/pssc_extract_test test/modules/pssc_store_test \
 	test/modules/pssc_context_test
 
-.PHONY: test-modules install-test-modules clean-test-modules check-version-guards unittest
+.PHONY: test-modules install-test-modules clean-test-modules check-version-guards check-frozen-sql unittest
 
 test-modules:
 	for d in $(TEST_MODULES); do $(MAKE) -C $$d PG_CONFIG=$(PG_CONFIG) || exit 1; done
@@ -97,6 +97,11 @@ clean-test-modules:
 check-version-guards:
 	scripts/check-version-guards.sh --self-test
 	scripts/check-version-guards.sh
+
+# Released extension scripts are frozen (sql/frozen.sha256).
+check-frozen-sql:
+	scripts/check-frozen-sql.sh --self-test
+	scripts/check-frozen-sql.sh
 
 # Standalone unit tests for src/scan.c (lexer, statement ranges, positional
 # scans), src/pairs.c (SQLCommenter/marginalia parsers), src/tagset.c

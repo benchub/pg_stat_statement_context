@@ -1039,6 +1039,14 @@ provider adds it. This is the main obstacle to adoption.
 
 ## 7. SQL interface (v1)
 
+`sql/pg_stat_statement_context--1.0.sql` is **frozen** as of v1.0.0 (item
+20261005-091225-29). Installations created from it must stay identical to new
+ones, so any later change to the SQL surface ships as an upgrade script
+(`pg_stat_statement_context--1.0--1.1.sql`, ...) with a `default_version` bump
+in the `.control` file, and its scripts are added to `sql/frozen.sha256` when
+that version is released. `scripts/check-frozen-sql.sh` (run in CI and by
+`docker/run-tests.sh`) fails if a listed script is edited in place.
+
 ```sql
 CREATE FUNCTION pg_stat_statement_context(
     showtags boolean DEFAULT true,
@@ -1424,7 +1432,8 @@ matches this extension's minimum supported version.
   macOS builds 14–18 with `docker/build-postgres.sh` and runs
   `docker/run-tests.sh` on the host. Source builds are cached, keyed on
   release, flavor and a hash of the build scripts. A separate job runs
-  `scripts/check-version-guards.sh`. TAP tests use the PG15+
+  `scripts/check-version-guards.sh` and `scripts/check-frozen-sql.sh` (§7);
+  `docker/run-tests.sh` runs both too. TAP tests use the PG15+
   `PostgreSQL::Test::*` names; PG14 installs them as aliases only from 14.6, so
   14.0–14.5 cannot run the TAP suite and the harness says so explicitly.
 - **Benchmarks** (`bench/run.sh [--major N] [--quick]`, item -26): pgbench runs
@@ -1475,7 +1484,8 @@ matches this extension's minimum supported version.
 pg_stat_statement_context/
 ├── Makefile / meson.build          # PGXS
 ├── pg_stat_statement_context.control
-├── sql/pg_stat_statement_context--1.0.sql
+├── sql/pg_stat_statement_context--1.0.sql   # frozen at v1.0.0 (§7)
+├── sql/frozen.sha256               # checksums of released scripts
 ├── src/
 │   ├── pg_stat_statement_context.c # _PG_init, hooks
 │   ├── compat.h                    # PG14–18 shims

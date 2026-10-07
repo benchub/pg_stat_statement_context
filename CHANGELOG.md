@@ -1,0 +1,87 @@
+# Changelog
+
+All notable changes to `pg_stat_statement_context` are recorded here. The
+format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
+the project uses [Semantic Versioning](https://semver.org/). The extension's
+SQL version (`default_version` in the `.control` file) is the release's
+`MAJOR.MINOR`; released SQL scripts are never edited, and SQL changes ship as
+upgrade scripts (see [DESIGN.md §7](DESIGN.md#7-sql-interface-v1)).
+
+## [Unreleased]
+
+## [1.0.0] - 2026-10-06
+
+First release. SQL extension version `1.0`. Supports PostgreSQL 14, 15, 16,
+17 and 18 from one source tree. Release notes:
+[docs/release-notes/v1.0.0.md](docs/release-notes/v1.0.0.md).
+
+### Added
+
+- **Per-context statement statistics.** `calls` and `total_exec_time` per
+  (`userid`, `dbid`, `queryid`, `toplevel`, tag set), joinable to
+  `pg_stat_statements` on (`userid`, `dbid`, `queryid`, `toplevel`); the
+  `queryid` is always the core query ID. Executor
+  and `ProcessUtility` hooks; `track` (`none`/`top`/`all`), `track_utility`,
+  and `nested_tags` (`inherit`/`scan`/`none`) for nested statements from
+  PL/pgSQL, triggers and SPI.
+- **Tag extraction from SQL comments.** A backend-independent lexical comment
+  scanner (prepend/append/any positions, `scan_window` heuristic tail scans
+  for long statements) and an extractor DSL configured with GUCs:
+  `sqlcommenter`, `marginalia` and `regex` extractors, validated by the GUC
+  check hook and changeable at run time with `ALTER SYSTEM` +
+  `pg_reload_conf()`. Backends bound each regex compile attempt to 100 ms and
+  disable a pattern that can't compile (`regex_compile_failures`); see
+  DESIGN.md §4.2 for the config-file and postmaster exceptions.
+- **Context from `application_name`** with the `appname` extractor.
+- **`tags_override`**: set tags per session or transaction
+  (`SET LOCAL pg_stat_statement_context.tags_override = ...`), read at
+  execution time, for drivers that can't add comments or that reuse prepared
+  statements.
+- **Tag pipeline:** key allowlist (`tags`, default `action, controller,
+  job`) and denylist (`exclude_tags`), per-key value **normalization** rules
+  (`normalize`, e.g. `/users/\d+` → `/users/:id`), size limits (`max_tags`,
+  `max_tag_value_len`, `max_tagset_bytes`), and the **`untagged` policy**
+  (default `skip`; `record` keeps untagged statements with `{}`).
+- **Per-key cardinality caps** (`cardinality_cap`,
+  `cardinality_cap_overrides`, `cardinality_cap_slots`): values past a key's
+  cap are recorded as JSON `null`.
+- **Rolling time buckets:** a fixed-size shared-memory store
+  (`max_entries`) where each entry holds a ring of `bucket_count` buckets of
+  `bucket_interval` (default 12 × 5 min), rolled over lazily with a lock-free
+  boundary advance.
+- **Eviction under pressure:** dead entries (every bucket expired) are
+  reclaimed first, then live entries by pgss-style usage. Victims are chosen
+  from a compact 24-byte-per-entry candidate array with a bounded heap, so a
+  pass no longer walks or sorts the whole hash table.
+- **SQL interface:** `pg_stat_statement_context(showtags, merge_buckets)`
+  with the `pg_stat_statement_context` (per bucket) and
+  `pg_stat_statement_context_totals` (per entry) views;
+  `pg_stat_statement_context_last_bucket` (the last closed, final bucket);
+  `pg_stat_statement_context_activity` (current tags of every backend);
+  `pg_stat_statement_context_info()`; `pg_stat_statement_context_reset()`;
+  and the debug function `pg_stat_statement_context_extract()`.
+- **Exporter-friendly surface:** monotonic per-entry counters
+  (`calls_total`, `exec_time_total`, `stats_since`), bucket metadata in
+  `_info()` (`buckets`, `bucket_seconds`, `current_bucket_start`,
+  `last_closed_bucket_start`, `stats_reset_epoch`), and separate
+  `reclaimed_entries` / `evicted_entries` / `dropped_records` counters.
+- **Visibility rules** like `pg_stat_statements`: other roles' `queryid` and
+  `tags` are `NULL` without `pg_read_all_stats`; tags from other databases
+  are converted (or escaped) to the reader's encoding.
+- **`shared_preload_libraries` load-order detection:** a `WARNING` if the
+  library is loaded before `pg_stat_statements`.
+- **Integrations:** recipes for postgres_exporter, sql_exporter and the
+  OpenTelemetry Collector, a Grafana dashboard and a least-privilege
+  monitoring role (`docs/integrations/`, tested by
+  `scripts/test-integrations.sh`).
+- **Documentation:** configuration, extractors, SQL interface, limitations,
+  and benchmarks (`docs/`).
+- **Testing:** unit tests (ASan/UBSan), a pg_regress suite, TAP tests
+  (lifecycle, pgss parity, store, buckets, eviction, reconfiguration),
+  libFuzzer and SQL-level fuzzers, pgbench benchmarks (`bench/`), and a CI
+  matrix of PG 14–18 × Linux/macOS plus cassert and Valgrind builds.
+- `scripts/check-frozen-sql.sh`: fails if a released SQL script is edited in
+  place.
+
+[Unreleased]: https://github.com/benchub/pg_stat_statement_context/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/benchub/pg_stat_statement_context/releases/tag/v1.0.0
