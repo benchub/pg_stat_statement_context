@@ -1272,6 +1272,24 @@ Use the same userid/dbid the store records for the entry. The table size stays `
 **Open questions:** none (scope toggle and default `role` decided 2026-10-07)
 **Status:** done
 
+### 20261007-070036-2: Apply cardinality caps under the identity that records the tags
+
+**Description:** Found by the round-1 review of 20261007-070036-1 (gpt-6.1-sol). Caps are applied under `GetUserId()`/`MyDatabaseId` at extraction (`src/extract.c`), but the identity that records the tags can differ:
+- An executor frame refreshes its userid at `ExecutorEnd` (`src/executor.c` ~174-179). A cursor opened under role A and closed under role B is therefore capped against A's scope and recorded under B. B can end up with more distinct values than its cap (e.g. cap 1: `a1` admitted for A, `b1` for B; the cursor records `a1` under B).
+- A `SECURITY DEFINER` child inherits the caller's already-capped tags without calling the cap hook (`src/context.c` ~185-205) and records them under the definer's userid.
+- With `nested_tags = scan`, a cursor created by a definer and then fetched or closed by the caller can show the definer's cap decisions in the caller's rows.
+
+Each case needs membership in both roles, or a function whose author controls the tag text. So the impact is limited to inaccurate cap accounting plus a narrow decision leak between roles that already share a trust boundary. It is documented as a residual in DESIGN.md §6.1/§6.11. Fix: keep the uncapped normalized tags, and the scope they were capped under, on the frame. Re-apply the caps for the receiving identity when tags cross roles (inheritance, activity publication, recording). Keep the existing pgss-compatible end-time userid semantics.
+
+**Acceptance criteria:**
+- Regression tests for a cursor that changes role (opened under A, closed under B, cap 1) and for `SECURITY DEFINER` inheritance and returned cursors. Every recorded tag set obeys the cap of the identity it is recorded under.
+- No measurable hot-path regression when roles don't change (one identity comparison).
+- Full suite passes on PG 14-18.
+
+**Depends on:** 20261007-070036-1
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
