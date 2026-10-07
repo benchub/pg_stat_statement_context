@@ -709,6 +709,54 @@ assert_evict_slots(void)
 #endif
 
 /*
+ * The scan of the compact eviction array shared by an eviction pass
+ * (store_evict(), step 1) and the reclaim worker (pssc_store_reclaim_dead()):
+ * removes every entry that is dead at current (the watermark the caller
+ * raised under the exclusive lock it holds), at which the last slot moves
+ * into the hole and is judged next. Returns the number removed.
+ *
+ * Under pressure, every surviving entry's usage also decays and, if sel is
+ * not NULL, is offered to the selector; *nlive counts the survivors. The
+ * reclaim worker passes pressure = false: it only removes dead entries and
+ * leaves the survivors' usage alone, since decay paces eviction and must
+ * not depend on how often an idle worker wakes up.
+ */
+static int64
+evict_scan(int64 current, bool pressure, PsscEvictSelect *sel, int64 *nlive)
+{
+	PsscEvictSlot *slots = store_state->evict_slots;
+	int			count = store_state->bucket_count;
+	int64		dead = 0;
+	int64		live = 0;
+
+	Assert(LWLockHeldByMeInMode(store_state->lock, LW_EXCLUSIVE));
+	Assert(pressure || sel == NULL);
+	for (int64 i = 0; i < store_state->entries;)
+	{
+		PsscEvictSlot *es = &slots[i];
+
+		if (pssc_bucket_entry_is_dead(es->last_bucket, current, count))
+		{
+			/* the last slot (not yet seen) moves here: judge it next */
+			entry_remove(i);
+			dead++;
+			continue;
+		}
+		if (pressure)
+		{
+			pssc_usage_decay(&es->usage);
+			if (sel != NULL)
+				pssc_evict_select_offer(sel, es->last_bucket, es->usage, es->entry);
+		}
+		live++;
+		i++;
+	}
+	if (nlive != NULL)
+		*nlive = live;
+	return dead;
+}
+
+/*
  * One eviction pass (§5.3); the caller holds the exclusive lock and found
  * the table at max_entries. Returns the number of entries removed.
  *
@@ -751,8 +799,6 @@ assert_evict_slots(void)
 static int64
 store_evict(void)
 {
-	PsscEvictSlot *slots = store_state->evict_slots;
-	int			count = store_state->bucket_count;
 	int64		current;
 	int64		target;
 	int64		dead = 0;
@@ -777,23 +823,7 @@ store_evict(void)
 	if (cands != NULL)
 		pssc_evict_select_init(&sel, cands, (size_t) target);
 
-	for (int64 i = 0; i < store_state->entries;)
-	{
-		PsscEvictSlot *es = &slots[i];
-
-		if (pssc_bucket_entry_is_dead(es->last_bucket, current, count))
-		{
-			/* the last slot (not yet seen) moves here: judge it next */
-			entry_remove(i);
-			dead++;
-			continue;
-		}
-		pssc_usage_decay(&es->usage);
-		nlive++;
-		if (cands != NULL)
-			pssc_evict_select_offer(&sel, es->last_bucket, es->usage, es->entry);
-		i++;
-	}
+	dead = evict_scan(current, true, cands != NULL ? &sel : NULL, &nlive);
 	nvictims = pssc_evict_live_count(target, dead, nlive);
 	if (nvictims > 0 && cands != NULL)
 	{
@@ -815,6 +845,46 @@ store_evict(void)
 	assert_evict_slots();
 #endif
 	return dead + evicted;
+}
+
+int64
+pssc_store_reclaim_dead(int64 *last_watermark)
+{
+	int64		current;
+	int64		dead;
+
+	if (store_state == NULL || store_htab == NULL)
+		return 0;
+
+	/*
+	 * An entry only dies when the watermark moves past its live window: if
+	 * it has not moved since our last pass (which left no dead entry), and
+	 * every later write lands at or above it, nothing can be dead now. So
+	 * an idle worker takes the exclusive lock at most once per bucket.
+	 * Like every reader, raise the watermark to the clock (under the lock).
+	 */
+	LWLockAcquire(store_state->lock, LW_SHARED);
+	current = observe_current_bucket(PSSC_BUCKET_NONE);
+	LWLockRelease(store_state->lock);
+	if (*last_watermark != PSSC_BUCKET_NONE && current == *last_watermark)
+		return 0;
+
+	LWLockAcquire(store_state->lock, LW_EXCLUSIVE);
+	current = observe_current_bucket(PSSC_BUCKET_NONE);
+	dead = evict_scan(current, false, NULL, NULL);
+
+	/*
+	 * Housekeeping, not an eviction pass: reclaimed_entries counts what was
+	 * removed, as it does for passes, but dealloc (passes forced by a full
+	 * table, a sign of undersizing) and evicted_entries are left alone.
+	 */
+	store_state->reclaimed_entries += dead;
+#ifdef USE_ASSERT_CHECKING
+	assert_evict_slots();
+#endif
+	LWLockRelease(store_state->lock);
+	*last_watermark = current;
+	return dead;
 }
 
 static inline bool

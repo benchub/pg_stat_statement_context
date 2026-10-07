@@ -16,6 +16,7 @@
 #include "executor.h"
 #include "extract.h"
 #include "guc.h"
+#include "reclaim.h"
 #include "regex_runtime.h"
 #include "store.h"
 #include "utility.h"
@@ -42,6 +43,7 @@ _PG_init(void)
 	pssc_extract_init();
 	pssc_regex_init();
 	pssc_store_init();
+	pssc_reclaim_init();
 	pssc_activity_init();
 	pssc_cap_init();
 	pssc_context_init();

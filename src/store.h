@@ -35,7 +35,9 @@
  * evicted_entries the live ones. The new entry is then inserted. Only if
  * the pass freed nothing (the candidate buffer could not be allocated and no
  * entry was dead) is the record dropped and counted in dropped_records; the
- * statement never fails.
+ * statement never fails. The optional reclaim worker (reclaim.c) runs the
+ * same dead-entry scan on its own, without decay or live evictions
+ * (pssc_store_reclaim_dead()).
  *
  * Time buckets (§5.2). The header holds the epoch, bucket_interval,
  * bucket_count and current_bucket. The epoch is the postmaster's start time
@@ -297,6 +299,17 @@ extern PGDLLEXPORT int64 pssc_store_check_invariants(void);
  * holding the shared lock. fn must not call into the store.
  */
 extern PGDLLEXPORT void pssc_store_foreach(PsscStoreVisitor fn, void *arg);
+
+/*
+ * The reclaim worker's pass (DESIGN.md §5.3, reclaim.c): raises
+ * current_bucket to the clock, as readers do, and if it differs from
+ * *last_watermark (PSSC_BUCKET_NONE: the first pass), removes every dead
+ * entry under the exclusive lock (the scan of an eviction pass, without
+ * usage decay or live evictions), adds them to reclaimed_entries (not to
+ * dealloc or evicted_entries) and sets *last_watermark to the watermark it
+ * used. Returns the number removed; 0 if the store is not set up.
+ */
+extern PGDLLEXPORT int64 pssc_store_reclaim_dead(int64 *last_watermark);
 
 /* Removes every entry and zeroes the counters; sets stats_reset. */
 extern PGDLLEXPORT void pssc_store_reset(void);

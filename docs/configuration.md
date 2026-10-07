@@ -28,6 +28,8 @@ The GUCs exist only when the library is in `shared_preload_libraries`.
 | [`max_tags`](#max_tags) | integer | `8` | 1 – 64 | postmaster |
 | [`max_tag_value_len`](#max_tag_value_len) | integer (bytes) | `64` | 1 – 4096 | postmaster |
 | [`max_tagset_bytes`](#max_tagset_bytes) | integer (bytes) | `512` | 128 – 8192 | postmaster |
+| [`reclaim_worker`](#reclaim_worker) | bool | `off` | | postmaster |
+| [`reclaim_worker_interval`](#reclaim_worker_interval) | integer (ms) | `10000` (`10s`) | 100 ms – 1 day | sighup |
 | [`scan_window`](#scan_window) | integer (bytes) | `2048` (`2kB`) | 64 B – 1 MB | sighup |
 | [`extractors`](#extractors) | string | `'sqlcommenter, marginalia'` | extractor DSL | sighup |
 | [`tags`](#tags) | string | `'action, controller, job'` | key list or `'*'` | sighup |
@@ -145,6 +147,25 @@ applied after the extractor chain has picked its winner. A tag set that
 doesn't fit is therefore not replaced by another extractor's tags, and the
 statement can end up untagged (see
 [chain semantics](extractors.md#the-extractor-dsl)).
+
+### `reclaim_worker`
+
+Starts a background worker that frees dead entries (all buckets expired)
+without waiting for the table to fill up; see [Eviction](#eviction). Off by
+default, in which case no worker is registered at all. The worker needs no
+database connection, so it does not appear in `pg_stat_activity`; its process
+title is `pg_stat_statement_context reclaim worker`, and it uses one of
+`max_worker_processes`. It is not needed for correct results: expired buckets
+are never shown either way.
+
+### `reclaim_worker_interval`
+
+How often the reclaim worker wakes up. It accepts time units, for example
+`'1s'` or `'1min'`; a bare number is in milliseconds. A wake-up that finds
+the current bucket unchanged since the last one does nothing, so dead entries
+are freed at most `reclaim_worker_interval` after their last bucket expires,
+and the worker takes the table's exclusive lock at most once per
+`bucket_interval`. Ignored when `reclaim_worker` is off.
 
 ### `scan_window`
 
@@ -522,11 +543,20 @@ system whose tag combinations change over time, `entries` therefore normally
 climbs to `max_entries` and stays there, and passes run regularly even when
 no live history is lost.
 
+With [`reclaim_worker`](#reclaim_worker) on, a background worker frees dead
+entries shortly after they expire instead, even with no query traffic: it
+reclaims every dead entry (counted in `reclaimed_entries`), never evicts a
+live one, does not decay usage and is not an eviction pass (`dealloc` does
+not change). `entries` then tracks the combinations seen within the last
+`bucket_count × bucket_interval`, and passes run only when that exceeds
+`max_entries`.
+
 `pg_stat_statement_context_info()` reports what the passes did, with each
 outcome counted separately:
 
 - `dealloc`: the number of eviction passes;
-- `reclaimed_entries`: **dead** entries the passes reclaimed. This is normal
+- `reclaimed_entries`: **dead** entries the passes (or the reclaim worker)
+  reclaimed. This is normal
   housekeeping: their buckets had all expired, so no visible history was
   lost;
 - `evicted_entries`: **live** entries the passes evicted because reclaiming

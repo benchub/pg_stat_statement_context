@@ -24,6 +24,7 @@ OBJS = \
 	src/utility.o \
 	src/counters.o \
 	src/store.o \
+	src/reclaim.o \
 	src/activity.o \
 	src/activity_fn.o \
 	src/cardcap.o

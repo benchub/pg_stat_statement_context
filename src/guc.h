@@ -72,9 +72,11 @@ extern PGDLLEXPORT int pssc_bucket_interval;	/* seconds */
 extern PGDLLEXPORT int pssc_max_tags;
 extern PGDLLEXPORT int pssc_max_tag_value_len; /* bytes */
 extern PGDLLEXPORT int pssc_max_tagset_bytes;
+extern PGDLLEXPORT bool pssc_reclaim_worker;
 
 /* sighup (PGC_SIGHUP) */
 extern PGDLLEXPORT int pssc_scan_window;	/* bytes */
+extern PGDLLEXPORT int pssc_reclaim_worker_interval;	/* ms */
 extern PGDLLEXPORT char *pssc_extractors;	/* raw DSL text; use pssc_guc_extractors() */
 extern PGDLLEXPORT char *pssc_tags;			/* raw text; use pssc_guc_tags() */
 extern PGDLLEXPORT char *pssc_exclude_tags; /* raw text; use pssc_guc_exclude_tags() */

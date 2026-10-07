@@ -9,6 +9,15 @@ upgrade scripts (see [DESIGN.md §7](DESIGN.md#7-sql-interface-v1)).
 
 ## [Unreleased]
 
+### Added
+
+- **Reclaim worker** (`reclaim_worker`, postmaster, default `off`;
+  `reclaim_worker_interval`, sighup, default `10s`): an optional background
+  worker that frees dead entries (all buckets expired) on idle systems,
+  without waiting for an insert into a full table. It counts them in
+  `_info().reclaimed_entries`, leaves `dealloc` and `evicted_entries` alone,
+  and never evicts live entries or decays usage. With it off nothing changes.
+
 ## [1.0.0] - 2026-10-06
 
 First release. SQL extension version `1.0`. Supports PostgreSQL 14, 15, 16,

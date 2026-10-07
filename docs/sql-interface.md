@@ -360,7 +360,7 @@ SELECT * FROM pg_stat_statement_context_info();
 | `entries` | `bigint` | Entries currently in the table (including dead ones not yet reclaimed). |
 | `max_entries` | `bigint` | The `max_entries` setting. |
 | `dealloc` | `bigint` | Eviction passes run because the table was full. |
-| `reclaimed_entries` | `bigint` | Dead entries (every bucket expired) reclaimed by those passes: normal housekeeping, no history lost. See [Eviction](configuration.md#eviction). |
+| `reclaimed_entries` | `bigint` | Dead entries (every bucket expired) reclaimed by those passes or by the [reclaim worker](configuration.md#reclaim_worker): normal housekeeping, no history lost. See [Eviction](configuration.md#eviction). |
 | `evicted_entries` | `bigint` | Live entries evicted by those passes because reclaiming dead ones did not free enough: if it grows, `max_entries` is too small. |
 | `dropped_records` | `bigint` | Calls not recorded at all because a pass could free nothing; any non-zero value means severe undersizing (or memory pressure). |
 | `buckets` | `int` | The `bucket_count` setting. |

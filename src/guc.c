@@ -41,6 +41,8 @@
 #define MAX_TAGSET_BYTES_MAX	8192
 #define SCAN_WINDOW_MIN			64
 #define SCAN_WINDOW_MAX			(1024 * 1024)
+#define RECLAIM_INTERVAL_MIN	100		/* ms */
+#define RECLAIM_INTERVAL_MAX	(86400 * 1000)	/* one day, in ms */
 
 /* ASCII whitespace, as trimmed by the pair parsers (§4.2). */
 #define IS_ASCII_SPACE(c) \
@@ -57,6 +59,8 @@ int			pssc_bucket_interval = 300;
 int			pssc_max_tags = 8;
 int			pssc_max_tag_value_len = 64;
 int			pssc_max_tagset_bytes = 512;
+bool		pssc_reclaim_worker = false;
+int			pssc_reclaim_worker_interval = 10000;
 int			pssc_scan_window = 2048;
 char	   *pssc_extractors = NULL;
 char	   *pssc_tags = NULL;
@@ -1936,6 +1940,17 @@ pssc_guc_define(void)
 							0,
 							NULL, NULL, NULL);
 
+	/* the worker is registered (or not) at startup: reclaim.c */
+	DefineCustomBoolVariable(PSSC_GUC_PREFIX ".reclaim_worker",
+							 "Starts a background worker that reclaims expired entries.",
+							 "Entries whose time buckets have all expired are otherwise "
+							 "reclaimed only when an insert finds the table full.",
+							 &pssc_reclaim_worker,
+							 false,
+							 PGC_POSTMASTER,
+							 0,
+							 NULL, NULL, NULL);
+
 	/* sighup */
 	DefineCustomIntVariable(PSSC_GUC_PREFIX ".scan_window",
 							"Sets how many bytes at the head or tail of a long statement are searched for comments.",
@@ -1946,6 +1961,17 @@ pssc_guc_define(void)
 							SCAN_WINDOW_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_BYTE,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable(PSSC_GUC_PREFIX ".reclaim_worker_interval",
+							"Sets how often the reclaim worker wakes up.",
+							"Only used when reclaim_worker is on.",
+							&pssc_reclaim_worker_interval,
+							10000,
+							RECLAIM_INTERVAL_MIN,
+							RECLAIM_INTERVAL_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MS,
 							NULL, NULL, NULL);
 
 	DefineCustomStringVariable(PSSC_GUC_PREFIX ".extractors",

@@ -211,6 +211,11 @@ dependencies and is not shown.
 
 **Depends on:** 20261005-091225-15
 **Open questions:** none
+**Decisions** (2026-10-06, made while building; recorded in DESIGN.md §4.1, §5.3):
+- GUCs `reclaim_worker` (bool, postmaster, default `off`: no worker is registered at all) and `reclaim_worker_interval` (ms, sighup, default 10 s, 100 ms – 1 day; a reload wakes the worker).
+- The worker has shared-memory access only (no database connection), so it is not in `pg_stat_activity`; it is identified by its process title.
+- Each wake-up raises `current_bucket` like a reader and, only if it moved since the previous pass, runs the dead-entry scan of an eviction pass (shared helper) under the exclusive lock.
+- It never decays usage or evicts live entries, counts what it removes in `reclaimed_entries`, and does not increment `dealloc` (passes forced by a full table) or `evicted_entries`.
 **Status:** ready
 
 ### 20261005-091225-35: Roadmap: persist stats across clean restarts

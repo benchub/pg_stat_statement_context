@@ -255,6 +255,8 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.max_tags` | `8` | postmaster | Max tags stored per entry. |
 | `pg_stat_statement_context.max_tag_value_len` | `64` | postmaster | Bytes per tag value. Longer values are truncated on a character boundary. Keys are limited to 63 bytes, and longer keys are dropped. |
 | `pg_stat_statement_context.max_tagset_bytes` | `512` | postmaster | Hard cap on the serialized tag set, which is part of the hash key (§5.1). Tags are kept greedily in priority order (allowlist order, or sorted keys for `'*'`); a tag that doesn't fit is dropped and counted, and smaller lower-priority tags may still be kept (§6.11). |
+| `pg_stat_statement_context.reclaim_worker` | `off` | postmaster | Start the background worker that reclaims dead entries on idle systems (§5.3, item 20261005-091225-34). Off: no worker is registered. |
+| `pg_stat_statement_context.reclaim_worker_interval` | `10s` | sighup | How often the reclaim worker wakes up (100 ms – 1 day, unit ms). |
 | `pg_stat_statement_context.scan_window` | `2kB` | sighup | Max bytes from the head/tail searched for comments (see §6.2). |
 | `pg_stat_statement_context.extractors` | `'sqlcommenter, marginalia'` | sighup | Extractor DSL (§4.2). |
 | `pg_stat_statement_context.tags` | `'action, controller, job'` | sighup | Allowlist of tag keys to keep, applied after `rename`. Tags not listed are discarded. `'*'` keeps all tags (not recommended, see §6.1). |
@@ -622,6 +624,8 @@ sizing rule.
   writes clamp to it. A forward jump larger than the ring makes every slot
   stale at once. Bucket arithmetic is signed, so the cutoff can't underflow.
 - Rollover happens lazily on the write path, so no background worker is needed.
+  (The optional reclaim worker of §5.3 only frees dead entries early; it
+  advances `current_bucket` exactly as a reader does.)
   Readers do not depend on writers: the SRF first raises `current_bucket` to
   the clock bucket, then hides slots outside the live window
   `[current - bucket_count + 1, current]`, using the watermark read after
@@ -695,6 +699,34 @@ Details (decided 2026-10-05, item -15):
   that fails, only dead entries are reclaimed. The user's statement never
   fails, and `dealloc` still counts the pass; if nothing was dead either, the
   record is dropped (step 4).
+
+**Reclaim worker** (optional, item 20261005-091225-34, decided 2026-10-06).
+With `reclaim_worker = on` (postmaster GUC, default `off`), `_PG_init`
+registers one background worker; with it off nothing is registered, so
+there is no extra process and behaviour is exactly as above. The worker only
+touches the extension's shared memory, so it has `BGWORKER_SHMEM_ACCESS` but
+no database connection (it is not in `pg_stat_activity`; its process title
+is `pg_stat_statement_context reclaim worker`), starts at
+`BgWorkerStart_ConsistentState`, and is restarted 10 s after an `ERROR`
+exit. Every `reclaim_worker_interval` (sighup, default 10 s; a reload wakes
+it) it runs `pssc_store_reclaim_dead()`:
+- Under the shared lock, raise `current_bucket` to the clock, as readers do
+  (§5.2). If the watermark equals the one its previous pass used, stop: an
+  entry only dies when the watermark moves past its live window, every later
+  write lands at or above it, and the previous pass left nothing dead. So an
+  idle worker takes the exclusive lock at most once per bucket.
+- Otherwise, under the exclusive lock, raise the watermark again and run the
+  same scan of the compact eviction array as step 1 of an eviction pass (one
+  shared helper, `evict_scan()`), removing every dead entry.
+- **No decay, no live evictions:** both are pressure-only. Usage decay paces
+  the choice of live victims per eviction pass (as in pgss); tying it to how
+  often an idle worker wakes up would change which entries a later pass
+  evicts.
+- **Counters:** `reclaimed_entries` counts what the worker removes, as it
+  does for passes (it is "dead entries reclaimed", whoever reclaims them).
+  `dealloc` is *not* incremented: it counts passes forced by a full table,
+  like pgss's `dealloc`, and an idle worker must not make the table look
+  undersized. `evicted_entries` is untouched since nothing live is removed.
 
 ### 5.4 Locking
 
@@ -1258,9 +1290,11 @@ matches this extension's minimum supported version.
   dedicated GUC; the `exclude_tags` denylist does not double as that list.
   Total exemplar storage is bounded by a configurable memory cap (decided
   2026-10-05).
-- Optional background worker that reclaims dead entries (all slots expired)
-  on idle systems. This is not needed for correctness, since readers filter
-  expired slots (§5.2).
+- ~~Optional background worker that reclaims dead entries (all slots expired)
+  on idle systems.~~ Done (item 20261005-091225-34, 2026-10-06; §4.1, §5.3):
+  `reclaim_worker` (postmaster, default `off`) and `reclaim_worker_interval`.
+  It is not needed for correctness, since readers filter expired slots
+  (§5.2).
 - **Persist stats across clean restarts** (dump/load like
   `pg_stat_statements.save`), following pgss's lead (decided 2026-10-05): the
   saved file is discarded on a file-format or extension-version mismatch; if
@@ -1384,6 +1418,11 @@ matches this extension's minimum supported version.
   - a forced hash collision (debug hash override) followed by eviction and
     reinsertion
   - small-`max_entries` churn, with dead entries reclaimed before live ones
+  - the optional reclaim worker (`027_reclaim_worker.pl`): with no query
+    traffic it frees dead entries (`_info().entries` drops,
+    `reclaimed_entries` grows, `dealloc` and survivors' usage unchanged),
+    reloads its interval on SIGHUP, and with the default `off` no worker
+    process exists and dead entries wait for an insert into a full table
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset
 - **pg_regress suite** (`make installcheck`: smoke, guc, extract, normalize, appname, tags_override) runs in a
@@ -1493,6 +1532,7 @@ pg_stat_statement_context/
 │   ├── scan.c                      # comment scanner (backend-independent)
 │   ├── extract.c                   # sqlcommenter / marginalia / regex
 │   ├── context.c                   # execution frames, active-frame tracking
+│   ├── reclaim.c                   # optional dead-entry reclaim worker
 │   └── store.c                     # shmem HTAB, buckets, eviction
 ├── test/{sql,expected,t}/          # pg_regress + TAP
 ├── fuzz/

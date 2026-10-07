@@ -29,13 +29,15 @@ pg_stat_statement_context.max_tags|Sets the maximum number of tags stored per en
 pg_stat_statement_context.max_tagset_bytes|Sets the maximum size of a serialized tag set in bytes.|integer|512|postmaster||128|8192|
 pg_stat_statement_context.nested_tags|Selects which tags nested statements get.|enum|inherit|superuser||||{inherit,scan,none}
 pg_stat_statement_context.normalize|Sets regex-replace rules that normalize tag values.|string||sighup||||
+pg_stat_statement_context.reclaim_worker|Starts a background worker that reclaims expired entries.|bool|off|postmaster||||
+pg_stat_statement_context.reclaim_worker_interval|Sets how often the reclaim worker wakes up.|integer|10000|sighup|ms|100|86400000|
 pg_stat_statement_context.scan_window|Sets how many bytes at the head or tail of a long statement are searched for comments.|integer|2048|sighup|B|64|1048576|
 pg_stat_statement_context.tags|Sets the tag keys to keep ("*" keeps all).|string|action, controller, job|sighup||||
 pg_stat_statement_context.tags_override|Sets tags that override the tags of SQL comments in this session or transaction.|string||user||||
 pg_stat_statement_context.track|Selects which statements are tracked.|enum|top|superuser||||{none,top,all}
 pg_stat_statement_context.track_utility|Selects whether utility commands are tracked.|bool|on|superuser||||
 pg_stat_statement_context.untagged|Selects whether statements without tags are recorded.|enum|skip|sighup||||{skip,record}
-(20 rows)
+(22 rows)
 \pset format aligned
 SELECT count(*) AS gucs,
        count(*) FILTER (WHERE short_desc IS NOT NULL AND short_desc <> '') AS described
@@ -43,7 +45,7 @@ SELECT count(*) AS gucs,
  WHERE name LIKE 'pg\_stat\_statement\_context.%';
  gucs | described 
 ------+-----------
-   20 |        20
+   22 |        22
 (1 row)
 
 -- ---- superuser GUCs: a superuser can SET them ----
