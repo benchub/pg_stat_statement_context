@@ -1139,6 +1139,21 @@ Verified locally on macOS (arm64, source builds, `docker/run-tests.sh`): with `.
 **Open questions:** none
 **Status:** done
 
+### 20261006-192058-3: Host runs of docker/run-tests.sh: skip worktrees/, stop the server on failure
+
+**Description:** `docker/run-tests.sh` (used on the host by the macOS CI cells and locally) has two problems:
+- **It copies `worktrees/`.** The source copy excludes `./tmp` but not `./worktrees`, so the version-guard check scans every worktree's `src/compat.h` and fails. The same applies to `scripts/docker-test.sh` run from the main checkout, which mounts the whole repo. Exclude `./worktrees` (and keep the check scanning only the copied tree).
+- **It leaks a server on failure.** `fail()` exits without stopping the server that `pg_start` started. In Docker the container dies with it, but on a host it stays up on the default port, and the next run then fails with "Address already in use". Stop it (`pg_ctl -m immediate`, tolerating "not running") from the failure and exit paths.
+
+**Acceptance criteria:**
+- A run from a checkout that contains `worktrees/` passes the version-guard step (a test that fails before the fix).
+- After a failing host run, no postmaster from `$PSSC_WORK` is left running (a test that fails before the fix).
+- The Docker harness passes on PG14–18.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

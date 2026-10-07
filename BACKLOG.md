@@ -52,7 +52,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | no | ready |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
-| 20261006-192058-3 | Host runs of docker/run-tests.sh: skip worktrees/, stop the server on failure | none | no | ready |
 | 20261006-143225-1 | Close the deadline-postponement race in the test module's sleep injection | 20261006-113156-1 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | blocked-on-deps |
@@ -186,21 +185,6 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 - 2026-10-06: Do option 2 (compact per-entry array, keeps §5.3 semantics) first; only if p99 is still over ~1.5× pgss, add option 1 (adaptive batch) and update §5.3.
 
 **Depends on:** 20261006-043919-1
-**Open questions:** none
-**Status:** ready
-
-### 20261006-192058-3: Host runs of docker/run-tests.sh: skip worktrees/, stop the server on failure
-
-**Description:** `docker/run-tests.sh` (used on the host by the macOS CI cells and locally) has two problems:
-- **It copies `worktrees/`.** The source copy excludes `./tmp` but not `./worktrees`, so the version-guard check scans every worktree's `src/compat.h` and fails. The same applies to `scripts/docker-test.sh` run from the main checkout, which mounts the whole repo. Exclude `./worktrees` (and keep the check scanning only the copied tree).
-- **It leaks a server on failure.** `fail()` exits without stopping the server that `pg_start` started. In Docker the container dies with it, but on a host it stays up on the default port, and the next run then fails with "Address already in use". Stop it (`pg_ctl -m immediate`, tolerating "not running") from the failure and exit paths.
-
-**Acceptance criteria:**
-- A run from a checkout that contains `worktrees/` passes the version-guard step (a test that fails before the fix).
-- After a failing host run, no postmaster from `$PSSC_WORK` is left running (a test that fails before the fix).
-- The Docker harness passes on PG14–18.
-
-**Depends on:** none
 **Open questions:** none
 **Status:** ready
 
