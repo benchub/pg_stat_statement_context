@@ -37,6 +37,7 @@
 #include "extract.h"
 #include "guc.h"
 #include "regex_runtime.h"
+#include "store.h"
 
 static MemoryContext extract_cxt = NULL;
 static PsscTagsetStats pending_stats;
@@ -115,7 +116,9 @@ same_limits(const PsscTagsetLimits *a, const PsscTagsetLimits *b)
 		a->max_tag_value_len == b->max_tag_value_len &&
 		a->max_tagset_bytes == b->max_tagset_bytes &&
 		a->scan_window == b->scan_window &&
-		a->standard_conforming_strings == b->standard_conforming_strings;
+		a->standard_conforming_strings == b->standard_conforming_strings &&
+		a->exemplar_value_len == b->exemplar_value_len &&
+		a->capture_exemplars == b->capture_exemplars;
 }
 
 static char *
@@ -176,6 +179,15 @@ cache_store(SourceCache *cache, const char *str, size_t len, uint64 generation,
 	cache->limits = *limits;
 	cache->tags = *built;
 	cache->tags.tags = tags;
+	for (int i = 0; i < PSSC_MAX_EXEMPLAR_KEYS; i++)
+	{
+		if (!built->exemplars[i].set)
+			continue;
+		cache->tags.exemplars[i].val = cache_copy(cache, built->exemplars[i].val,
+												  built->exemplars[i].vlen);
+		if (cache->tags.exemplars[i].val == NULL)
+			return;
+	}
 	cache->valid = true;
 }
 
@@ -276,12 +288,42 @@ override_tags_get(const PsscTagsetLimits *limits, const PsscTagsetEnv *env,
 	return built;
 }
 
-/* pssc_extract_tags() with the pipeline counters added to *stats. */
+/*
+ * Serializes the captured exemplars (§6.13) into ex: per value, a uint8
+ * slot, a native uint16 length and the bytes. Returns the length.
+ */
+static size_t
+exemplars_serialize(const PsscExemplar *exemplars, char *ex, size_t exsize)
+{
+	size_t		pos = 0;
+
+	for (int i = 0; i < PSSC_MAX_EXEMPLAR_KEYS; i++)
+	{
+		uint16		len;
+
+		if (!exemplars[i].set || exemplars[i].vlen > PSSC_EXEMPLAR_VALUE_MAX)
+			continue;
+		if (pos + 1 + sizeof(uint16) + exemplars[i].vlen > exsize)
+			break;
+		len = (uint16) exemplars[i].vlen;
+		ex[pos] = (char) i;
+		memcpy(ex + pos + 1, &len, sizeof(uint16));
+		if (len > 0)
+			memcpy(ex + pos + 1 + sizeof(uint16), exemplars[i].val, len);
+		pos += 1 + sizeof(uint16) + len;
+	}
+	return pos;
+}
+
+/* pssc_extract_tags_ex() with the pipeline counters added to *stats. */
 static void
 extract_tags(const char *s, size_t start, size_t end, char *buf,
 			 size_t bufsize, PsscExtractResult *result,
-			 PsscTagsetStats *stats, bool peek_caps)
+			 PsscTagsetStats *stats, bool peek_caps,
+			 char *ex, size_t exsize, size_t *exlen)
 {
+	const PsscTagList *exemplar_keys = pssc_guc_exemplar_keys();
+
 	PsscTagsetEnv env;
 	PsscTagsetLimits limits;
 	PsscTagsetOut out;
@@ -291,6 +333,8 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 	const PsscSourceTags *override;
 
 	memset(result, 0, sizeof(*result));
+	if (exlen != NULL)
+		*exlen = 0;
 	if (extract_cxt == NULL)	/* not preloaded: pssc_extract_init() not run */
 	{
 		result->oom = true;
@@ -314,6 +358,16 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 	}
 	/* caps apply after the cached appname/override passes (steps 1-7) */
 	env.cap = pssc_cap_hook(peek_caps);
+	/* only when the store has exemplar slots (and the caller wants them) */
+	env.exemplar_keys = NULL;
+	limits.exemplar_value_len = 0;
+	limits.capture_exemplars = false;
+	if (ex != NULL && pssc_tag_list_count(exemplar_keys) > 0)
+	{
+		env.exemplar_keys = exemplar_keys;
+		limits.exemplar_value_len = pssc_store_exemplar_value_len();
+		limits.capture_exemplars = true;
+	}
 
 	limits.max_tags = pssc_max_tags;
 	limits.max_tag_value_len = pssc_max_tag_value_len;
@@ -330,6 +384,8 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 									pssc_guc_tags(), pssc_guc_exclude_tags(),
 									&limits, &env, appname, override, &out,
 									stats);
+	if (ex != NULL && !out.oom)
+		*exlen = exemplars_serialize(out.exemplars, ex, exsize);
 	MemoryContextReset(extract_cxt);
 
 	result->len = out.len;
@@ -343,7 +399,17 @@ void
 pssc_extract_tags(const char *s, size_t start, size_t end, char *buf,
 				  size_t bufsize, PsscExtractResult *result)
 {
-	extract_tags(s, start, end, buf, bufsize, result, &pending_stats, false);
+	extract_tags(s, start, end, buf, bufsize, result, &pending_stats, false,
+				 NULL, 0, NULL);
+}
+
+void
+pssc_extract_tags_ex(const char *s, size_t start, size_t end, char *buf,
+					 size_t bufsize, PsscExtractResult *result,
+					 char *ex, size_t exsize, size_t *exlen)
+{
+	extract_tags(s, start, end, buf, bufsize, result, &pending_stats, false,
+				 ex, exsize, exlen);
 }
 
 void
@@ -354,7 +420,8 @@ pssc_extract_tags_debug(const char *s, size_t start, size_t end, char *buf,
 	uint64		compile_failures = pending_stats.regex_compile_failures;
 
 	memset(stats, 0, sizeof(*stats));
-	extract_tags(s, start, end, buf, bufsize, result, stats, true);
+	extract_tags(s, start, end, buf, bufsize, result, stats, true,
+				 NULL, 0, NULL);
 	stats->regex_compile_failures =
 		pending_stats.regex_compile_failures - compile_failures;
 }
@@ -397,6 +464,7 @@ pssc_extract_take_stats(PsscTagsetStats *stats)
 	stats->regex_compile_failures += pending_stats.regex_compile_failures;
 	stats->capped_tags += pending_stats.capped_tags;
 	stats->cap_table_full += pending_stats.cap_table_full;
+	stats->exemplars_dropped += pending_stats.exemplars_dropped;
 	memset(&pending_stats, 0, sizeof(pending_stats));
 }
 

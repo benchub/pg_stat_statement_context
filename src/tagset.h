@@ -34,6 +34,17 @@
  *		 later occurrences of a normalized key are not normalized again
  *		 (they lose to the first occurrence anyway);
  *	  7. truncate the value to max_tag_value_len bytes with env->cliplen.
+ *	Exemplar capture (backlog item 20261005-091225-33) sits between steps 4
+ *	and 5: a pair whose final key (after rename) is in env->exemplar_keys
+ *	has its value captured for that key's exemplar slot, whatever step 5
+ *	and later steps decide for the grouping tag set, so a denylisted key
+ *	can still be captured. Captured values are not normalized, truncated
+ *	or capped; a value longer than limits->exemplar_value_len is dropped
+ *	(counted in exemplars_dropped) and does not take the slot. The first
+ *	occurrence that fits wins, in the precedence order of tags
+ *	(tags_override, then the comment chain over the own range, then the
+ *	footer, then application_name). A capture alone does not make an
+ *	extractor "produce" tags.
  * Chain: an extractor "produces" tags if at least one of its pairs survives
  * steps 2-7. Extractors run in order until one produces tags; after that,
  * only extractors with merge=on still run, and their tags are added. When
@@ -77,6 +88,13 @@
 
 #include "pairs.h"
 #include "scan.h"
+
+/*
+ * Exemplars (backlog item 20261005-091225-33): at most this many keys in
+ * exemplar_keys, and at most this many bytes per captured value.
+ */
+#define PSSC_MAX_EXEMPLAR_KEYS		8
+#define PSSC_EXEMPLAR_VALUE_MAX		256
 
 /* guc.h */
 struct PsscExtractorList;
@@ -172,6 +190,12 @@ typedef struct PsscTagsetEnv
 
 	/* Per-key cardinality caps (step 8); NULL means no caps. */
 	PsscCapFn	cap;
+
+	/*
+	 * Exemplar keys (at most PSSC_MAX_EXEMPLAR_KEYS; a key's slot is its
+	 * position in the list); NULL or empty means no capture.
+	 */
+	const struct PsscTagList *exemplar_keys;
 } PsscTagsetEnv;
 
 typedef struct PsscTagsetLimits
@@ -181,6 +205,13 @@ typedef struct PsscTagsetLimits
 	int			max_tagset_bytes;	/* bytes, >= 0 */
 	int			scan_window;	/* bytes, >= 1 */
 	bool		standard_conforming_strings;
+	int			exemplar_value_len; /* bytes, 0..PSSC_EXEMPLAR_VALUE_MAX */
+	/*
+	 * True when env->exemplar_keys is set. Not used by the pipeline itself;
+	 * it keys cached results, since exemplar_value_len 0 means "capture and
+	 * drop every value" with keys and "no capture" without.
+	 */
+	bool		capture_exemplars;
 } PsscTagsetLimits;
 
 /*
@@ -235,7 +266,24 @@ typedef struct PsscTagsetStats
 	 */
 	uint64_t	capped_tags;
 	uint64_t	cap_table_full;
+
+	/*
+	 * Exemplar values not captured because they are longer than
+	 * exemplar_value_len (in _info() as exemplar_values_dropped).
+	 */
+	uint64_t	exemplars_dropped;
 } PsscTagsetStats;
+
+/*
+ * One captured exemplar value (slot i: key i of env->exemplar_keys); val
+ * points into the input, the blob or scratch, like a tag's.
+ */
+typedef struct PsscExemplar
+{
+	const char *val;
+	size_t		vlen;
+	bool		set;
+} PsscExemplar;
 
 typedef struct PsscTagsetOut
 {
@@ -244,6 +292,7 @@ typedef struct PsscTagsetOut
 	int			ntags;
 	bool		footer;			/* tags came from the trailing footer */
 	bool		oom;			/* env->alloc failed: empty result */
+	PsscExemplar exemplars[PSSC_MAX_EXEMPLAR_KEYS]; /* none set on oom */
 } PsscTagsetOut;
 
 /*
@@ -279,6 +328,7 @@ typedef struct PsscSourceTags
 	const PsscTagCandidate *tags;
 	PsscTagsetStats stats;
 	bool		oom;			/* env->alloc failed: no tags */
+	PsscExemplar exemplars[PSSC_MAX_EXEMPLAR_KEYS]; /* captured by the pass */
 } PsscSourceTags;
 
 typedef PsscSourceTags PsscAppnameTags;

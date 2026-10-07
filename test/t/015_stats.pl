@@ -76,7 +76,7 @@ sub store_state
 	my $cols = 'bucket_start:timestamp with time zone,userid:oid,dbid:oid,'
 	  . 'queryid:bigint,toplevel:boolean,tags:jsonb,calls:bigint,'
 	  . 'total_exec_time:double precision,calls_total:bigint,'
-	  . 'exec_time_total:double precision,stats_since:timestamp with time zone';
+	  . 'exec_time_total:double precision,stats_since:timestamp with time zone,exemplars:jsonb';
 	for my $v ($P, "${P}_totals", "${P}_last_bucket")
 	{
 		is(sql(qq{SELECT string_agg(attname || ':' || format_type(atttypid, atttypmod), ','
@@ -97,7 +97,8 @@ sub store_state
 		  . 'OUT queryid bigint, OUT toplevel boolean, OUT tags jsonb, OUT calls bigint, '
 		  . 'OUT total_exec_time double precision, OUT calls_total bigint, '
 		  . 'OUT exec_time_total double precision, '
-		  . 'OUT stats_since timestamp with time zone -> SETOF record v s t t',
+		  . 'OUT stats_since timestamp with time zone, OUT exemplars jsonb '
+		  . '-> SETOF record v s t t',
 		'SRF signature; VOLATILE PARALLEL SAFE STRICT like pg_stat_statements');
 }
 

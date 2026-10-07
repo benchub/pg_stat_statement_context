@@ -43,6 +43,7 @@
 #define SCAN_WINDOW_MAX			(1024 * 1024)
 #define RECLAIM_INTERVAL_MIN	100		/* ms */
 #define RECLAIM_INTERVAL_MAX	(86400 * 1000)	/* one day, in ms */
+#define EXEMPLAR_MEMORY_MAX		MAX_KILOBYTES
 
 /* ASCII whitespace, as trimmed by the pair parsers (§4.2). */
 #define IS_ASCII_SPACE(c) \
@@ -60,6 +61,8 @@ int			pssc_max_tags = 8;
 int			pssc_max_tag_value_len = 64;
 int			pssc_max_tagset_bytes = 512;
 bool		pssc_reclaim_worker = false;
+char	   *pssc_exemplar_keys = NULL;
+int			pssc_exemplar_memory = 2048;
 int			pssc_reclaim_worker_interval = 10000;
 bool		pssc_save = true;
 int			pssc_scan_window = 2048;
@@ -112,6 +115,7 @@ static const PsscTagList empty_tag_list = {0, 0, false};
 
 static const PsscTagList *cur_tags = &empty_tag_list;
 static const PsscTagList *cur_exclude_tags = &empty_tag_list;
+static const PsscTagList *cur_exemplar_keys = &empty_tag_list;
 
 static const PsscExtractorList empty_extractor_list = {
 	offsetof(PsscExtractorList, extractors), 0
@@ -176,6 +180,12 @@ const PsscTagList *
 pssc_guc_exclude_tags(void)
 {
 	return cur_exclude_tags;
+}
+
+const PsscTagList *
+pssc_guc_exemplar_keys(void)
+{
+	return cur_exemplar_keys;
 }
 
 const PsscExtractorList *
@@ -424,6 +434,22 @@ check_exclude_tags(char **newval, void **extra, GucSource source)
 	return parse_tag_list(*newval ? *newval : "", false, extra);
 }
 
+static bool
+check_exemplar_keys(char **newval, void **extra, GucSource source)
+{
+	if (!parse_tag_list(*newval ? *newval : "", false, extra))
+		return false;
+	if (((const PsscTagList *) *extra)->nkeys > PSSC_MAX_EXEMPLAR_KEYS)
+	{
+		GUC_check_errdetail("The list has more than %d keys.",
+							PSSC_MAX_EXEMPLAR_KEYS);
+		pssc_guc_extra_free(*extra);
+		*extra = NULL;
+		return false;
+	}
+	return true;
+}
+
 /* ---------------- assign hooks: install and bump; must not fail ---------------- */
 
 static void
@@ -446,6 +472,12 @@ static void
 assign_exclude_tags(const char *newval, void *extra)
 {
 	install_tag_list(&cur_exclude_tags, extra);
+}
+
+static void
+assign_exemplar_keys(const char *newval, void *extra)
+{
+	install_tag_list(&cur_exemplar_keys, extra);
 }
 
 /* ---------------- extractors DSL (§4.2) ---------------- */
@@ -1939,6 +1971,32 @@ pssc_guc_define(void)
 							MAX_TAGSET_BYTES_MAX,
 							PGC_POSTMASTER,
 							0,
+							NULL, NULL, NULL);
+
+	/* exemplars (§6.13): the keys fix the per-entry slots, so postmaster */
+	DefineCustomStringVariable(PSSC_GUC_PREFIX ".exemplar_keys",
+							   "Sets the tag keys whose most recent value is stored with each entry.",
+							   "Comma-separated, case-sensitive keys of at most 63 bytes, at most "
+							   CppAsString2(PSSC_MAX_EXEMPLAR_KEYS) " keys. Captured whether or not the key "
+							   "is a grouping tag; empty disables exemplars.",
+							   &pssc_exemplar_keys,
+							   "",
+							   PGC_POSTMASTER,
+							   GUC_LIST_INPUT,
+							   check_exemplar_keys,
+							   assign_exemplar_keys,
+							   NULL);
+
+	DefineCustomIntVariable(PSSC_GUC_PREFIX ".exemplar_memory",
+							"Sets the shared memory for exemplar values of all entries.",
+							"Divided evenly between max_entries entries and their exemplar keys; "
+							"longer values are dropped.",
+							&pssc_exemplar_memory,
+							2048,
+							0,
+							EXEMPLAR_MEMORY_MAX,
+							PGC_POSTMASTER,
+							GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
 	/* the worker is registered (or not) at startup: reclaim.c */

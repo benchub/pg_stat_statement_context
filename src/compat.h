@@ -183,6 +183,17 @@ pssc_guc_extra_alloc(Size size)
 #endif
 }
 
+/* Frees a block from pssc_guc_extra_alloc() that guc.c will not see. */
+static inline void
+pssc_guc_extra_free(void *p)
+{
+#if PG_VERSION_NUM >= 160000
+	guc_free(p);
+#else
+	free(p);
+#endif
+}
+
 /*
  * Regex allocation. pg_regcomp allocates the compiled regex with whatever
  * the core regex library uses; pssc_regcomp compiles with cxt as the current

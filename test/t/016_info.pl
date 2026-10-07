@@ -58,7 +58,8 @@ sql('CREATE ROLE alice');
 my @cols = qw(entries max_entries dealloc reclaimed_entries evicted_entries dropped_records
   buckets bucket_seconds oldest_bucket current_bucket_start last_closed_bucket_start
   shmem_bytes cap_shmem_bytes invalid_tags dropped_tags heuristic_scans regex_compile_failures
-  utility_missing_queryid stats_reset stats_reset_epoch);
+  utility_missing_queryid stats_reset stats_reset_epoch exemplar_shmem_bytes
+  exemplar_value_bytes exemplar_values_dropped);
 
 # The one row of _info() as a hash; NULLs as 'NULL'. $suffix (e.g. a
 # tagged comment) is appended to the statement that calls _info().
@@ -121,7 +122,9 @@ sub pin
 		  . 'OUT heuristic_scans bigint, OUT regex_compile_failures bigint, '
 		  . 'OUT utility_missing_queryid bigint, '
 		  . 'OUT capped_tags bigint, OUT cap_table_full bigint, '
-		  . 'OUT stats_reset timestamp with time zone, OUT stats_reset_epoch bigint '
+		  . 'OUT stats_reset timestamp with time zone, OUT stats_reset_epoch bigint, '
+		  . 'OUT exemplar_shmem_bytes bigint, OUT exemplar_value_bytes integer, '
+		  . 'OUT exemplar_values_dropped bigint '
 		  . '-> record v f',
 		'_info(): exactly the §7 columns, one row, VOLATILE');
 	is(sql(qq{SELECT pg_get_function_arguments(p.oid) || ' -> ' || pg_get_function_result(p.oid)

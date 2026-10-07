@@ -80,7 +80,7 @@ sub rows
 		  . 'OUT userid oid, OUT dbid oid, OUT queryid bigint, OUT toplevel boolean, '
 		  . 'OUT tags jsonb, OUT calls bigint, OUT total_exec_time double precision, '
 		  . 'OUT calls_total bigint, OUT exec_time_total double precision, '
-		  . 'OUT stats_since timestamp with time zone v s t t',
+		  . 'OUT stats_since timestamp with time zone, OUT exemplars jsonb v s t t',
 		'_last_bucket(): the SRF columns; VOLATILE PARALLEL SAFE STRICT like the SRF');
 	is(sql(qq{SELECT has_table_privilege('monitor', '${P}_last_bucket', 'SELECT'),
 	                 has_function_privilege('monitor', '${P}_last_bucket(boolean)', 'EXECUTE')}),

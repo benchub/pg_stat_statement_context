@@ -168,7 +168,8 @@ record_frame(const PsscFrame *frame, double elapsed_ms, PsscTagsetStats *pending
 							  frame->tags, frame->tags_len,
 							  frame->tags_hash))
 		return;
-	(void) pssc_store_record_with_stats(key, elapsed_ms, pending);
+	(void) pssc_store_record_ex(key, elapsed_ms, pending, frame->exemplars,
+								frame->exemplars_len);
 }
 
 static void

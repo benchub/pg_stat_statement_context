@@ -65,6 +65,9 @@ typedef struct Ctx
 	size_t		seq;
 	bool		oom;
 
+	/* exemplar captures (first that fits wins), by exemplar key position */
+	PsscExemplar exs[PSSC_MAX_EXEMPLAR_KEYS];
+
 	/*
 	 * Keys normalized so far in this pass (step 6), and whether that failed.
 	 * At most one entry per distinct key a rule names.
@@ -222,6 +225,39 @@ override_rename(const Ctx *c, const char *key, size_t klen)
 	return NULL;
 }
 
+/* Captures val for an exemplar slot if key is an exemplar key (tagset.h). */
+static void
+capture_exemplar(Ctx *c, const char *key, size_t klen, const char *val,
+				 size_t vlen)
+{
+	int			pos;
+	size_t		maxv;
+
+	if (c->env->exemplar_keys == NULL || klen > PSSC_MAX_KEY_LEN)
+		return;
+	pos = pssc_tag_list_find(c->env->exemplar_keys, key, (int) klen);
+	if (pos < 0 || pos >= PSSC_MAX_EXEMPLAR_KEYS || c->exs[pos].set)
+		return;
+	maxv = c->lim->exemplar_value_len > 0 ? (size_t) c->lim->exemplar_value_len : 0;
+	if (vlen > maxv)
+	{
+		c->stats->exemplars_dropped++;
+		return;
+	}
+	c->exs[pos].val = val;
+	c->exs[pos].vlen = vlen;
+	c->exs[pos].set = true;
+}
+
+/* Fills the empty slots of dst from src. */
+static void
+merge_exemplars(PsscExemplar *dst, const PsscExemplar *src)
+{
+	for (int i = 0; i < PSSC_MAX_EXEMPLAR_KEYS; i++)
+		if (!dst[i].set && src[i].set)
+			dst[i] = src[i];
+}
+
 /*
  * Steps 2-7 of DESIGN.md §6.11 for one pair of extractor e, or of
  * tags_override if e is NULL. Returns true if a tag was added.
@@ -288,6 +324,14 @@ process_pair(Ctx *c, const PsscExtractor *e, const PsscPair *p)
 			}
 		}
 	}
+
+	/*
+	 * Exemplar capture, after rename and before step 5, so that it does not
+	 * depend on whether the key is also kept as a grouping tag: the point of
+	 * an exemplar is to keep a value of a key that is denylisted (or not
+	 * allowlisted) because it has too many distinct values.
+	 */
+	capture_exemplar(c, key, klen, val, vlen);
 
 	/*
 	 * 5. global allowlist, or the denylist with tags = '*'. List keys are at
@@ -483,6 +527,7 @@ stats_add(PsscTagsetStats *dst, const PsscTagsetStats *src)
 	dst->normalize_failures += src->normalize_failures;
 	dst->capped_tags += src->capped_tags;
 	dst->cap_table_full += src->cap_table_full;
+	dst->exemplars_dropped += src->exemplars_dropped;
 }
 
 /*
@@ -541,6 +586,7 @@ add_source(Ctx *c, const PsscSourceTags *src)
 	stats_add(c->stats, &src->stats);
 	if (src->oom)
 		c->oom = true;
+	merge_exemplars(c->exs, src->exemplars);
 	for (size_t i = 0; i < src->ntags && !c->oom; i++)
 	{
 		const PsscTagCandidate *t = &src->tags[i];
@@ -590,6 +636,7 @@ pssc_tagset_build_with_override(const char *s, size_t start, size_t end,
 	out->ntags = 0;
 	out->footer = false;
 	out->oom = false;
+	memset(out->exemplars, 0, sizeof(out->exemplars));
 
 	memset(&c, 0, sizeof(c));
 	c.s = s;
@@ -721,6 +768,8 @@ done:
 		out->footer = false;
 		out->oom = true;
 	}
+	else
+		memcpy(out->exemplars, c.exs, sizeof(out->exemplars));
 }
 
 /* The tags of a source pass (c->stats is out->stats) into *out. */
@@ -752,6 +801,8 @@ export_tags(Ctx *c, PsscSourceTags *out)
 		out->ntags = 0;
 		out->oom = true;
 	}
+	else
+		memcpy(out->exemplars, c->exs, sizeof(out->exemplars));
 }
 
 bool

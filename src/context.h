@@ -90,6 +90,10 @@ typedef struct PsscFrame
 	uint32		tags_hash;		/* pssc_tagset_hash(tags, tags_len) */
 	char	   *tags;
 
+	/* exemplar values (§6.13), as pssc_store_record_ex() takes them */
+	uint32		exemplars_len;
+	char	   *exemplars;
+
 	/* executor frames only */
 	const QueryDesc *queryDesc; /* lookup key */
 	dlist_node	node;			/* registry link */
@@ -101,6 +105,7 @@ typedef struct PsscUtilityFrame
 {
 	PsscFrame	frame;
 	char		tagbuf[PSSC_TAGSET_BYTES_MAX];
+	char		exbuf[PSSC_EXEMPLARS_BUF_MAX];
 } PsscUtilityFrame;
 
 /* What pssc_frame_enter() saves and pssc_frame_leave() restores. */

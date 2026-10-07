@@ -40,6 +40,8 @@ The GUCs exist only when the library is in `shared_preload_libraries`.
 | [`cardinality_cap`](#cardinality_cap) | integer | `0` (off) | 0 – 1000000 | sighup |
 | [`cardinality_cap_overrides`](#cardinality_cap_overrides) | string | `''` | `key:N` list | sighup |
 | [`cardinality_cap_slots`](#cardinality_cap_slots) | integer | `16384` | 256 – 67108864 | postmaster |
+| [`exemplar_keys`](#exemplar_keys) | string | `''` (off) | key list, at most 8 | postmaster |
+| [`exemplar_memory`](#exemplar_memory) | integer (kB) | `2048` (`2MB`) | 0 – 2147483647 kB | postmaster |
 
 Every name has the prefix `pg_stat_statement_context.`. The contexts mean:
 
@@ -440,6 +442,50 @@ early when nearly full). When a new value finds no room (or a new key finds
 no key slot), the value is recorded as `null`, as if over its cap, and
 counted in both `_info().capped_tags` and `_info().cap_table_full`: the
 caps fail closed. `pg_stat_statement_context_reset()` empties the table.
+
+### `exemplar_keys`
+
+Keys whose most recent value is stored with each entry as an **exemplar**,
+shown in the `exemplars` column of the views (version 1.1), e.g.
+`'traceparent'`: from an expensive aggregate you can jump to one real trace
+without grouping by the trace id. A comma-separated list of at most 8 keys
+(at most 63 bytes each, no whitespace or `*`, case-sensitive; duplicates
+are ignored). Empty (the default) turns exemplars off and uses no memory.
+
+A key is matched after [`rename`](extractors.md#the-tag-pipeline), before
+[`tags`](#tags) and [`exclude_tags`](#exclude_tags), and its value is
+captured whether or not the key is then kept as a tag. So the usual setup is
+a key that is in both `exclude_tags` (not grouped by) and `exemplar_keys`:
+
+```
+pg_stat_statement_context.exclude_tags = 'traceparent, tracestate, request_id'
+pg_stat_statement_context.exemplar_keys = 'traceparent'
+```
+
+The value stored is the raw, validated value: [`normalize`](#normalize),
+[`max_tag_value_len`](#max_tag_value_len) and the cardinality caps do not
+apply to it. An extractor's own `keys` list does. A statement with no value
+for a key leaves the entry's previous value in place, so `exemplars` shows
+the latest value seen, not necessarily one from the latest call. Nested
+statements with `nested_tags = inherit` use the outer statement's
+exemplars. Exemplars are visible to the same roles as `tags`, are not saved
+across restarts, and are removed by `pg_stat_statement_context_reset()`.
+
+### `exemplar_memory`
+
+Shared memory for the exemplar values of all entries, allocated at startup
+when `exemplar_keys` is not empty. It is split evenly: each entry gets
+`exemplar_memory / max_entries` bytes (rounded down to a multiple of 8), each
+key an equal share of that, and each value that share minus 2 bytes, at most
+256 bytes. `_info().exemplar_value_bytes` shows the result and
+`_info().exemplar_shmem_bytes` the memory used (included in
+`shmem_bytes`, never more than `exemplar_memory`).
+
+A value longer than `exemplar_value_bytes` is **dropped**, not truncated (a
+truncated trace id identifies nothing): the entry keeps its previous value
+and `_info().exemplar_values_dropped` is incremented. At the defaults
+(10000 entries, 2 MB) one key gets 206 bytes and two keys 102 bytes each,
+enough for a 55-byte `traceparent`.
 
 ## Changing the configuration from SQL
 

@@ -42,6 +42,26 @@ extern PGDLLEXPORT void pssc_extract_tags(const char *s, size_t start,
 										  PsscExtractResult *result);
 
 /*
+ * Bytes pssc_extract_tags_ex() may write to its exemplar buffer: per key a
+ * uint8 slot, a uint16 length and at most PSSC_EXEMPLAR_VALUE_MAX bytes.
+ */
+#define PSSC_EXEMPLARS_BUF_MAX \
+	(PSSC_MAX_EXEMPLAR_KEYS * (1 + 2 + PSSC_EXEMPLAR_VALUE_MAX))
+
+/*
+ * pssc_extract_tags(), and also the exemplar values (§6.13) of the
+ * statement written to ex (exsize bytes, PSSC_EXEMPLARS_BUF_MAX suffices)
+ * in the format pssc_store_record_ex() takes; *exlen is their length (0:
+ * none, as when exemplar_keys is empty or the store is not set up).
+ */
+extern PGDLLEXPORT void pssc_extract_tags_ex(const char *s, size_t start,
+											 size_t end, char *buf,
+											 size_t bufsize,
+											 PsscExtractResult *result,
+											 char *ex, size_t exsize,
+											 size_t *exlen);
+
+/*
  * pssc_extract_tags() for the debug function pg_stat_statement_context_extract()
  * (src/extract_fn.c): *stats is zeroed and receives this call's counters
  * instead of the backend-local pending stats, so a debug call never shows

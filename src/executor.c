@@ -148,9 +148,10 @@ record_frame(QueryDesc *queryDesc, PsscFrame *frame, PsscTagsetStats *pending)
 							  frame->tags, frame->tags_len,
 							  frame->tags_hash))
 		return;
-	(void) pssc_store_record_with_stats(key,
-										pssc_exec_ms_from_totaltime(queryDesc->totaltime),
-										pending);
+	(void) pssc_store_record_ex(key,
+								pssc_exec_ms_from_totaltime(queryDesc->totaltime),
+								pending, frame->exemplars,
+								frame->exemplars_len);
 }
 
 void

@@ -7,10 +7,12 @@
  * Sizing (all with overflow-checked add_size/mul_size, fixed at startup):
  *	keysize   = MAXALIGN(offsetof(PsscKey, tags) + max_tagset_bytes)
  *	entrysize = keysize + MAXALIGN(sizeof(PsscEntryHeader))
- *				+ bucket_count * sizeof(PsscSlot)
+ *				+ bucket_count * sizeof(PsscSlot) + exemplar block
  *	shmem     = MAXALIGN(offsetof(PsscSharedState, evict_slots)
  *						 + max_entries * sizeof(PsscEvictSlot))
  *				+ hash_estimate_size(max_entries, entrysize)
+ * The exemplar block (§6.13) is MAXALIGN(nkeys * (2 + value_len)) bytes
+ * (pssc_store_exemplar_layout_for()); 0 when exemplar_keys is empty.
  * The shared header ends with the compact eviction array (store.c), one
  * 24-byte (last_bucket, usage, entry) slot per possible entry.
  * The table is created with init_size = max_size = max_entries; the
@@ -148,6 +150,7 @@ typedef struct PsscStoreCounters
 	int64		cap_table_full; /* of which: the cap table was full */
 	int64		utility_missing_queryid;
 	int64		dropped_records;	/* records lost: no room after eviction */
+	int64		exemplar_values_dropped;	/* too long for exemplar_value_len */
 	TimestampTz stats_reset;
 	int64		current_bucket; /* watermark (pssc_store_get_info() only) */
 	int64		interval_us;	/* bucket_interval */
@@ -157,6 +160,9 @@ typedef struct PsscStoreCounters
 	int			bucket_count;
 	int			max_tagset_bytes;
 	bool		force_collisions;
+	int			exemplar_nkeys; /* exemplar slots per entry (§6.13) */
+	int			exemplar_value_len; /* bytes per exemplar value */
+	Size		exemplar_shmem_bytes;	/* max_entries * per-entry block */
 } PsscStoreCounters;
 
 /* A consistent copy of one entry, passed to a PsscStoreVisitor. */
@@ -171,6 +177,14 @@ typedef struct PsscStoreEntryView
 	TimestampTz stats_since;	/* when the entry was created */
 	int			bucket_count;
 	const PsscSlot *slots;		/* [bucket_count], index = bucket_id mod count */
+
+	/*
+	 * Exemplar slots (§6.13): exemplar_nkeys slots, slot i for key i of
+	 * exemplar_keys; read them with pssc_store_exemplar().
+	 */
+	int			exemplar_nkeys;
+	int			exemplar_value_len;
+	const char *exemplars;
 
 	/*
 	 * The readers' current bucket (current_bucket, read after this entry was
@@ -189,6 +203,30 @@ typedef struct PsscStoreEntryView
 } PsscStoreEntryView;
 
 typedef void (*PsscStoreVisitor) (const PsscStoreEntryView *entry, void *arg);
+
+/*
+ * Exemplar slot i (< view->exemplar_nkeys) of an entry view: false if it
+ * holds no value, else the value in *val / *len (in the entry's encoding,
+ * not NUL-terminated, valid as long as the view).
+ */
+extern PGDLLEXPORT bool pssc_store_exemplar(const PsscStoreEntryView *view,
+											int i, const char **val,
+											size_t *len);
+
+/*
+ * Exemplar layout (§5.1, §6.13) for nkeys exemplar keys sharing
+ * memory_kb kB over max_entries entries: *value_len, the bytes each value
+ * may take (0: none fits, every value is dropped), and *block, the bytes
+ * each entry adds (max_entries * *block <= memory_kb kB).
+ */
+extern PGDLLEXPORT void pssc_store_exemplar_layout_for(int max_entries,
+													   int memory_kb,
+													   int nkeys,
+													   int *value_len,
+													   Size *block);
+
+/* exemplar_value_len of the running store; 0 if not set up or disabled. */
+extern PGDLLEXPORT int pssc_store_exemplar_value_len(void);
 
 /* Registers the shared-memory request and startup hooks; from _PG_init. */
 extern void pssc_store_init(void);
@@ -244,6 +282,18 @@ extern PGDLLEXPORT PsscStoreResult pssc_store_record(const PsscKey *key,
 extern PGDLLEXPORT PsscStoreResult pssc_store_record_with_stats(const PsscKey *key,
 																double elapsed_ms,
 																PsscTagsetStats *pending);
+
+/*
+ * The same, and also stores the exemplar values ex[0, exlen) (as written by
+ * pssc_extract_tags_ex(): per value, a uint8 slot, a native uint16 length
+ * and the bytes) into the entry's exemplar slots, under the entry's
+ * spinlock with the call itself; slots without a value keep theirs.
+ */
+extern PGDLLEXPORT PsscStoreResult pssc_store_record_ex(const PsscKey *key,
+														double elapsed_ms,
+														PsscTagsetStats *pending,
+														const char *ex,
+														size_t exlen);
 
 /*
  * The same with a bucket id the caller already computed from the clock

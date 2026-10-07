@@ -50,6 +50,7 @@ static size_t owned_end = 0;
 
 /* Executor-frame tags are extracted here, then copied into the frame. */
 static char extract_buf[PSSC_TAGSET_BYTES_MAX];
+static char extract_exbuf[PSSC_EXEMPLARS_BUF_MAX];
 
 static void
 xact_end_check(void *arg)
@@ -155,8 +156,10 @@ pssc_stmt_owned_range(const char *src, int stmt_location, int stmt_len)
 }
 
 static void
-set_no_tags(PsscFrame *frame, char *buf)
+set_no_tags(PsscFrame *frame, char *buf, char *exbuf)
 {
+	frame->exemplars = exbuf;
+	frame->exemplars_len = 0;
 	frame->tags = buf;
 	frame->tags_len = 0;
 	frame->ntags = 0;
@@ -166,15 +169,18 @@ set_no_tags(PsscFrame *frame, char *buf)
 
 /*
  * Resolves the tags of a new frame into buf (bufsize bytes) per §6.4 and
- * sets frame->nested and the tag fields (frame->tags = buf).
+ * sets frame->nested and the tag fields (frame->tags = buf), and its
+ * exemplars into exbuf (PSSC_EXEMPLARS_BUF_MAX bytes): an inheriting frame
+ * inherits them with the tags.
  */
 static void
-resolve_tags(PsscFrame *frame, char *buf, size_t bufsize, const char *src,
-			 int stmt_location, int stmt_len)
+resolve_tags(PsscFrame *frame, char *buf, size_t bufsize, char *exbuf,
+			 const char *src, int stmt_location, int stmt_len)
 {
 	PsscFrame  *active = pssc_active_frame;
 	PsscStmtRange r;
 	PsscExtractResult res;
+	size_t		exlen = 0;
 
 	frame->nested = (active != NULL);
 	if (active != NULL && pssc_nested_tags != PSSC_NESTED_SCAN)
@@ -188,21 +194,30 @@ resolve_tags(PsscFrame *frame, char *buf, size_t bufsize, const char *src,
 			frame->ntags = active->ntags;
 			frame->tags_hash = active->tags_hash;
 			frame->tags_oom = active->tags_oom;
+			Assert(active->exemplars_len <= PSSC_EXEMPLARS_BUF_MAX);
+			if (active->exemplars_len > 0)
+				memcpy(exbuf, active->exemplars, active->exemplars_len);
+			frame->exemplars = exbuf;
+			frame->exemplars_len = active->exemplars_len;
 		}
 		else
-			set_no_tags(frame, buf);
+			set_no_tags(frame, buf, exbuf);
 		return;
 	}
 	if (src == NULL)
 	{
 		/* no text, so no comment: appname extractors may still tag it */
-		pssc_extract_tags("", 0, 0, buf, bufsize, &res);
+		pssc_extract_tags_ex("", 0, 0, buf, bufsize, &res,
+							 exbuf, PSSC_EXEMPLARS_BUF_MAX, &exlen);
 	}
 	else
 	{
 		r = owned_range(src, stmt_location, stmt_len, is_client_stmt(src));
-		pssc_extract_tags(src, r.start, r.end, buf, bufsize, &res);
+		pssc_extract_tags_ex(src, r.start, r.end, buf, bufsize, &res,
+							 exbuf, PSSC_EXEMPLARS_BUF_MAX, &exlen);
 	}
+	frame->exemplars = exbuf;
+	frame->exemplars_len = (uint32) exlen;
 	frame->tags = buf;
 	frame->tags_len = (uint32) res.len;
 	frame->ntags = res.ntags;
@@ -242,17 +257,20 @@ pssc_frame_create(QueryDesc *queryDesc)
 	Assert(pssc_frame_lookup(queryDesc) == NULL);
 
 	memset(&tmp, 0, sizeof(tmp));
-	resolve_tags(&tmp, extract_buf, sizeof(extract_buf),
+	resolve_tags(&tmp, extract_buf, sizeof(extract_buf), extract_exbuf,
 				 queryDesc->sourceText, pstmt->stmt_location,
 				 pstmt->stmt_len);
 
-	frame = MemoryContextAllocExtended(cxt, hdr + tmp.tags_len,
+	frame = MemoryContextAllocExtended(cxt,
+									   hdr + tmp.tags_len + tmp.exemplars_len,
 									   MCXT_ALLOC_NO_OOM);
 	if (frame == NULL)
 		return NULL;
 	*frame = tmp;
 	frame->tags = (char *) frame + hdr;
 	memcpy(frame->tags, extract_buf, tmp.tags_len);
+	frame->exemplars = frame->tags + tmp.tags_len;
+	memcpy(frame->exemplars, extract_exbuf, tmp.exemplars_len);
 	set_metadata(frame, pstmt->queryId);
 	pssc_frame_refresh(frame);
 
@@ -296,7 +314,7 @@ pssc_utility_frame_init(PsscUtilityFrame *uf, const PlannedStmt *pstmt,
 
 	memset(frame, 0, sizeof(*frame));
 	frame->utility = true;
-	resolve_tags(frame, uf->tagbuf, sizeof(uf->tagbuf), queryString,
+	resolve_tags(frame, uf->tagbuf, sizeof(uf->tagbuf), uf->exbuf, queryString,
 				 pstmt->stmt_location, pstmt->stmt_len);
 	set_metadata(frame, pstmt->queryId);
 	pssc_frame_refresh(frame);

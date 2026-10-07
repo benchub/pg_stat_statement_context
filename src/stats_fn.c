@@ -39,6 +39,12 @@
  * showtags = false makes tags NULL in every row (and skips copying and
  * building them).
  *
+ * The 1.1 functions (_1_1) add the exemplars column (§6.13): the entry's
+ * exemplar values as a jsonb object of exemplar key -> latest value ({}
+ * when none is stored), NULL exactly when tags is (another role's row
+ * without pg_read_all_stats, or showtags = false). The 1.0 functions keep
+ * their 11 columns for a database not yet updated.
+ *
  * Tags are output with pssc_tags_jsonb_noerror() (src/tagout.c): converted
  * from the entry's encoding to the server's, escaped (\xHH, \\) for a
  * SQL_ASCII origin; a tag set from another encoding that cannot be
@@ -58,10 +64,13 @@
 
 #include "compat.h"
 #include "counters.h"
+#include "guc.h"
 #include "store.h"
 #include "tagout.h"
 
-#define STATS_COLS	11
+#define STATS_COLS_1_0	11
+#define STATS_COLS_1_1	12		/* + exemplars */
+#define STATS_COLS_MAX	STATS_COLS_1_1
 
 /* What phase 1 copies out of one entry. */
 typedef struct StatsEntry
@@ -74,6 +83,8 @@ typedef struct StatsEntry
 	int			encoding;
 	char	   *tags;			/* NULL: tags are not output */
 	size_t		tags_len;
+	char	   *exemplars;		/* "k\0v\0..."; NULL: not output */
+	size_t		exemplars_len;
 	int64		calls_total;
 	double		exec_time_total;
 	TimestampTz stats_since;
@@ -87,6 +98,8 @@ typedef struct StatsCollect
 	bool		see_all;
 	bool		showtags;
 	bool		last_only;		/* only the slot of scan_bucket - 1 */
+	bool		exemplars;		/* output the exemplars column (1.1) */
+	const PsscTagList *exemplar_keys;
 	StatsEntry **entries;
 	int			n;
 	int			cap;
@@ -99,6 +112,50 @@ slot_wanted(const StatsCollect *c, const PsscStoreEntryView *e, const PsscSlot *
 	if (c->last_only && s->bucket_id != e->scan_bucket - 1)
 		return false;
 	return pssc_bucket_is_live(s->bucket_id, e->current_bucket, e->bucket_count);
+}
+
+/*
+ * Copies the entry's exemplar values as a tag set "k\0v\0..." (keys in
+ * exemplar_keys order, which pssc_tags_jsonb_noerror() sorts anyway).
+ */
+static void
+copy_exemplars(const StatsCollect *c, const PsscStoreEntryView *e,
+			   StatsEntry *se)
+{
+	int			n = Min(e->exemplar_nkeys, pssc_tag_list_count(c->exemplar_keys));
+	size_t		size = 1;
+	size_t		pos = 0;
+
+	for (int i = 0; i < n; i++)
+	{
+		const char *val;
+		size_t		vlen;
+		int			klen;
+
+		if (!pssc_store_exemplar(e, i, &val, &vlen))
+			continue;
+		(void) pssc_tag_list_key(c->exemplar_keys, i, &klen);
+		size += (size_t) klen + 1 + vlen + 1;
+	}
+	se->exemplars = palloc(size);
+	for (int i = 0; i < n; i++)
+	{
+		const char *val;
+		const char *key;
+		size_t		vlen;
+		int			klen;
+
+		if (!pssc_store_exemplar(e, i, &val, &vlen))
+			continue;
+		key = pssc_tag_list_key(c->exemplar_keys, i, &klen);
+		memcpy(se->exemplars + pos, key, klen);
+		pos += klen;
+		se->exemplars[pos++] = '\0';
+		memcpy(se->exemplars + pos, val, vlen);
+		pos += vlen;
+		se->exemplars[pos++] = '\0';
+	}
+	se->exemplars_len = pos;
 }
 
 /* Visitor run under the shared lock: copies only, no conversion. */
@@ -134,6 +191,10 @@ collect_entry(const PsscStoreEntryView *e, void *arg)
 		se->tags = palloc(se->tags_len + 1);
 		memcpy(se->tags, e->key->tags, se->tags_len);
 	}
+	se->exemplars = NULL;
+	se->exemplars_len = 0;
+	if (c->exemplars && c->showtags && se->visible)
+		copy_exemplars(c, e, se);
 	se->nslots = 0;
 	for (int i = 0; i < e->bucket_count; i++)
 		if (slot_wanted(c, e, &e->slots[i]))
@@ -157,11 +218,12 @@ slot_cmp(const void *a, const void *b)
 }
 
 static void
-put_row(ReturnSetInfo *rsinfo, const StatsEntry *se, const PsscSlot *slot,
-		Datum tags, bool tags_null)
+put_row(ReturnSetInfo *rsinfo, int ncols, const StatsEntry *se,
+		const PsscSlot *slot, Datum tags, bool tags_null, Datum exemplars,
+		bool exemplars_null)
 {
-	Datum		values[STATS_COLS];
-	bool		nulls[STATS_COLS];
+	Datum		values[STATS_COLS_MAX];
+	bool		nulls[STATS_COLS_MAX];
 	int			i = 0;
 
 	memset(nulls, 0, sizeof(nulls));
@@ -180,13 +242,19 @@ put_row(ReturnSetInfo *rsinfo, const StatsEntry *se, const PsscSlot *slot,
 	values[i++] = Int64GetDatum(se->calls_total);
 	values[i++] = Float8GetDatum(se->exec_time_total);
 	values[i++] = TimestampTzGetDatum(se->stats_since);
-	Assert(i == STATS_COLS);
+	if (ncols == STATS_COLS_1_1)
+	{
+		values[i] = exemplars;
+		nulls[i++] = exemplars_null;
+	}
+	Assert(i == ncols);
 
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 }
 
 static void
-stats_srf(FunctionCallInfo fcinfo, bool showtags, bool merge, bool last_only)
+stats_srf(FunctionCallInfo fcinfo, int ncols, bool showtags, bool merge,
+		  bool last_only)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	StatsCollect c;
@@ -200,7 +268,7 @@ stats_srf(FunctionCallInfo fcinfo, bool showtags, bool merge, bool last_only)
 				 errmsg("pg_stat_statement_context must be loaded via \"shared_preload_libraries\"")));
 
 	pssc_init_materialized_srf(fcinfo, 0);
-	if (rsinfo->setDesc->natts != STATS_COLS)
+	if (rsinfo->setDesc->natts != ncols)
 		elog(ERROR, "incorrect number of output arguments");
 
 	/* catalog lookups before the lock, as pgss does */
@@ -208,6 +276,8 @@ stats_srf(FunctionCallInfo fcinfo, bool showtags, bool merge, bool last_only)
 	c.see_all = has_privs_of_role(c.caller, ROLE_PG_READ_ALL_STATS);
 	c.showtags = showtags;
 	c.last_only = last_only;
+	c.exemplars = (ncols == STATS_COLS_1_1);
+	c.exemplar_keys = pssc_guc_exemplar_keys();
 	c.n = 0;
 	c.cap = 64;
 
@@ -227,6 +297,8 @@ stats_srf(FunctionCallInfo fcinfo, bool showtags, bool merge, bool last_only)
 		StatsEntry *se = c.entries[n];
 		Datum		tags = (Datum) 0;
 		bool		tags_null = true;
+		Datum		exemplars = (Datum) 0;
+		bool		exemplars_null = true;
 
 		CHECK_FOR_INTERRUPTS();
 		MemoryContextReset(rowcxt);
@@ -237,6 +309,14 @@ stats_srf(FunctionCallInfo fcinfo, bool showtags, bool merge, bool last_only)
 														  se->encoding, NULL));
 			tags_null = false;
 		}
+		/* shown exactly when tags are: visible, and showtags */
+		if (c.exemplars && se->tags != NULL)
+		{
+			exemplars = JsonbPGetDatum(pssc_tags_jsonb_noerror(se->exemplars != NULL ? se->exemplars : "",
+															   se->exemplars_len,
+															   se->encoding, NULL));
+			exemplars_null = false;
+		}
 
 		if (merge)
 		{
@@ -245,13 +325,15 @@ stats_srf(FunctionCallInfo fcinfo, bool showtags, bool merge, bool last_only)
 			pssc_slot_init(&sum);
 			for (int i = 0; i < se->nslots; i++)
 				pssc_slot_merge(&sum, &se->slots[i]);
-			put_row(rsinfo, se, &sum, tags, tags_null);
+			put_row(rsinfo, ncols, se, &sum, tags, tags_null, exemplars,
+					exemplars_null);
 		}
 		else
 		{
 			qsort(se->slots, se->nslots, sizeof(PsscSlot), slot_cmp);
 			for (int i = 0; i < se->nslots; i++)
-				put_row(rsinfo, se, &se->slots[i], tags, tags_null);
+				put_row(rsinfo, ncols, se, &se->slots[i], tags, tags_null,
+						exemplars, exemplars_null);
 		}
 		MemoryContextSwitchTo(cxt);
 	}
@@ -265,7 +347,18 @@ PG_FUNCTION_INFO_V1(pg_stat_statement_context_1_0);
 Datum
 pg_stat_statement_context_1_0(PG_FUNCTION_ARGS)
 {
-	stats_srf(fcinfo, PG_GETARG_BOOL(0), PG_GETARG_BOOL(1), false);
+	stats_srf(fcinfo, STATS_COLS_1_0, PG_GETARG_BOOL(0), PG_GETARG_BOOL(1),
+			  false);
+	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(pg_stat_statement_context_1_1);
+
+Datum
+pg_stat_statement_context_1_1(PG_FUNCTION_ARGS)
+{
+	stats_srf(fcinfo, STATS_COLS_1_1, PG_GETARG_BOOL(0), PG_GETARG_BOOL(1),
+			  false);
 	return (Datum) 0;
 }
 
@@ -274,6 +367,15 @@ PG_FUNCTION_INFO_V1(pg_stat_statement_context_last_bucket_1_0);
 Datum
 pg_stat_statement_context_last_bucket_1_0(PG_FUNCTION_ARGS)
 {
-	stats_srf(fcinfo, PG_GETARG_BOOL(0), false, true);
+	stats_srf(fcinfo, STATS_COLS_1_0, PG_GETARG_BOOL(0), false, true);
+	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(pg_stat_statement_context_last_bucket_1_1);
+
+Datum
+pg_stat_statement_context_last_bucket_1_1(PG_FUNCTION_ARGS)
+{
+	stats_srf(fcinfo, STATS_COLS_1_1, PG_GETARG_BOOL(0), false, true);
 	return (Datum) 0;
 }

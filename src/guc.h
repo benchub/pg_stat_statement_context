@@ -73,6 +73,8 @@ extern PGDLLEXPORT int pssc_max_tags;
 extern PGDLLEXPORT int pssc_max_tag_value_len; /* bytes */
 extern PGDLLEXPORT int pssc_max_tagset_bytes;
 extern PGDLLEXPORT bool pssc_reclaim_worker;
+extern PGDLLEXPORT char *pssc_exemplar_keys;	/* raw text; use pssc_guc_exemplar_keys() */
+extern PGDLLEXPORT int pssc_exemplar_memory;	/* kB */
 
 /* sighup (PGC_SIGHUP) */
 extern PGDLLEXPORT int pssc_scan_window;	/* bytes */
@@ -115,6 +117,8 @@ extern PGDLLEXPORT int pssc_tag_list_find(const PsscTagList *list,
 /* Current parsed tags / exclude_tags. Never NULL once the GUCs are defined. */
 extern PGDLLEXPORT const PsscTagList *pssc_guc_tags(void);
 extern PGDLLEXPORT const PsscTagList *pssc_guc_exclude_tags(void);
+/* Parsed exemplar_keys (at most PSSC_MAX_EXEMPLAR_KEYS keys). */
+extern PGDLLEXPORT const PsscTagList *pssc_guc_exemplar_keys(void);
 
 /*
  * Parsed pg_stat_statement_context.extractors (DESIGN.md §4.2).

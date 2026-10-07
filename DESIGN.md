@@ -266,6 +266,8 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.cardinality_cap` | `0` | sighup | Default cap on distinct values per kept key, counted server-wide (item -32, §6.1). `0` = off; range 0..1000000. Once a key has had its cap of values, any other value is stored as JSON `null`. |
 | `pg_stat_statement_context.cardinality_cap_overrides` | `''` | sighup | Per-key caps `key:N[, key:N…]` that take precedence over `cardinality_cap` (the key is everything before the last `:`, matched after `rename`). `N = 0` exempts the key; an override applies even when the default is 0. |
 | `pg_stat_statement_context.cardinality_cap_slots` | `16384` | postmaster | Value slots in the shared cap-tracking table (about 9 bytes each, plus key slots). Always allocated, so caps can be turned on by a reload. |
+| `pg_stat_statement_context.exemplar_keys` | `''` | postmaster | Keys whose most recent value is stored with each entry as an exemplar (item -33, §6.13), e.g. `'traceparent'`. Comma-separated, case-sensitive, at most 8 keys of at most 63 bytes, no `*`. Matched after `rename`, before the allowlist/denylist, so a key may be both in `exclude_tags` (not grouped by) and here. Empty (default): off, no memory. |
+| `pg_stat_statement_context.exemplar_memory` | `2MB` | postmaster | Shared memory for the exemplar values of all entries (range 0 – 2^31-1 kB, unit kB). Split evenly: each entry gets `exemplar_memory / max_entries` bytes and each key an equal share of that, minus 2 bytes of length, at most 256 bytes per value (`_info().exemplar_value_bytes`). Longer values are dropped and counted (§6.13). |
 | `pg_stat_statement_context.untagged` | `skip` | sighup | `skip` statements without tags (default, decided 2026-10-05, §11 Q1) / `record` them with an empty tag set. |
 
 The configuration lives in GUCs only; there is no separate config file
@@ -583,6 +585,23 @@ the defaults is 9,261,288 bytes: 9,021,288 for the table and header, plus
 monotonic counters had raised it from 8,781,288).
 `_info()` reports the exact `shmem_bytes` value.
 
+**Exemplar slots** (item 20261005-091225-33, §6.13) follow the counter ring
+at the end of each entry, so they live in the same hash entry and are
+covered by the same spinlock. With `n` keys in `exemplar_keys` (0: none,
+no memory), each entry gets `per_entry = exemplar_memory / max_entries`
+bytes, rounded down to a multiple of `MAXIMUM_ALIGNOF`; each key gets
+`per_entry / n`, minus a 2-byte length, capped at 256 bytes, as its value
+length `L` (`_info().exemplar_value_bytes`; 0 when the share is under 3
+bytes, and then every value is dropped). The block is
+`MAXALIGN(n × (2 + L))` bytes and is added to `entrysize`, so
+`max_entries × block` (`_info().exemplar_shmem_bytes`, part of
+`shmem_bytes`) never exceeds `exemplar_memory`. A slot is a native
+`uint16` length (`0xFFFF` = no value) followed by `L` bytes, read and
+written with `memcpy` (the stride is not aligned). Nothing is allocated
+dynamically: the layout is fixed at startup like the ring. The default
+(`exemplar_memory = 2MB`, 10,000 entries) gives 208 bytes per entry, so one
+key gets 206 bytes and two get 102 each, enough for a 55-byte `traceparent`.
+
 A record is dropped and counted in the header counter `dropped_records`
 (exposed by `_info()`) only when an eviction pass (§5.3) freed nothing: no
 entry was dead and the sort array could not be allocated. Testing (§9) uses
@@ -835,6 +854,10 @@ Done in item 20261005-091225-35, after `pg_stat_statements`
   - the debug clock and the collision mode (testing aids, which start from
     their defaults);
   - `bucket_advances` (a diagnostic, which restarts at 0).
+  - exemplar values and `exemplar_values_dropped` (§6.13): a restored entry
+    shows `exemplars = {}` until its next call. An exemplar points at a
+    recent trace, so a value from before the restart is of little use, and
+    leaving it out keeps the file format (and its size) unchanged.
 
 ## 6. Gotchas and mitigations
 
@@ -1071,6 +1094,18 @@ some server version, it is omitted on that version rather than exposed as
      (decided 2026-10-05)
   4. rename. The renamed key is checked against the database encoding, because
      the GUC is cluster-wide but databases may have different encodings
+  - *exemplar capture* (item -33, §6.13), between steps 4 and 5: if the
+    final (renamed) key is in `exemplar_keys`, the value from step 2 is
+    captured for that key's exemplar slot, **whatever step 5 then does with
+    the pair**, so a key can be both denylisted (not grouped by) and an
+    exemplar. Only the renamed key is looked up, as for the allow- and
+    denylists. Steps 6–8 do not apply to the captured value: it is not
+    normalized, truncated, or capped. A value longer than the exemplar
+    value length is dropped and counted (`exemplar_values_dropped`) and
+    leaves the slot open for a later occurrence. Within one statement the
+    first occurrence wins, with the tags' precedence (override > comment
+    chain > footer > appname). A capture does not count as "producing" for
+    the extractor chain.
   5. apply the global allowlist (or the denylist when `tags = '*'`), and drop
      keys longer than 63 bytes
   6. value normalization (`normalize`, item -41): rules for the final key run
@@ -1142,7 +1177,9 @@ some server version, it is omitted on that version rather than exposed as
   `pg_read_all_stats`. The check runs inside the C SRF, so `showtags = false`
   doesn't bypass it. The check is `has_privs_of_role(GetUserId(), pg_read_all_stats)`
   on every version, which on PG14 is slightly stricter than pgss there
-  (`is_member_of_role` also admitted NOINHERIT members). Future activity and exemplar views use the same rule.
+  (`is_member_of_role` also admitted NOINHERIT members). The activity view
+  and the `exemplars` column (§6.13) use the same rule: `exemplars` is `NULL`
+  exactly when `tags` is.
 - Regex patterns are superuser-only (GUC context). An input bound alone is not
   a CPU bound. v1 therefore also rejects back-references, caps the pattern
   length and capture count (§4.2), and caps the number of comments examined per
@@ -1156,6 +1193,49 @@ The extension must be listed in `shared_preload_libraries`, **after**
 restart. Managed providers (RDS, Cloud SQL, Azure) only allow
 extensions on their allowlists, so users there cannot install it until a
 provider adds it. This is the main obstacle to adoption.
+
+### 6.13 Exemplars for excluded high-cardinality keys
+High-cardinality keys such as `traceparent` must not be grouped by (§6.1),
+but a link from an aggregate to one real trace is useful. An **exemplar** is
+the most recent value of such a key, stored per entry without becoming part
+of the key (item 20261005-091225-33, extension version 1.1).
+
+- **Which keys:** only those listed in `exemplar_keys` (§4.1), a dedicated
+  postmaster GUC (decided 2026-10-05): the denylist does not double as the
+  exemplar list. A key may be in both, which is the usual setup for
+  `traceparent`; a grouping key may also be listed. At most 8 keys, so the
+  per-entry slots stay small and the slot index fits a byte.
+- **Capture:** between steps 4 and 5 of the tag pipeline (§6.11), on the
+  renamed key and the validated (step 2) value, independently of the
+  allowlist/denylist. Per-extractor `keys` (step 3) still apply, as for any
+  pair of that extractor.
+- **Storage:** fixed per-entry slots after the counter ring (§5.1), one per
+  key in `exemplar_keys` order, sized at startup from `exemplar_memory`. No
+  dynamic shared memory.
+- **Overflow: drop, not truncate** (implementer's choice, 2026-10-05
+  decision). A truncated trace id doesn't identify a trace, so a value
+  longer than `_info().exemplar_value_bytes` is dropped, counted in
+  `_info().exemplar_values_dropped`, and the slot keeps its previous value.
+  Total exemplar memory, `_info().exemplar_shmem_bytes`, never exceeds
+  `exemplar_memory`.
+- **Writes:** the values captured at extraction travel with the statement's
+  frame (inherited by nested statements with `nested_tags = inherit`, like
+  tags) and are written by the record call, under the entry's spinlock with
+  the call itself, on the fast path and the insert path alike: no extra
+  lock. A slot with no value in this statement keeps its last value, so the
+  exemplar is the latest value *seen*, not necessarily from the latest call.
+  The value written is the one of the statement that recorded last, which
+  under concurrency is the last to take the spinlock.
+- **Reads:** a jsonb object `{key: value}` in the 1.1 `exemplars` column of
+  the stats views and functions (§7), `{}` when nothing is stored. Values are
+  converted from the entry's encoding like tags. Visibility is that of tags
+  (§6.11): `NULL` for other roles' rows without `pg_read_all_stats`, and
+  with `showtags = false`.
+- **Not saved** across restarts (§5.5), and zeroed by `_reset()` with the
+  entries. Since the dump file records the extension version (§5.5), the
+  first restart onto the 1.1 library discards a file saved by 1.0.
+- **Off by default:** with `exemplar_keys = ''` nothing is captured, no
+  memory is used, and `exemplars` is `{}`.
 
 ## 7. SQL interface (v1)
 
@@ -1175,7 +1255,7 @@ CREATE FUNCTION pg_stat_statement_context(
     OUT queryid bigint, OUT toplevel bool, OUT tags jsonb,
     OUT calls bigint, OUT total_exec_time float8,
     OUT calls_total bigint, OUT exec_time_total float8,
-    OUT stats_since timestamptz)
+    OUT stats_since timestamptz, OUT exemplars jsonb)
 RETURNS SETOF record ...;
 
 CREATE VIEW pg_stat_statement_context AS
@@ -1194,7 +1274,7 @@ CREATE FUNCTION pg_stat_statement_context_last_bucket(
     OUT queryid bigint, OUT toplevel bool, OUT tags jsonb,
     OUT calls bigint, OUT total_exec_time float8,
     OUT calls_total bigint, OUT exec_time_total float8,
-    OUT stats_since timestamptz)
+    OUT stats_since timestamptz, OUT exemplars jsonb)
 RETURNS SETOF record ...;
 
 CREATE VIEW pg_stat_statement_context_last_bucket AS
@@ -1214,8 +1294,26 @@ CREATE FUNCTION pg_stat_statement_context_info(
     OUT heuristic_scans bigint, OUT regex_compile_failures bigint,
     OUT utility_missing_queryid bigint, OUT capped_tags bigint,
     OUT cap_table_full bigint, OUT stats_reset timestamptz,
-    OUT stats_reset_epoch bigint) ...;
+    OUT stats_reset_epoch bigint, OUT exemplar_shmem_bytes bigint,
+    OUT exemplar_value_bytes int, OUT exemplar_values_dropped bigint) ...;
 ```
+
+These are the 1.1 definitions (item 20261005-091225-33,
+`sql/pg_stat_statement_context--1.0--1.1.sql`). Version 1.1 adds the
+`exemplars` column (§6.13) as the last column of both functions and so of
+all three views, and three columns at the end of `_info()`. A function's
+result type cannot be changed in place, so the upgrade script drops the
+three views and the three functions and creates them again, pointing at new
+C symbols (`pg_stat_statement_context_1_1`,
+`pg_stat_statement_context_last_bucket_1_1`,
+`pg_stat_statement_context_info_1_1`), then repeats the `GRANT SELECT ...
+TO PUBLIC` on the views. Custom grants on those objects, and user views that
+depend on them, must be recreated after `ALTER EXTENSION
+pg_stat_statement_context UPDATE` (the `DROP` fails, and the update with it,
+while a user view depends on them). The 1.0 C symbols remain in the 1.1
+library with their 11 and 22 columns, so a database still at 1.0 keeps
+working until it is updated. `CREATE EXTENSION` installs 1.1 by running the
+frozen 1.0 script and then the upgrade script.
 
 Debug function (item -11, ships in 1.0):
 
@@ -1265,7 +1363,12 @@ the store only; `cap_shmem_bytes` is the exact size of the separate cap table
 `evicted_entries` (now live entries only), and `dropped_records` (§5.1,
 §5.3). Added on 2026-10-06 for exporters (item 20261006-010149-1, below):
 `bucket_seconds`, `current_bucket_start`, `last_closed_bucket_start` and
-`stats_reset_epoch`.
+`stats_reset_epoch`. Added in 1.1 (item 20261005-091225-33, §6.13):
+`exemplar_shmem_bytes` (the exemplar slots' part of `shmem_bytes`:
+`max_entries` × the per-entry block, at most `exemplar_memory`; 0 when off),
+`exemplar_value_bytes` (the most bytes an exemplar value may take) and
+`exemplar_values_dropped` (values dropped as longer than that; zeroed by
+`_reset()`, not saved).
 
 Exporter support (item 20261006-010149-1). Bucket gauges only become final
 once their bucket has closed, and no column used to grow monotonically, so
@@ -1372,12 +1475,14 @@ matches this extension's minimum supported version.
 - ~~**Per-key cardinality caps.**~~ Done (item -32, 2026-10-06; §4.1, §6.1,
   §6.11 step 8). Possible follow-up: decay of values unused for a while, so a
   long-running server doesn't keep old values' cap space until `_reset()`.
-- **Exemplars:** store the most recent value of a high-cardinality key, such
+- ~~**Exemplars:** store the most recent value of a high-cardinality key, such
   as `traceparent`, per entry, so users can jump from an aggregate to a real
   trace without the key exploding. Exemplar keys are an explicit list in a
   dedicated GUC; the `exclude_tags` denylist does not double as that list.
   Total exemplar storage is bounded by a configurable memory cap (decided
-  2026-10-05).
+  2026-10-05).~~ Done (item 20261005-091225-33, extension 1.1; §4.1, §5.1,
+  §6.11, §6.13, §7): `exemplar_keys` and `exemplar_memory` (postmaster), the
+  `exemplars` jsonb column, over-long values dropped and counted.
 - ~~Optional background worker that reclaims dead entries (all slots expired)
   on idle systems.~~ Done (item 20261005-091225-34, 2026-10-06; §4.1, §5.3):
   `reclaim_worker` (postmaster, default `off`) and `reclaim_worker_interval`.
@@ -1523,6 +1628,14 @@ matches this extension's minimum supported version.
     corrupt, truncated, or foreign file, `save = off`, an immediate shutdown,
     and a crash restart all start empty with a LOG line. The file is gone
     after every start.
+  - exemplars (`029_exemplars.pl`, §6.13): with `traceparent` both
+    denylisted and in `exemplar_keys`, distinct values add no entries and
+    `exemplars` shows the latest one; keys not listed are never stored;
+    over-long values are dropped and counted, and `exemplar_shmem_bytes`
+    stays within `exemplar_memory`; other roles' exemplars are `NULL` for
+    unprivileged viewers; nested statements inherit them; `CREATE EXTENSION
+    ... VERSION '1.0'` then `ALTER EXTENSION ... UPDATE TO '1.1'` adds the
+    columns. Unit tests (`test_tagset`) cover the capture step.
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset
 - **pg_regress suite** (`make installcheck`: smoke, guc, extract, normalize, appname, tags_override) runs in a

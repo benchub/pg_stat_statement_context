@@ -36,7 +36,8 @@ PSSC_EXT_VERSION := $(shell sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" $
 PG_CPPFLAGS += -DPSSC_EXT_VERSION='"$(PSSC_EXT_VERSION)"'
 
 EXTENSION = pg_stat_statement_context
-DATA = sql/pg_stat_statement_context--1.0.sql
+DATA = sql/pg_stat_statement_context--1.0.sql \
+	sql/pg_stat_statement_context--1.0--1.1.sql
 
 REGRESS = smoke guc extract normalize appname tags_override
 # extract needs a UTF8 database (multibyte cases); --no-locale makes the

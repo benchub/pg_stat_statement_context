@@ -93,6 +93,9 @@ typedef struct PsscSharedState
 	Size		keysize;
 	Size		entrysize;
 	Size		shmem_bytes;	/* exactly what was requested */
+	int			exemplar_nkeys; /* exemplar slots per entry (§6.13) */
+	int			exemplar_value_len; /* bytes per exemplar value */
+	Size		exemplar_block; /* per-entry exemplar bytes (in entrysize) */
 
 	/* changed only under the exclusive lock while the table is empty */
 	bool		force_collisions;
@@ -136,6 +139,7 @@ typedef struct PsscSharedState
 	pg_atomic_uint64 utility_missing_queryid;
 	pg_atomic_uint64 dropped_records;	/* new keys dropped: no room even
 										 * after an eviction pass */
+	pg_atomic_uint64 exemplar_values_dropped;
 
 	/*
 	 * The compact eviction array: [0, entries) in use (top of this file).
@@ -185,6 +189,33 @@ entry_slots(void *entry)
 	return (PsscSlot *) ((char *) entry + ENTRY_SLOTS_OFFSET(store_keysize));
 }
 
+/*
+ * The exemplar block (§6.13) after the ring: exemplar_nkeys slots of
+ * EXEMPLAR_SLOT_SIZE bytes, each a uint16 length (EXEMPLAR_EMPTY: no value)
+ * and value_len value bytes. The stride is not aligned, so the length is
+ * read and written with memcpy.
+ */
+#define EXEMPLAR_EMPTY			((uint16) 0xFFFF)
+#define EXEMPLAR_SLOT_SIZE(value_len)	(sizeof(uint16) + (Size) (value_len))
+
+static inline char *
+entry_exemplars(void *entry)
+{
+	return (char *) entry + ENTRY_SLOTS_OFFSET(store_keysize)
+		+ (Size) store_state->bucket_count * sizeof(PsscSlot);
+}
+
+/* Marks every exemplar slot of a block empty. */
+static void
+exemplars_clear(char *block, int nkeys, int value_len)
+{
+	uint16		empty = EXEMPLAR_EMPTY;
+
+	for (int i = 0; i < nkeys; i++)
+		memcpy(block + (Size) i * EXEMPLAR_SLOT_SIZE(value_len), &empty,
+			   sizeof(uint16));
+}
+
 static inline PsscEvictSlot *
 entry_slot(void *entry)
 {
@@ -213,6 +244,56 @@ pssc_store_entrysize_for(Size keysize, int bucket_count)
 					mul_size((Size) bucket_count, sizeof(PsscSlot)));
 }
 
+void
+pssc_store_exemplar_layout_for(int max_entries, int memory_kb, int nkeys,
+							   int *value_len, Size *block)
+{
+	Size		per_entry;
+	Size		per_key;
+	Size		len;
+
+	*value_len = 0;
+	*block = 0;
+	if (nkeys <= 0 || max_entries < 1 || memory_kb <= 0)
+		return;
+	/* MAXALIGN rounds up, so take whole alignment units from the share */
+	per_entry = mul_size((Size) memory_kb, 1024) / (Size) max_entries;
+	per_entry -= per_entry % MAXIMUM_ALIGNOF;
+	per_key = per_entry / (Size) nkeys;
+	if (per_key <= sizeof(uint16))
+		return;
+	len = Min(per_key - sizeof(uint16), (Size) PSSC_EXEMPLAR_VALUE_MAX);
+	*value_len = (int) len;
+	*block = MAXALIGN((Size) nkeys * EXEMPLAR_SLOT_SIZE(len));
+	Assert(*block <= per_entry);
+}
+
+/* Exemplar layout for the current settings. */
+static void
+exemplar_layout(int *nkeys, int *value_len, Size *block)
+{
+	*nkeys = pssc_tag_list_count(pssc_guc_exemplar_keys());
+	pssc_store_exemplar_layout_for(pssc_max_entries, pssc_exemplar_memory,
+								   *nkeys, value_len, block);
+	/*
+	 * No room for even an empty value: the entries have no exemplar slots at
+	 * all, and every value captured is dropped (value_len 0) and counted.
+	 */
+	if (*block == 0)
+	{
+		*nkeys = 0;
+		*value_len = 0;
+	}
+}
+
+int
+pssc_store_exemplar_value_len(void)
+{
+	if (store_state == NULL || store_htab == NULL)
+		return 0;
+	return store_state->exemplar_value_len;
+}
+
 /* The shared header with its eviction array of max_entries slots. */
 static Size
 header_size_for(int max_entries)
@@ -225,11 +306,19 @@ Size
 pssc_store_shmem_size_for(int max_entries, int max_tagset_bytes, int bucket_count)
 {
 	Size		entrysize;
+	int			nkeys;
+	int			value_len;
+	Size		block;
 
 	if (max_entries < 1)
 		elog(ERROR, "invalid max_entries %d", max_entries);
 	entrysize = pssc_store_entrysize_for(pssc_store_keysize_for(max_tagset_bytes),
 										 bucket_count);
+	/* the exemplar block, from the current exemplar settings (§5.1) */
+	nkeys = pssc_tag_list_count(pssc_guc_exemplar_keys());
+	pssc_store_exemplar_layout_for(max_entries, pssc_exemplar_memory, nkeys,
+								   &value_len, &block);
+	entrysize = add_size(entrysize, block);
 	return add_size(MAXALIGN(header_size_for(max_entries)),
 					hash_estimate_size(max_entries, entrysize));
 }
@@ -377,8 +466,11 @@ store_shmem_startup(void)
 		state->bucket_count = pssc_bucket_count;
 		state->max_tagset_bytes = pssc_max_tagset_bytes;
 		state->keysize = pssc_store_keysize_for(pssc_max_tagset_bytes);
-		state->entrysize = pssc_store_entrysize_for(state->keysize,
-													pssc_bucket_count);
+		exemplar_layout(&state->exemplar_nkeys, &state->exemplar_value_len,
+						&state->exemplar_block);
+		state->entrysize = add_size(pssc_store_entrysize_for(state->keysize,
+															 pssc_bucket_count),
+									state->exemplar_block);
 		state->shmem_bytes = requested_shmem_bytes;
 		state->force_collisions = false;
 		state->entries = 0;
@@ -411,6 +503,7 @@ store_shmem_startup(void)
 		pg_atomic_init_u64(&state->cap_table_full, 0);
 		pg_atomic_init_u64(&state->utility_missing_queryid, 0);
 		pg_atomic_init_u64(&state->dropped_records, 0);
+		pg_atomic_init_u64(&state->exemplar_values_dropped, 0);
 	}
 
 	/* key_hash() reads store_state, and keysize is fixed by the header */
@@ -574,6 +667,8 @@ entry_init(void *entry)
 	hdr->stats_since = GetCurrentTimestamp();
 	for (int i = 0; i < store_state->bucket_count; i++)
 		pssc_slot_init(&slots[i]);
+	exemplars_clear(entry_exemplars(entry), store_state->exemplar_nkeys,
+					store_state->exemplar_value_len);
 }
 
 /*
@@ -602,6 +697,40 @@ entry_remove(int64 idx)
 }
 
 /*
+ * Copies the exemplar values ex[0, exlen) (store.h) into the entry's slots;
+ * the caller holds the entry spinlock. Malformed input, and values for a
+ * slot or of a length this store does not have (tagset.c never produces
+ * them), are skipped.
+ */
+static void
+exemplars_write(void *entry, const char *ex, size_t exlen)
+{
+	char	   *block = entry_exemplars(entry);
+	int			nkeys = store_state->exemplar_nkeys;
+	int			value_len = store_state->exemplar_value_len;
+	size_t		pos = 0;
+
+	while (pos + 1 + sizeof(uint16) <= exlen)
+	{
+		uint8		idx = (uint8) ex[pos];
+		uint16		len;
+
+		memcpy(&len, ex + pos + 1, sizeof(uint16));
+		pos += 1 + sizeof(uint16);
+		if (len > exlen - pos)
+			break;
+		if (idx < nkeys && len <= value_len)
+		{
+			char	   *slot = block + (Size) idx * EXEMPLAR_SLOT_SIZE(value_len);
+
+			memcpy(slot, &len, sizeof(uint16));
+			memcpy(slot + sizeof(uint16), ex + pos, len);
+		}
+		pos += len;
+	}
+}
+
+/*
  * Adds one call to the entry's ring in bucket current_bucket, read under the
  * entry spinlock: that bucket is live at the moment of the write, and it is
  * >= the entry's last_bucket (which an earlier writer read the same way from
@@ -611,7 +740,7 @@ entry_remove(int64 idx)
  * the watermark (observe_current_bucket()). Returns the id written.
  */
 static int64
-entry_accum(void *entry, double elapsed_ms)
+entry_accum(void *entry, double elapsed_ms, const char *ex, size_t exlen)
 {
 	PsscEntryHeader *hdr = entry_header(entry);
 	PsscSlot   *slots = entry_slots(entry);
@@ -636,6 +765,8 @@ entry_accum(void *entry, double elapsed_ms)
 	hdr->calls_total++;
 	hdr->exec_time_total += elapsed_ms;
 	pssc_usage_exec(&es->usage);
+	if (exlen > 0)
+		exemplars_write(entry, ex, exlen);
 
 #ifdef USE_ASSERT_CHECKING
 	{
@@ -914,7 +1045,8 @@ stats_nonzero(const PsscTagsetStats *s)
 {
 	return s->invalid_tags != 0 || s->dropped_tags != 0 ||
 		s->heuristic_scans != 0 || s->regex_compile_failures != 0 ||
-		s->capped_tags != 0 || s->cap_table_full != 0;
+		s->capped_tags != 0 || s->cap_table_full != 0 ||
+		s->exemplars_dropped != 0;
 }
 
 /*
@@ -943,6 +1075,9 @@ add_diagnostics_locked(PsscTagsetStats *stats, uint64 utility_missing_queryid)
 		pg_atomic_fetch_add_u64(&store_state->capped_tags, stats->capped_tags);
 	if (stats->cap_table_full)
 		pg_atomic_fetch_add_u64(&store_state->cap_table_full, stats->cap_table_full);
+	if (stats->exemplars_dropped)
+		pg_atomic_fetch_add_u64(&store_state->exemplar_values_dropped,
+								stats->exemplars_dropped);
 	if (utility_missing_queryid)
 		pg_atomic_fetch_add_u64(&store_state->utility_missing_queryid,
 								utility_missing_queryid);
@@ -950,7 +1085,8 @@ add_diagnostics_locked(PsscTagsetStats *stats, uint64 utility_missing_queryid)
 }
 
 static PsscStoreResult record_impl(const PsscKey *key, int64 bucket_id,
-								   double elapsed_ms, PsscTagsetStats *pending);
+								   double elapsed_ms, PsscTagsetStats *pending,
+								   const char *ex, size_t exlen);
 
 PsscStoreResult
 pssc_store_record(const PsscKey *key, double elapsed_ms)
@@ -962,6 +1098,13 @@ PsscStoreResult
 pssc_store_record_with_stats(const PsscKey *key, double elapsed_ms,
 							 PsscTagsetStats *pending)
 {
+	return pssc_store_record_ex(key, elapsed_ms, pending, NULL, 0);
+}
+
+PsscStoreResult
+pssc_store_record_ex(const PsscKey *key, double elapsed_ms,
+					 PsscTagsetStats *pending, const char *ex, size_t exlen)
+{
 	if (store_state == NULL || store_htab == NULL)
 		return PSSC_STORE_UNAVAILABLE;
 
@@ -969,18 +1112,19 @@ pssc_store_record_with_stats(const PsscKey *key, double elapsed_ms,
 	 * The bucket in which the execution completes. record_impl() re-reads
 	 * the clock once it holds the lock, so a stall moves the call forward.
 	 */
-	return record_impl(key, pssc_store_clock_bucket(), elapsed_ms, pending);
+	return record_impl(key, pssc_store_clock_bucket(), elapsed_ms, pending,
+					   ex, exlen);
 }
 
 PsscStoreResult
 pssc_store_record_at(const PsscKey *key, int64 bucket_id, double elapsed_ms)
 {
-	return record_impl(key, bucket_id, elapsed_ms, NULL);
+	return record_impl(key, bucket_id, elapsed_ms, NULL, NULL, 0);
 }
 
 static PsscStoreResult
 record_impl(const PsscKey *key, int64 bucket_id, double elapsed_ms,
-			PsscTagsetStats *pending)
+			PsscTagsetStats *pending, const char *ex, size_t exlen)
 {
 	PsscStoreResult result;
 	uint32		normal;
@@ -1013,7 +1157,7 @@ record_impl(const PsscKey *key, int64 bucket_id, double elapsed_ms,
 	entry = hash_search_with_hash_value(store_htab, key, hash, HASH_FIND, NULL);
 	if (entry != NULL)
 	{
-		(void) entry_accum(entry, elapsed_ms);
+		(void) entry_accum(entry, elapsed_ms, ex, exlen);
 		if (pending != NULL && stats_nonzero(pending))
 			add_diagnostics_locked(pending, 0);
 		LWLockRelease(store_state->lock);
@@ -1056,7 +1200,7 @@ record_impl(const PsscKey *key, int64 bucket_id, double elapsed_ms,
 		result = PSSC_STORE_FULL;
 	}
 	else
-		(void) entry_accum(entry, elapsed_ms);
+		(void) entry_accum(entry, elapsed_ms, ex, exlen);
 	if (pending != NULL && stats_nonzero(pending))
 		add_diagnostics_locked(pending, 0);
 
@@ -1121,10 +1265,31 @@ pssc_store_foreach(PsscStoreVisitor fn, void *arg)
 		view.stats_since = chdr->stats_since;
 		view.bucket_count = store_state->bucket_count;
 		view.slots = entry_slots(copy);
+		view.exemplar_nkeys = store_state->exemplar_nkeys;
+		view.exemplar_value_len = store_state->exemplar_value_len;
+		view.exemplars = entry_exemplars(copy);
 		fn(&view, arg);
 	}
 	LWLockRelease(store_state->lock);
 	pfree(copy);
+}
+
+bool
+pssc_store_exemplar(const PsscStoreEntryView *view, int i, const char **val,
+					size_t *len)
+{
+	const char *slot;
+	uint16		l;
+
+	if (i < 0 || i >= view->exemplar_nkeys)
+		return false;
+	slot = view->exemplars + (Size) i * EXEMPLAR_SLOT_SIZE(view->exemplar_value_len);
+	memcpy(&l, slot, sizeof(uint16));
+	if (l == EXEMPLAR_EMPTY || l > view->exemplar_value_len)
+		return false;
+	*val = slot + sizeof(uint16);
+	*len = l;
+	return true;
 }
 
 /* Removes every entry; the caller holds the exclusive lock. */
@@ -1161,6 +1326,7 @@ pssc_store_reset(void)
 	pg_atomic_write_u64(&store_state->cap_table_full, 0);
 	pg_atomic_write_u64(&store_state->utility_missing_queryid, 0);
 	pg_atomic_write_u64(&store_state->dropped_records, 0);
+	pg_atomic_write_u64(&store_state->exemplar_values_dropped, 0);
 	/* current_bucket never decreases, and the epoch is fixed: both kept */
 	pg_atomic_write_u64(&store_state->bucket_advances, 0);
 	store_state->stats_reset = GetCurrentTimestamp();
@@ -1201,6 +1367,12 @@ read_counters_locked(PsscStoreCounters *c)
 	c->bucket_count = store_state->bucket_count;
 	c->interval_us = store_state->interval_us;
 	c->max_tagset_bytes = store_state->max_tagset_bytes;
+	c->exemplar_values_dropped =
+		(int64) pg_atomic_read_u64(&store_state->exemplar_values_dropped);
+	c->exemplar_nkeys = store_state->exemplar_nkeys;
+	c->exemplar_value_len = store_state->exemplar_value_len;
+	c->exemplar_shmem_bytes = mul_size((Size) store_state->max_entries,
+									   store_state->exemplar_block);
 }
 
 bool
@@ -1939,6 +2111,9 @@ load_insert(PsscKey *key, const PsscDumpRecord *rec, const char *tags,
 		else
 			pssc_slot_init(&es_slots[i]);
 	}
+	/* exemplars are not saved (§5.5) */
+	exemplars_clear(entry_exemplars(entry), store_state->exemplar_nkeys,
+					store_state->exemplar_value_len);
 	es = &store_state->evict_slots[eh->evict_index];
 	es->last_bucket = rec->last_bucket;
 	es->usage = rec->usage;

@@ -5,7 +5,7 @@ SELECT extname, extversion
  WHERE extname = 'pg_stat_statement_context';
           extname          | extversion 
 ---------------------------+------------
- pg_stat_statement_context | 1.0
+ pg_stat_statement_context | 1.1
 (1 row)
 
 SELECT 'pg_stat_statement_context' = ANY (

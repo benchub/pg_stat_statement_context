@@ -580,6 +580,8 @@ typedef struct Run
 	bool		appname_twice;	/* pass the appname result twice (cache replay) */
 	const char *override;		/* tags_override (sqlcommenter); NULL = none */
 	int			cap;			/* fake_cap per-key cap; 0 = env.cap NULL */
+	const char *exemplar;		/* exemplar_keys list; NULL = none */
+	int			ex_len;			/* limits.exemplar_value_len */
 } Run;
 
 typedef struct Res
@@ -596,6 +598,7 @@ typedef struct Res
 	bool		appname_oom;
 	size_t		override_ntags;
 	bool		override_oom;
+	char		extext[4096];	/* captured exemplars: "i=v|i=v" */
 } Res;
 
 static const char *
@@ -714,6 +717,10 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	PsscSourceTags ot;
 	char	   *buf;
 
+	/* override pairs; captured exemplars may point here until the end */
+	PsscPair	pairs[64];
+	char		obuf[1024];
+
 	apply_defaults(&cfg);
 	tags = mklist(cfg.tags);
 	excl = mklist(cfg.exclude);
@@ -732,6 +739,8 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	env.normalize = cfg.with_normalize ? fake_normalize : NULL;
 	env.cap = cfg.cap > 0 ? fake_cap : NULL;
 	fake_cap_limit = cfg.cap;
+	env.exemplar_keys = cfg.exemplar ? mklist(cfg.exemplar) : NULL;
+	lim.exemplar_value_len = cfg.ex_len;
 	/* exactly max_tagset_bytes, so ASan catches overruns */
 	buf = malloc(cfg.max_bytes ? cfg.max_bytes : 1);
 	memset(&out, 0x5a, sizeof(out));
@@ -749,8 +758,6 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	{
 		/* parsed as the check_hook does: sqlcommenter, URL-decoded */
 		size_t		olen = strlen(cfg.override);
-		PsscPair	pairs[64];
-		char		obuf[1024];
 		PsscPairOut po = {pairs, 64, obuf, sizeof(obuf)};
 		PsscPairResult pr;
 
@@ -792,6 +799,24 @@ run_range(const char *name, Run cfg, const char *s, size_t start, size_t end)
 	r.footer = out.footer;
 	r.oom = out.oom;
 	r.allocs = a->count;
+	{
+		char	   *t = r.extext;
+
+		*t = '\0';
+		for (int i = 0; i < PSSC_MAX_EXEMPLAR_KEYS; i++)
+		{
+			if (!out.exemplars[i].set)
+				continue;
+			CHECK(cfg.exemplar != NULL && out.exemplars[i].vlen <= (size_t) cfg.ex_len,
+				  "%s: exemplar %d set (%zu bytes)", name, i, out.exemplars[i].vlen);
+			assert(out.exemplars[i].vlen < 512);
+			if (t != r.extext)
+				*t++ = '|';
+			t += xsprintf(t, "%d=", i);
+			fmt_bytes(t, out.exemplars[i].val, out.exemplars[i].vlen);
+			t += strlen(t);
+		}
+	}
 	assert(r.len <= sizeof(r.buf));
 	if (r.len <= (size_t) cfg.max_bytes)
 		memcpy(r.buf, buf, r.len);
@@ -2566,6 +2591,90 @@ test_caps(void)
 	fake_cap_reset();
 }
 
+/*
+ * Exemplars (item 20261005-091225-33, DESIGN.md §6.13): the value of an
+ * exemplar key is captured after rename and before the allow/denylist,
+ * whether or not the key is kept as a grouping tag.
+ */
+#define EXPECT_EX(name, cfg, sql, exp_tags, exp_ex) \
+	do { \
+		Res *r_ = run(name, cfg, sql); \
+		CHECK(strcmp(r_->text, exp_tags) == 0 && strcmp(r_->extext, exp_ex) == 0, \
+			  "%s: got \"%s\" / \"%s\", want \"%s\" / \"%s\"", name, \
+			  r_->text, r_->extext, exp_tags, exp_ex); \
+	} while (0)
+
+static void
+test_exemplars(void)
+{
+	Run			c = {0};
+	Res		   *r;
+
+	c.exclude = "traceparent,request_id";
+	c.exemplar = "traceparent,sid";
+	c.ex_len = 16;
+	/* denylisted, captured; a denylisted key not listed is not */
+	EXPECT_EX("exemplar denylisted", c,
+			  "SELECT 1 /*controller='c',traceparent='tp1',request_id='r'*/",
+			  "controller=c", "0=tp1");
+	/* a grouping tag is captured too, in its slot */
+	EXPECT_EX("exemplar grouped", c, "SELECT 1 /*sid='s',traceparent='tp'*/",
+			  "sid=s", "0=tp|1=s");
+	/* off: nothing captured */
+	c.exemplar = NULL;
+	EXPECT_EX("exemplar off", c, "SELECT 1 /*traceparent='tp1'*/", "", "");
+	c.exemplar = "traceparent,sid";
+	/* the first occurrence wins, like for tags */
+	EXPECT_EX("exemplar first", c, "SELECT 1 /*traceparent='a',traceparent='b'*/",
+			  "", "0=a");
+	/* too long: dropped (not truncated) and counted; the slot stays open */
+	r = run("exemplar too long", c,
+			"SELECT 1 /*traceparent='0123456789abcdefX',sid='x'*/");
+	CHECK(strcmp(r->extext, "1=x") == 0 && r->st.exemplars_dropped == 1,
+		  "exemplar too long: \"%s\" dropped %llu", r->extext,
+		  (unsigned long long) r->st.exemplars_dropped);
+	r = run("exemplar fits", c, "SELECT 1 /*traceparent='0123456789abcdef'*/");
+	CHECK(strcmp(r->extext, "0=0123456789abcdef") == 0 && r->st.exemplars_dropped == 0,
+		  "exemplar fits: \"%s\"", r->extext);
+	/* value length 0: every value is dropped */
+	c.ex_len = 0;
+	r = run("exemplar no room", c, "SELECT 1 /*traceparent='t'*/");
+	CHECK(r->extext[0] == '\0' && r->st.exemplars_dropped == 1,
+		  "exemplar no room: \"%s\"", r->extext);
+	c.ex_len = 16;
+	/* not truncated by max_tag_value_len, unlike a tag */
+	c.max_value = 2;
+	EXPECT_EX("exemplar not truncated", c, "SELECT 1 /*sid='long',traceparent='tp'*/",
+			  "sid=lo", "0=tp|1=long");
+	c.max_value = 0;
+	/* after rename: the final key is the one looked up */
+	{
+		XSpec		x = SC(PSSC_POS_APPEND);
+
+		x.rename = "tp:traceparent|sid:session";
+		c.ex = mkex(1, &x);
+		EXPECT_EX("exemplar renamed", c, "SELECT 1 /*tp='t1',sid='s1'*/",
+				  "session=s1", "0=t1");
+		c.ex = NULL;
+	}
+	/* tags_override wins, like for tags; the comment fills the other slots */
+	c.override = "traceparent='ov'";
+	EXPECT_EX("exemplar override", c, "SELECT 1 /*traceparent='tp',sid='s'*/",
+			  "sid=s", "0=ov|1=s");
+	c.override = NULL;
+	/* the comment wins over application_name */
+	{
+		XSpec		xs[2] = {SC(PSSC_POS_APPEND), AN(PSSC_EXTRACTOR_SQLCOMMENTER)};
+
+		c.ex = mkex(2, xs);
+		c.appname = "traceparent='app',sid='app'";
+		EXPECT_EX("exemplar appname", c, "SELECT 1 /*traceparent='tp'*/",
+				  "sid=app", "0=tp|1=app");
+		c.appname = NULL;
+		c.ex = NULL;
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2598,6 +2707,7 @@ main(int argc, char **argv)
 	test_appname();
 	test_override();
 	test_caps();
+	test_exemplars();
 
 	if (failures)
 	{
