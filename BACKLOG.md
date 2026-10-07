@@ -50,7 +50,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
-| 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
@@ -146,21 +145,6 @@ dependencies and is not shown.
 ---
 
 ## v1 tasks
-
-### 20261006-075124-1: Fewer eviction passes under sustained churn (adaptive batch or compact scan)
-
-**Description:** Follow-up to 20261006-043919-1. Partial selection made a pass ~40% faster, but under the `evict` benchmark at `max_entries=10000` p99 is still ~2.15× pgss alone (target ~1.5×). The remaining cost is the single scan of ~10,000 entries (~870 B each, ~8.7 MB) under the exclusive lock. Options:
-1. Adaptive batch: evict a larger fraction (e.g. up to 20%) when passes come close together. A throwaway build gave Δp99 +34% (TPS −7.6%) on a noisy run. Changes §5.3 semantics (target is no longer a fixed ~5%), loses more history of rare combinations.
-2. A compact per-entry array of (`last_bucket`, `usage`, entry pointer) maintained in shared memory, so the pass scans ~16–24 B per entry instead of whole entries. Keeps §5.3 semantics; more code and shared memory.
-
-**Acceptance criteria:** eviction-benchmark p99 at `max_entries=10000` ≤ ~1.5× pgss alone on PG 18 (or gap explained); §5.3 updated if semantics change; TAP 008/009/018 pass; numbers in docs/benchmarks.md.
-
-**Decisions:**
-- 2026-10-06: Do option 2 (compact per-entry array, keeps §5.3 semantics) first; only if p99 is still over ~1.5× pgss, add option 1 (adaptive batch) and update §5.3.
-
-**Depends on:** 20261006-043919-1
-**Open questions:** none
-**Status:** ready
 
 ### 20261005-091225-29: v1 release readiness
 
