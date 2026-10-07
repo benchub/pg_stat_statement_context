@@ -51,6 +51,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | ready |
+| 20261006-220356-1 | Flaky TAP 017: utility time parity with pgss under assert builds | none | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -168,9 +169,30 @@ dependencies and is not shown.
 - `CHANGELOG.md` and `docs/release-notes/v1.0.0.md` added; the notes summarize the §11 resolutions. §11 is accurate. Benchmark numbers are committed in `docs/benchmarks.md`.
 - Local matrix in Docker: PGDG 14–18, `--assert` 14–18 and `--valgrind 18` all pass; README install + quick start verbatim from a fresh `git clone` on PG 14 and 18.
 - Fixed on the way: `docker/Dockerfile.source` passed the release as `ARG PG_VERSION`, which the base image's `ENV PG_VERSION` overrides under the legacy builder (tarball 404); renamed to `PG_SOURCE_VERSION`.
+- (Superseded by the progress note below: -33, -34 and -35 landed afterwards.)
+
+**Progress (2026-10-06 evening, agent, after the 1.1 fold; commit 6264c97):**
+- 1.1 folded into 1.0 per the owner's decision above: `--1.0.sql` defines the exemplar columns, `--1.0--1.1.sql` and the `_1_1` C symbols are gone, `default_version = '1.0'`, `sql/frozen.sha256` re-recorded (`scripts/check-frozen-sql.sh` has no re-record mode, so the manifest line was edited). A catalog comparison on PG 18 of old 1.0 + upgrade vs. the folded script showed identical signatures, volatility/parallel/strict labels, ACLs and view definitions (only the C symbol names differ).
+- CHANGELOG `[1.0.0]` and `docs/release-notes/v1.0.0.md` now include the reclaim worker, `save` and exemplars; they are off the post-v1 list. `save` is now documented in `docs/configuration.md`; limitations/sql-interface/integrations no longer say statistics are lost on every restart. DESIGN.md §6.13, §7, §8, §9 updated; §11 unchanged and accurate.
+- Matrix from a fresh `git clone` of 6264c97 (`scripts/docker-test.sh`): PGDG 14.24, 15.19, 16.15, 17.11, 18.6 PASS; `--assert` 14.24, 15.19, 17.11, 18.6 PASS; `--assert` 16.15 FAIL once (timing flake in `017_lifecycle.pl`: a `RELEASE SAVEPOINT` took 5.6 ms in our hook vs 0.11 ms in pgss's, over the 2 ms slack; unrelated to the fold), PASS on rerun, tracked as 20261006-220356-1; `--valgrind 18` PASS (no Valgrind errors in 13 + 33 processes). Unit tests (ASan/UBSan), version-guard and frozen-SQL checks (+ self-tests) pass in every cell and on the host. `fuzz/run-libfuzzer.sh -t 15`: all 4 targets ok.
+- README install + quick start verbatim (code blocks extracted from the committed README) from the fresh clone on PG 14 and 18: `make`, `make install`, both `CREATE EXTENSION`s, the quick-start output matches (2 rows, calls 2 and 1), `_extract()` returns the documented tags, extversion 1.0, no server-log warnings.
+- Not run: `scripts/test-integrations.sh` (pulling the third-party images failed in this environment: Docker credential helper error).
+- Benchmarks in `docs/benchmarks.md` were measured at 22f9e0f, before -33/-34/-35 (all off by default or off the hot path); not re-run.
 - **Remaining (owner):** push `main`, wait for CI to be green, tag `v1.0.0`, create the GitHub release from `docs/release-notes/v1.0.0.md`, then run `scripts/backlog-complete.py 20261005-091225-29`.
 
 **Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32
+**Open questions:** none
+**Status:** ready
+
+### 20261006-220356-1: Flaky TAP 017: utility time parity with pgss under assert builds
+
+**Description:** Found during 20261005-091225-29 (release matrix, `scripts/docker-test.sh --assert 16`, PG 16.15). `test/t/017_lifecycle.pl` check 80, "track = all, track_utility = on (both): per-(userid, dbid, queryid, toplevel) calls and total_exec_time equal pgss's", failed once: `utility time 5.647375 vs pgss's 0.108292 (allowed difference 2.00108292)` for `RELEASE SAVEPOINT s2` (ours=1, pgss=1). It passed on rerun and in every other cell. Our `ProcessUtility` hook wraps pgss's, so a scheduling stall between the two timers lands in our time only; the 2 ms per-call slack (`PSSC_TEST_UTILITY_SLACK_MS`) is not enough on a loaded laptop Docker VM. Make the check robust without hiding real timing bugs (e.g. retry the workload once on a utility-time-only mismatch, or compare against a bound that tolerates rare single-call stalls while still failing on systematic differences). The failing log was `tmp/release-clone/tmp/logs/assert-16-flake.log` (scratch, may be gone).
+
+**Acceptance criteria:**
+- The check still fails if our utility timing is systematically wrong (demonstrated with a deliberate fault in a scratch copy).
+- 017 passes 10 of 10 runs of `--assert 16` (or under an equivalent documented load recipe).
+
+**Depends on:** none
 **Open questions:** none
 **Status:** ready
 
