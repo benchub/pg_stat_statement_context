@@ -23,12 +23,14 @@
 #     slack tight enough to matter. So when the only problems of a
 #     comparison are utility times beyond that bound in the enclosing hook's
 #     direction (ours above pgss's; pgss's above ours with the wrong load
-#     order), the configuration's workload is run once more (after a reset)
-#     and the second comparison is final, with the same bound. A stall is
-#     rare and random, so it does not hit twice; a systematic error (a
-#     per-call offset, double counting) fails again. Widening the bound or
-#     tolerating "a few outliers" instead would hide double counting: only
-#     the few utilities slower than the slack (EXPLAIN ANALYZE) reveal it.
+#     order) and the configuration's other invariants (coverage, lifecycle,
+#     presence, utility_missing_queryid) hold on that first run, its
+#     workload is run once more (after a reset) and the second run is
+#     final, with the same bound. A stall is rare and random, so it does
+#     not hit twice; a systematic error (a per-call offset, double
+#     counting) fails again. Widening the bound or tolerating "a few
+#     outliers" instead would hide double counting: only the few utilities
+#     slower than the slack (EXPLAIN ANALYZE) reveal it.
 # The workload: prepared statements over the extended protocol (named
 # statements Parsed once and Bound/Executed many times, through the raw
 # protocol driver below so that every version is covered; unnamed ones
@@ -768,31 +770,36 @@ sub time_problem
 #   mode subset: ours (if $sub eq 'ours') or pgss's keys are a subset of
 #                the other's, with equal calls and times on shared keys.
 #   mode wrong:  wrong load order; ours a subset, every missing row a
-#                utility; returns the calls of the missing rows.
+#                utility; $c->{missing_calls} has the calls of the
+#                missing rows.
+# $checks->($c) returns the configuration's other invariants, evaluated on
+# the current workload's state, as [got, expected, name, diag] each.
 # If the only problems are utility times beyond the bound in the direction
 # a stall can cause (see the header and time_problem()), and the coverage
-# checks (rows shared, both roles, both databases) hold, the workload is reset and run once more, then
-# $after (if given) is called, and the second comparison is final.
+# checks (rows shared, both roles, both databases) and every $checks
+# invariant hold, the workload is reset and run once more, and the second
+# run is final. Otherwise the first run's results are reported: a rerun
+# never replaces a first-run failure other than a stall.
 sub compare
 {
-	my ($label, $mode, $sub, $after) = @_;
+	my ($label, $mode, $sub, $checks) = @_;
 	my $c = compare_rows($mode, $sub);
+	my @k = $checks ? $checks->($c) : ();
 	my $covered = sub {
 		my ($x) = @_;
 		return $x->{shared} >= 40
 		  && join(',', sort keys %{ $x->{users} }) eq join(',', sort values %uid)
 		  && join(',', sort keys %{ $x->{dbs} }) eq join(',', sort values %dbid);
 	};
-	# An incomplete comparison is never retried: its coverage failures are
-	# reported, not replaced by a rerun's.
-	if (@{ $c->{bad} } && $c->{stall_only} && $covered->($c))
+	if (@{ $c->{bad} } && $c->{stall_only} && $covered->($c)
+		&& !grep { $_->[0] ne $_->[1] } @k)
 	{
 		diag("$label: utility time above the bound only, running the workload again:\n"
 			  . join("\n", @{ $c->{bad} }));
 		reset_all();
 		run_workload("$label (rerun)");
-		$after->() if $after;
 		$c = compare_rows($mode, $sub);
+		@k = $checks ? $checks->($c) : ();
 	}
 	ok($c->{shared} >= 40,
 		"$label: workload produced rows recorded by both ($c->{shared})");
@@ -803,7 +810,10 @@ sub compare
 	is(scalar(@{ $c->{bad} }), 0,
 		"$label: per-(userid, dbid, queryid, toplevel) calls and total_exec_time equal pgss's"
 	) or diag(join("\n", @{ $c->{bad} }));
-	return $c->{missing_calls};
+	for my $k (@k)
+	{
+		is($k->[0], $k->[1], $k->[2]) or (defined $k->[3] && diag($k->[3]));
+	}
 }
 
 sub compare_rows
@@ -901,10 +911,12 @@ SELECT string_agg(coalesce(tags->>'controller', '-') || ':' || calls, ','
          WHERE queryid = $qid AND dbid = $dbid{postgres} GROUP BY 1) x});
 }
 
-# Lifecycle facts (database postgres: 2 psql runs, 1 extended run).
+# Lifecycle facts (database postgres: 2 psql runs, 1 extended run), as
+# compare() checks.
 sub lifecycle_checks
 {
 	my ($label, $track, $tu, $wrong) = @_;
+	my @c;
 	my $all = $track eq 'all';
 	my $nested = sub { $all ? "f:$_[0]/$_[0]" : '' };
 	# A CALL child is nested only when pgss counts the CALL as a level:
@@ -913,40 +925,40 @@ sub lifecycle_checks
 		($vnum >= 170000 || $tu eq 'on') ? $nested->($_[0]) : "t:$_[0]/$_[0]";
 	};
 
-	is(calls_of($q{caught_fail}), '', "$label: failing SPI query counted by neither");
-	is(calls_of($q{caught_insert}), $nested->(2),
-		"$label: SPI query that ended before a caught error counted (rolled back)");
-	is(calls_of($q{caught_ok}), $nested->(2),
-		"$label: successful SPI work after caught errors counted");
+	push @c, [calls_of($q{caught_fail}), '', "$label: failing SPI query counted by neither"];
+	push @c, [calls_of($q{caught_insert}), $nested->(2),
+		"$label: SPI query that ended before a caught error counted (rolled back)"];
+	push @c, [calls_of($q{caught_ok}), $nested->(2),
+		"$label: successful SPI work after caught errors counted"];
 	# f_cursors runs 4 times per psql run: in autocommit, in a rolled-back
 	# transaction, in a released savepoint, in a rolled-back savepoint.
-	is(calls_of($q{never}), $nested->(8), "$label: cursor never fetched counted");
-	is(calls_of($q{early}), $nested->(8), "$label: cursor closed early counted");
-	is(calls_of($q{open}), ($all ? 't:4/4' : ''),
+	push @c, [calls_of($q{never}), $nested->(8), "$label: cursor never fetched counted"];
+	push @c, [calls_of($q{early}), $nested->(8), "$label: cursor closed early counted"];
+	push @c, [calls_of($q{open}), ($all ? 't:4/4' : ''),
 		"$label: cursor left open counted at COMMIT as top level, as pgss, and not when rolled back"
-	);
-	is(calls_of($q{for_outer}), $nested->(8),
-		"$label: suspended FOR-loop portal counted once per loop");
-	is(calls_of($q{for_inner}), $nested->(8 * 40),
-		"$label: overlapping inner FOR-loop portals counted");
-	is(calls_of($q{cur_fail}), '', "$label: failed cursor counted by neither");
-	is(calls_of($q{top_fail}), '', "$label: failing top-level statement counted by neither");
-	is(calls_of($q{err_insert}), $in_call->(2),
-		"$label: work committed by a procedure that then fails counted");
-	is(calls_of($q{par}), 't:2/2', "$label: parallel query counted once");
-	is(calls_of($q{force}), 't:2/2', "$label: $force_parallel query counted once");
-	is(calls_of($q{par_fn}), $nested->(2), "$label: parallel SPI query counted once");
+	];
+	push @c, [calls_of($q{for_outer}), $nested->(8),
+		"$label: suspended FOR-loop portal counted once per loop"];
+	push @c, [calls_of($q{for_inner}), $nested->(8 * 40),
+		"$label: overlapping inner FOR-loop portals counted"];
+	push @c, [calls_of($q{cur_fail}), '', "$label: failed cursor counted by neither"];
+	push @c, [calls_of($q{top_fail}), '', "$label: failing top-level statement counted by neither"];
+	push @c, [calls_of($q{err_insert}), $in_call->(2),
+		"$label: work committed by a procedure that then fails counted"];
+	push @c, [calls_of($q{par}), 't:2/2', "$label: parallel query counted once"];
+	push @c, [calls_of($q{force}), 't:2/2', "$label: $force_parallel query counted once"];
+	push @c, [calls_of($q{par_fn}), $nested->(2), "$label: parallel SPI query counted once"];
 
-	is(tags_of($q{x_stale}), 'first:4,fresh:1',
-		"$label: named statement executions keep the Parse-time tags (§6.3)");
-	is(calls_of($q{x_stale}), 't:5/5', "$label: and pgss counts them the same");
-	is(calls_of($q{x_susp}), 't:1/1', "$label: portal run in chunks counted once");
-	is(calls_of($q{x_early}), 't:1/1', "$label: portal closed early counted");
-	is(calls_of($q{x_never}), 't:1/1', "$label: portal never executed counted at COMMIT");
-	is(calls_of($q{x_sync}), 't:1/1', "$label: portal suspended at Sync counted");
-	is(calls_of($q{x_fail}), '', "$label: failed portals counted by neither");
-	is(calls_of($q{x_abort}), '', "$label: portal dropped by an abort counted by neither");
-	is(calls_of($q{x_rb}), '', "$label: portal dropped by ROLLBACK counted by neither");
+	push @c, [tags_of($q{x_stale}), 'first:4,fresh:1',
+		"$label: named statement executions keep the Parse-time tags (§6.3)"];
+	push @c, [calls_of($q{x_stale}), 't:5/5', "$label: and pgss counts them the same"];
+	push @c, [calls_of($q{x_susp}), 't:1/1', "$label: portal run in chunks counted once"];
+	push @c, [calls_of($q{x_early}), 't:1/1', "$label: portal closed early counted"];
+	push @c, [calls_of($q{x_never}), 't:1/1', "$label: portal never executed counted at COMMIT"];
+	push @c, [calls_of($q{x_sync}), 't:1/1', "$label: portal suspended at Sync counted"];
+	push @c, [calls_of($q{x_fail}), '', "$label: failed portals counted by neither"];
+	push @c, [calls_of($q{x_abort}), '', "$label: portal dropped by an abort counted by neither"];
+	push @c, [calls_of($q{x_rb}), '', "$label: portal dropped by ROLLBACK counted by neither"];
 
 	# Cached utilities: only the first execution per backend (see $lost).
 	my $util_qid = sub {
@@ -962,19 +974,20 @@ sub lifecycle_checks
 		# Runs counted per session: the first, plus the re-analyzed second
 		# where $replans_utilities (see the header).
 		my $n = 2 * (1 + $replans_utilities);
-		is(calls_of($x_util), "t:$o/1",
-			"$label: named utility executed 3 times counted once by both");
-		is(calls_of($ltx), ($all ? "f:" . $o * $n . "/$n" : ''),
+		push @c, [calls_of($x_util), "t:$o/1",
+			"$label: named utility executed 3 times counted once by both"];
+		push @c, [calls_of($ltx), ($all ? "f:" . $o * $n . "/$n" : ''),
 			"$label: PL/pgSQL utility run twice per session counted once per session by both, "
-			  . "twice where the plan cache re-analyzes it");
-		is(calls_of($ltx_drop), ($all ? "f:" . 2 * $o . "/2" : ''),
+			  . "twice where the plan cache re-analyzes it"];
+		push @c, [calls_of($ltx_drop), ($all ? "f:" . 2 * $o . "/2" : ''),
 			"$label: PL/pgSQL utility cached after the search_path change counted once per session by both"
-		);
+		];
 	}
 	else
 	{
-		is("$x_util/$ltx/$ltx_drop", '0/0/0', "$label: pgss tracked no utility either");
+		push @c, ["$x_util/$ltx/$ltx_drop", '0/0/0', "$label: pgss tracked no utility either"];
 	}
+	return @c;
 }
 
 sub missing_queryid
@@ -1056,11 +1069,14 @@ for my $track ('top', 'all')
 			'pg_stat_statements.track_utility' => $tu);
 		reset_all();
 		run_workload($label);
-		compare($label, 'equal');
+		compare(
+			$label, 'equal', undef,
+			sub {
+				return (lifecycle_checks($label, $track, $tu),
+					[ missing_queryid(), lost($track, $tu),
+						"$label: only re-executed cached utilities arrived without a queryid" ]);
+			});
 		snapshot_reference_keys($tu);
-		lifecycle_checks($label, $track, $tu);
-		is(missing_queryid(), lost($track, $tu),
-			"$label: only re-executed cached utilities arrived without a queryid");
 	}
 }
 
@@ -1085,19 +1101,24 @@ for my $c (
 		'pg_stat_statements.track_utility' => $ptu);
 	reset_all();
 	run_workload($label);
-	compare($label, 'subset', $sub);
-
 	# Each side records exactly what its own settings allow.
 	my $nu = scalar(keys %ref_util);
 	my $nn = scalar(keys %ref_nested);
-	is(present(\%ref_util),
-		($tu eq 'on' ? $nu : 0) . '/' . ($ptu eq 'on' ? $nu : 0),
-		"$label: top-level utilities recorded by the side(s) with track_utility on only")
-	  or diag(join("\n", @present_rows));
-	is(present(\%ref_nested),
-		($track eq 'all' ? $nn : 0) . '/' . ($ptrack eq 'all' ? $nn : 0),
-		"$label: nested statements recorded by the side(s) with track = all only")
-	  or diag(join("\n", @present_rows));
+	compare(
+		$label, 'subset', $sub,
+		sub {
+			my $pu = present(\%ref_util);
+			my $du = join("\n", @present_rows);
+			my $pn = present(\%ref_nested);
+			my $dn = join("\n", @present_rows);
+			return (
+				[ $pu, ($tu eq 'on' ? $nu : 0) . '/' . ($ptu eq 'on' ? $nu : 0),
+					"$label: top-level utilities recorded by the side(s) with track_utility on only",
+					$du ],
+				[ $pn, ($track eq 'all' ? $nn : 0) . '/' . ($ptrack eq 'all' ? $nn : 0),
+					"$label: nested statements recorded by the side(s) with track = all only",
+					$dn ]);
+		});
 }
 
 # ------------------------------------------------- wrong load order
@@ -1116,13 +1137,18 @@ for my $track ('top', 'all')
 	reset_all();
 	run_workload($label);
 	# (reset_all() also reset the counter.)
-	my $m0 = missing_queryid();
-	my $missing = compare($label, 'wrong', undef,
-		sub { $m0 = missing_queryid(); });
-	ok($missing > 0, "$label: pgss recorded utilities this extension could not");
-	is($m0, $missing + lost($track, 'on'),
-		"$label: every utility missing here, and every re-executed cached utility, was counted in utility_missing_queryid");
-	lifecycle_checks($label, $track, 'on', 1);
+	compare(
+		$label, 'wrong', undef,
+		sub {
+			my ($c) = @_;
+			my $missing = $c->{missing_calls};
+			return (
+				[ $missing > 0 ? 1 : 0, 1,
+					"$label: pgss recorded utilities this extension could not" ],
+				[ missing_queryid(), $missing + lost($track, 'on'),
+					"$label: every utility missing here, and every re-executed cached utility, was counted in utility_missing_queryid" ],
+				lifecycle_checks($label, $track, 'on', 1));
+		});
 }
 
 unlike(slurp_file($node->logfile), qr/TRAP|PANIC|terminated by signal/,
