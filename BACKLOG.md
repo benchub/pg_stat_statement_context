@@ -54,6 +54,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
 | 20261006-143225-1 | Close the deadline-postponement race in the test module's sleep injection | 20261006-113156-1 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
+| 20261007-064749-1 | 006: retry-cleanup precondition must not depend on runner speed | none | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | blocked-on-deps |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
 | 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
@@ -149,6 +150,19 @@ dependencies and is not shown.
 ---
 
 ## v1 tasks
+
+### 20261007-064749-1: 006: retry-cleanup precondition must not depend on runner speed
+
+**Description:** In `test/t/006_regex.pl` (around line 662), the "attempt expired mid-compile, retried" checks from 20261006-080948-1 assert `cmp_ok($res{0}[1], '>', 0.6, "...compiling takes long enough to be interrupted mid-compile")`. The 'expire' injection fires 300 ms into the compile of `$MID`, so the clean compile only has to outlast 300 ms (plus margin) for the interrupt to land mid-compile. On fast GitHub runners the clean compile took 0.56–0.59 s, which failed this precondition (CI run 37630525613: Linux PG14 assert #208, Linux PG15 PGDG #208 and #218) even though the interruption itself worked. Make the precondition check what actually matters, with margin that doesn't depend on how fast the runner is. For example: confirm the expiry happened while the compile was still in progress, scale the expiry point to the measured clean compile time, or use a pattern that is reliably several times slower than the expiry point without making the test much slower.
+
+**Acceptance criteria:**
+- The precondition no longer fails just because a clean compile takes 0.3–0.6 s. Demonstrate this with a failing-before test, for example by making the compile faster in a test-only way or by running the check against the recorded CI timings.
+- The precondition still fails, so the test is not vacuous, if the expiry lands after the compile has finished.
+- The Docker harness passes on PG14–18, and on the macOS host for PG18.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
 
 ### 20261006-010149-1: Exporter-friendly SQL surface: monotonic counters and bucket metadata
 
