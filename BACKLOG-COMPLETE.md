@@ -1399,6 +1399,20 @@ So a first-run failure in one of them, together with a utility stall, is erased 
 **Open questions:** none
 **Status:** done
 
+### 20261007-064749-2: 006: calibrate the retry-cleanup expiry from engine time, not client round trip
+
+Split from 20261007-064749-1 (round-2 review finding, not fixed within 2 rounds). In `test/t/006_regex.pl` (around lines 674 and 691–705), the 'expire' point for the "attempt expired mid-compile, retried" checks is half of the previous `sex()` call's wall-clock round trip. That round trip includes SQL processing, IPC and time when Perl is descheduled, not just the engine's compile. A heavily delayed baseline (for example a 500 ms compile plus 600 ms of client delay) can push the expiry past the next compile. The required `attempts|interrupted = 2|1` then fails (`1|0` or `2|0`) even though the runtime behaves correctly.
+
+**Acceptance criteria:**
+- The expiry is calibrated from engine-local elapsed time, for example a test-module counter of the last compile's duration measured inside the backend. Alternatively, a bounded recalibration retries with a smaller expiry when the counters show the expiry missed the compile.
+- `2|1` stays mandatory for the sample used by the allocation assertion.
+- A test that injects client-side delay into the baseline (or simulates an inflated baseline) fails before the fix and passes after.
+- The Docker harness passes on PG14–18.
+
+**Depends on:** 20261007-064749-1
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
