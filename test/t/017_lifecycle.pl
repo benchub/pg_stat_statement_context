@@ -66,6 +66,7 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use PsscTest;
 
 # ------------------------------------------------- raw v3 protocol driver
 #
@@ -209,9 +210,7 @@ my $UTIL_SLACK_MS = $ENV{PSSC_TEST_UTILITY_SLACK_MS} // 2;
 my $node = PostgreSQL::Test::Cluster->new('lifecycle');
 $node->init;
 $node->start;
-my $pkglibdir = $node->safe_psql('postgres',
-	q{SELECT setting FROM pg_config WHERE name = 'PKGLIBDIR'});
-if (!-e "$pkglibdir/pg_stat_statements.so")
+if (!defined pgss_suffix($node))
 {
 	plan skip_all => 'pg_stat_statements not installed';
 }

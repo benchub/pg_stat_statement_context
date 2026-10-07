@@ -188,7 +188,10 @@ else
 	[ -f "$tapdir/PostgreSQL/Test/Cluster.pm" ] && [ -f "$tapdir/PostgreSQL/Test/Utils.pm" ] \
 		|| fail "TAP tests need PostgreSQL::Test::Cluster/Utils in $tapdir (PG 14.6+)"
 	step "make installcheck"
-	as_pg make installcheck || fail "make installcheck"
+	# Every harness server (PGDG images, docker/build-postgres.sh builds)
+	# installs pg_stat_statements: the TAP tests fail rather than skip
+	# their pgss parity checks if it is missing (test/perl/PsscTest.pm).
+	as_pg env PSSC_REQUIRE_PGSS=1 make installcheck || fail "make installcheck"
 	pg_stop
 fi
 step "ALL PASSED ($(pg_config --version), mode: $MODE)"

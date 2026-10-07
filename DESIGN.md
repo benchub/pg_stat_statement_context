@@ -1272,6 +1272,16 @@ matches this extension's minimum supported version.
   output that contains characters whose psql display width varies between
   minor releases (for example emoji outside the last column) uses
   `\pset format unaligned`, which still compares the exact bytes.
+- **pgss detection** (`test/perl/PsscTest.pm`, on prove's include path via
+  the Makefile): the TAP tests find `pg_stat_statements` in `pkglibdir` with
+  any module suffix (`.so`; `.dylib` on macOS from PG16; `.dll`), and the
+  load-order spelling variants of 014 use that suffix. Without it, the parity
+  checks are skipped and 012/013 take the no-pgss paths (on PG14–16 a CALL/DO
+  then nests per this extension's own utility settings).
+  `docker/run-tests.sh` sets `PSSC_REQUIRE_PGSS=1`, which turns a missing
+  pgss into a test failure, since every harness server (PGDG images, source
+  builds, macOS) installs it. `PSSC_TEST_WITHOUT_PGSS=1` treats pgss as
+  absent, to run the no-pgss paths where it is installed.
 - **Harness source builds** (`docker/Dockerfile.source`) install
   `pg_stat_statements` too, so pgss parity checks run on them. They install
   bison/flex (needed by PG17+ tarballs), download the release tarball and its
@@ -1371,6 +1381,7 @@ pg_stat_statement_context/
 │   ├── context.c                   # execution frames, active-frame tracking
 │   └── store.c                     # shmem HTAB, buckets, eviction
 ├── test/{sql,expected,t}/          # pg_regress + TAP
+├── test/perl/PsscTest.pm           # shared TAP helpers (pgss detection)
 ├── fuzz/
 └── DESIGN.md
 ```

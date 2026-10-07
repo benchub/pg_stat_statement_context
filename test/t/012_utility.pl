@@ -27,6 +27,7 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use PsscTest;
 
 my $P = 'pg_stat_statement_context';
 
@@ -38,9 +39,7 @@ $P.extractors = 'sqlcommenter(position=any)'
 });
 $node->start;
 
-my $pkglibdir = $node->safe_psql('postgres',
-	q{SELECT setting FROM pg_config WHERE name = 'PKGLIBDIR'});
-my $have_pgss = -e "$pkglibdir/pg_stat_statements.so";
+my $have_pgss = defined pgss_suffix($node);
 note("pg_stat_statements available: " . ($have_pgss ? 'yes' : 'no'));
 if ($have_pgss)
 {
@@ -262,9 +261,18 @@ DEALLOCATE pd /*controller='dealloc'*/;
 }
 
 # ------------------------------------------------- CALL / DO children
+#
+# Whether a CALL/DO is a nesting level for its children follows pgss's
+# settings (see "nesting follows pgss's settings" below): always on PG17+; on
+# PG14-16 only when pgss tracks the utility. pgss's defaults here
+# (track_utility = on, track = top) do; without pgss loaded, this extension's
+# own settings stand in for them, so with track_utility = off the children
+# are top level.
 
 for my $tu ('off', 'on')
 {
+	my $nested = $pg17 || $have_pgss || $tu eq 'on';
+	my ($tl, $lvl, $how) = $nested ? ('f', 1, 'nested') : ('t', 0, 'top level');
 	reset_all();
 	my ($out, $err) = run(qq{
 SET $P.track = 'all';
@@ -280,13 +288,13 @@ SELECT step, tags, toplevel, nested, frame_nesting_level FROM seen ORDER BY step
 });
 	is($err, '', "track_utility = $tu: CALL/DO ran");
 	is_deeply([ split /\n/, $out ],
-		[ "1|{controller=call_$tu}|f|t|1", "2|{controller=do_$tu}|f|t|1" ],
-		"track_utility = $tu: CALL/DO children are nested and inherit the utility's tags");
-	is(rec_of($q{child}), "f|{controller,child_$tu}|1",
-		"track_utility = $tu: CALL child recorded nested with the CALL's tags");
-	is(rec_tagged("child_$tu"), ($tu eq 'on' ? "f|1\nt|1" : 'f|1'),
+		[ "1|{controller=call_$tu}|$tl|t|$lvl", "2|{controller=do_$tu}|$tl|t|$lvl" ],
+		"track_utility = $tu: CALL/DO children are $how and inherit the utility's tags");
+	is(rec_of($q{child}), "$tl|{controller,child_$tu}|1",
+		"track_utility = $tu: CALL child recorded $how with the CALL's tags");
+	is(rec_tagged("child_$tu"), ($tu eq 'on' ? "f|1\nt|1" : "$tl|1"),
 		"track_utility = $tu: CALL itself recorded only when tracking utilities");
-	is(rec_tagged("call_$tu"), ($tu eq 'on' ? "f|1\nt|1" : 'f|1'),
+	is(rec_tagged("call_$tu"), ($tu eq 'on' ? "f|1\nt|1" : "$tl|1"),
 		"track_utility = $tu: CALL p_tags likewise");
 }
 
@@ -418,16 +426,16 @@ CREATE TABLE u_rb(i int);
 ROLLBACK /*controller='rb'*/;
 BEGIN /*controller='begin'*/;
 COMMIT /*controller='commit'*/;
-SELECT step, tags FROM seen ORDER BY step, tags::text;
+SELECT step, tags FROM seen ORDER BY step, tags::text COLLATE "C";
 });
 	is($err, '', 'COMMIT/ROLLBACK in procedures ran');
 	is_deeply([ split /\n/, $out ], [
-		'2|{controller=tx}', '2|{controller=tx_outer}',
-		'3|{controller=tx}', '3|{controller=tx_outer}',
+		'2|{controller=tx_outer}', '2|{controller=tx}',
+		'3|{controller=tx_outer}', '3|{controller=tx}',
 		'10|{controller=tx_do}', '12|{controller=tx_do}',
-		'101|{controller=tx}', '101|{controller=tx_outer}',
-		'102|{controller=tx}', '102|{controller=tx_outer}',
-		'103|{controller=tx}', '103|{controller=tx_outer}',
+		'101|{controller=tx_outer}', '101|{controller=tx}',
+		'102|{controller=tx_outer}', '102|{controller=tx}',
+		'103|{controller=tx_outer}', '103|{controller=tx}',
 	], 'children keep the utility frame\'s tags across COMMIT and ROLLBACK');
 	is(sql(q{SELECT calls FROM rec WHERE tags = '{controller,tx}' AND toplevel}),
 		'1', 'CALL with COMMIT/ROLLBACK recorded once at top level');
