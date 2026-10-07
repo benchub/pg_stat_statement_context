@@ -52,6 +52,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | no | ready |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
+| 20261006-173342-1 | CI fuzz smoke: oracle misses `capped_tags`; failure artifacts unreadable | none | no | ready |
 | 20261006-143225-1 | Close the deadline-postponement race in the test module's sleep injection | 20261006-113156-1 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | blocked-on-deps |
@@ -185,6 +186,22 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 - 2026-10-06: Do option 2 (compact per-entry array, keeps §5.3 semantics) first; only if p99 is still over ~1.5× pgss, add option 1 (adaptive batch) and update §5.3.
 
 **Depends on:** 20261006-043919-1
+**Open questions:** none
+**Status:** ready
+
+### 20261006-173342-1: CI fuzz smoke: oracle misses `capped_tags`; failure artifacts unreadable
+
+**Description:** The first CI run (run 37535041023) failed the "Fuzz smoke" job for two reasons:
+
+1. `fuzz/sql/regex_fuzz.pl` checks that the `_extract()` result has exactly `@RESULT_KEYS`. Item 20261005-091225-32 added `capped_tags` to the result (`src/extract_fn.c`) without updating the oracle, so every call reports `result keys ...`. Add the key. The driver sets no `cardinality_cap*` GUCs (the default cap is 0, meaning none), so the oracle should also require `capped_tags = 0`, and treat a negative value as a negative counter. The `--self-test` should catch this kind of drift in future: for example, compare `@RESULT_KEYS` with the keys that `src/extract_fn.c` pushes.
+2. The "Upload artifacts" step failed with `EACCES` on `tmp/fuzz-sql/fail-round-1/server.log`, which the container wrote as another user. The upload steps in `.github/workflows/ci.yml` that collect files the Docker harness wrote to `tmp/` (fuzz-smoke, linux and linux-source) need to make those files readable first, for example with a `sudo chown -R` step on failure, or by having the harness write them readable.
+
+**Acceptance criteria:**
+- `perl fuzz/sql/regex_fuzz.pl --self-test` fails before the fix (it detects the key drift) and passes after.
+- `fuzz/sql/run.sh --pgdg --pg 18 -- --duration 30` passes.
+- The failure-upload steps of the Docker-based jobs can read what the harness wrote.
+
+**Depends on:** none
 **Open questions:** none
 **Status:** ready
 
