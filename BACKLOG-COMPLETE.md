@@ -1218,6 +1218,35 @@ Fix options: block SIGALRM around the snapshot and postponement, or expose deadl
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-33: Roadmap: exemplars for excluded high-cardinality keys
+
+**Description:** Store the most recent value of explicitly listed high-cardinality keys (for example `traceparent`) per entry, so users can jump from an aggregate to a real trace (§8 v1.x). The visibility rules from §6.11 apply.
+
+*Owner's note (2026-10-05):* the task is kept. An exemplar stores the most recent value of a high-cardinality key (e.g. `traceparent`) per entry.
+
+**Acceptance criteria:**
+- The exemplar column shows the latest value without adding new entries.
+- It is `NULL` for unprivileged roles viewing other roles' rows.
+- Only keys in the exemplar GUC are stored. Total exemplar memory never exceeds the configured cap.
+- The upgrade script is provided.
+
+**Depends on:** 20261005-091225-17, 20261005-091225-20
+**Decisions (2026-10-05):**
+- Exemplar keys come from an explicit list in a dedicated GUC (e.g. `pg_stat_statement_context.exemplar_keys`). The denylist (`exclude_tags`) does not double as the exemplar list. A key may need to be both denylisted (so it isn't grouped by) and listed as an exemplar.
+- Exemplar storage has a memory cap set by a config value (a postmaster-level GUC, since it sizes shared memory). Values that would exceed the cap are truncated or dropped (implementer's choice, documented and counted in `_info()`).
+
+**Decisions (implementation, 2026-10-07; DESIGN.md §4.1, §5.1, §6.11, §6.13, §7):**
+- GUCs: `exemplar_keys` (postmaster, default `''` = off and no memory, at most 8 keys of at most 63 bytes, no `*`, case-sensitive, duplicates ignored) and `exemplar_memory` (postmaster, kB, default 2MB). `max_tag_value_len` is not reused: exemplars are a separate budget.
+- Sizing: each entry gets `exemplar_memory / max_entries` bytes (rounded down to MAXALIGN), split evenly per key; a value may take that share minus a 2-byte length, at most 256 bytes. Total (`_info().exemplar_shmem_bytes`) ≤ `exemplar_memory`.
+- Overflow: **dropped**, not truncated (a truncated trace id is useless); the slot keeps its previous value; counted in `_info().exemplar_values_dropped`.
+- Capture: after the step-4 rename, before the step-5 allowlist/denylist, independently of it; per-extractor `keys` apply, normalize/truncation/caps don't. First occurrence in a statement wins (override > comments > footer > appname). Nested statements with `nested_tags = inherit` inherit the outer exemplars.
+- Storage: fixed per-entry slots after the counter ring, in exemplar_keys order; written under the entry spinlock with the call (no table-lock upgrade). Not saved across restarts; cleared by `_reset()`.
+- SQL: extension 1.1 adds `exemplars jsonb` as the last column of the SRF/`_last_bucket`/the three views and `exemplar_shmem_bytes`, `exemplar_value_bytes`, `exemplar_values_dropped` at the end of `_info()`, via `--1.0--1.1.sql` (drop and recreate, new `_1_1` C symbols; the 1.0 symbols stay). `exemplars` is `NULL` exactly when `tags` is.
+
+**Open questions:** none
+
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
