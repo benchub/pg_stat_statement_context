@@ -30,6 +30,11 @@ OBJS = \
 	src/cardcap.o
 PGFILEDESC = "pg_stat_statement_context - per-tag statement statistics from SQL comments"
 
+# The extension version, recorded in the stats file (src/store.c, DESIGN.md
+# §5.5): a file written by another version is discarded.
+PSSC_EXT_VERSION := $(shell sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" $(dir $(lastword $(MAKEFILE_LIST)))pg_stat_statement_context.control)
+PG_CPPFLAGS += -DPSSC_EXT_VERSION='"$(PSSC_EXT_VERSION)"'
+
 EXTENSION = pg_stat_statement_context
 DATA = sql/pg_stat_statement_context--1.0.sql
 

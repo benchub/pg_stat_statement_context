@@ -25,11 +25,18 @@
  */
 #include "postgres.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include "catalog/pg_control.h"
 #include "common/hashfn.h"
 #include "common/int.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "port/atomics.h"
+#include "port/pg_crc32c.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
@@ -39,8 +46,10 @@
 #include "utils/timestamp.h"
 
 #include "compat.h"
+#include "extract.h"
 #include "guc.h"
 #include "store.h"
+#include "tagset.h"
 
 #define PSSC_STORE_NAME			"pg_stat_statement_context"
 #define PSSC_STORE_HASH_NAME	"pg_stat_statement_context hash"
@@ -156,6 +165,9 @@ static void *info_scan_test_hook_arg = NULL;
 
 /* Testing aid: the next eviction pass in this backend gets no candidate buffer. */
 static bool debug_fail_next_eviction_alloc = false;
+
+static void store_shmem_shutdown(int code, Datum arg);
+static void store_load(void);
 
 #define ENTRY_HEADER_OFFSET(keysize) (keysize)
 #define ENTRY_SLOTS_OFFSET(keysize) \
@@ -416,6 +428,16 @@ store_shmem_startup(void)
 							   HASH_ELEM | HASH_FUNCTION | HASH_COMPARE);
 
 	LWLockRelease(AddinShmemInitLock);
+
+	/*
+	 * Persistence (§5.5), as pg_stat_statements: only the postmaster (or a
+	 * standalone backend) saves the store when it exits, and loads it when
+	 * it creates shared memory. No other process exists yet at the load.
+	 */
+	if (!IsUnderPostmaster)
+		on_shmem_exit(store_shmem_shutdown, (Datum) 0);
+	if (!found)
+		store_load();
 }
 
 void
@@ -1105,21 +1127,29 @@ pssc_store_foreach(PsscStoreVisitor fn, void *arg)
 	pfree(copy);
 }
 
-void
-pssc_store_reset(void)
+/* Removes every entry; the caller holds the exclusive lock. */
+static void
+store_clear_entries_locked(void)
 {
 	HASH_SEQ_STATUS seq;
 	void	   *entry;
 
-	if (store_state == NULL || store_htab == NULL)
-		return;
-
-	LWLockAcquire(store_state->lock, LW_EXCLUSIVE);
+	Assert(LWLockHeldByMeInMode(store_state->lock, LW_EXCLUSIVE));
 	hash_seq_init(&seq, store_htab);
 	/* key_hash() runs under the exclusive lock, so the mode is stable */
 	while ((entry = hash_seq_search(&seq)) != NULL)
 		hash_search(store_htab, entry, HASH_REMOVE, NULL);
 	store_state->entries = 0;	/* and so the eviction array is empty */
+}
+
+void
+pssc_store_reset(void)
+{
+	if (store_state == NULL || store_htab == NULL)
+		return;
+
+	LWLockAcquire(store_state->lock, LW_EXCLUSIVE);
+	store_clear_entries_locked();
 	store_state->dealloc = 0;
 	store_state->reclaimed_entries = 0;
 	store_state->evicted_entries = 0;
@@ -1560,4 +1590,648 @@ pssc_store_debug_advance_clock(int64 usec)
 	ereport(ERROR,
 			(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
 			 errmsg("pg_stat_statement_context debug clock value out of range")));
+}
+
+/* -------------------------------------------------------- persistence */
+
+/*
+ * Saving the store across clean restarts (DESIGN.md §5.5), after
+ * pg_stat_statements' pgss_shmem_shutdown() and pgss_shmem_startup().
+ *
+ * File layout (native byte order and alignment: the file is only read by
+ * the same build on the same machine; PG_MAJORVERSION_NUM and the format
+ * version guard the rest):
+ *	PsscDumpHeader
+ *	nentries times, in eviction array order [0, entries):
+ *		PsscDumpRecord, tags_len bytes of tags, bucket_count PsscSlot
+ *	pg_crc32c of everything above
+ * and nothing after it.
+ */
+#define PSSC_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_statement_context.stat"
+#define PSSC_DUMP_FILE_TMP	PSSC_DUMP_FILE ".tmp"
+#define PSSC_DUMP_MAGIC		0x50535343	/* "PSSC" */
+#define PSSC_DUMP_FORMAT	1			/* bump on any layout change */
+#define PSSC_DUMP_EXT_VERSION_LEN 20
+#define PSSC_CONTROL_FILE	"global/pg_control"
+
+#ifndef PSSC_EXT_VERSION
+#error "PSSC_EXT_VERSION must be defined (see Makefile)"
+#endif
+
+typedef struct PsscDumpHeader
+{
+	uint32		magic;
+	uint32		format;			/* PSSC_DUMP_FORMAT */
+	uint32		pg_major;		/* PG_MAJORVERSION_NUM */
+	char		ext_version[PSSC_DUMP_EXT_VERSION_LEN];	/* PSSC_EXT_VERSION */
+	int64		epoch;
+	int64		interval_us;
+	int32		bucket_count;
+	int32		max_entries;
+	int32		max_tagset_bytes;
+	int32		pad;
+	int64		current_bucket;
+	int64		nentries;
+	TimestampTz stats_reset;
+	int64		dealloc;
+	int64		reclaimed_entries;
+	int64		evicted_entries;
+	uint64		invalid_tags;
+	uint64		dropped_tags;
+	uint64		regex_compile_failures;
+	uint64		heuristic_scans;
+	uint64		capped_tags;
+	uint64		cap_table_full;
+	uint64		utility_missing_queryid;
+	uint64		dropped_records;
+} PsscDumpHeader;
+
+/* test/t/028_persist.pl patches these offsets */
+StaticAssertDecl(offsetof(PsscDumpHeader, format) == 4, "dump header layout");
+StaticAssertDecl(offsetof(PsscDumpHeader, pg_major) == 8, "dump header layout");
+StaticAssertDecl(offsetof(PsscDumpHeader, ext_version) == 12, "dump header layout");
+StaticAssertDecl(sizeof(PSSC_EXT_VERSION) <= PSSC_DUMP_EXT_VERSION_LEN,
+				 "extension version too long for the dump header");
+
+typedef struct PsscDumpRecord
+{
+	Oid			dbid;
+	Oid			userid;
+	int64		queryid;
+	int64		last_bucket;
+	int64		calls_total;
+	double		exec_time_total;
+	double		usage;
+	TimestampTz stats_since;
+	int32		encoding;
+	uint32		tags_hash;
+	uint16		tags_len;
+	uint8		toplevel;
+	uint8		pad[5];
+} PsscDumpRecord;
+
+/*
+ * Whether pg_control says the cluster shut down cleanly: every child has
+ * exited and the checkpointer wrote a shutdown checkpoint, so no process
+ * can be in the middle of an update of the store. An immediate shutdown
+ * also exits the postmaster with code 0, but its children were killed at
+ * any point (pg_control then still says "in production").
+ */
+static bool
+cluster_shut_down_cleanly(void)
+{
+	ControlFileData cf;
+	pg_crc32c	crc;
+	int			fd;
+	ssize_t		r;
+
+	/*
+	 * Read directly, not with get_controlfile(): this runs in proc_exit(),
+	 * where an ERROR would be promoted to FATAL.
+	 */
+	fd = open(PSSC_CONTROL_FILE, O_RDONLY | PG_BINARY, 0);
+	if (fd < 0)
+		return false;
+	r = read(fd, &cf, sizeof(cf));
+	close(fd);
+	if (r != (ssize_t) sizeof(cf) || cf.pg_control_version != PG_CONTROL_VERSION)
+		return false;
+	INIT_CRC32C(crc);
+	COMP_CRC32C(crc, &cf, offsetof(ControlFileData, crc));
+	FIN_CRC32C(crc);
+	return EQ_CRC32C(crc, cf.crc) &&
+		(cf.state == DB_SHUTDOWNED || cf.state == DB_SHUTDOWNED_IN_RECOVERY);
+}
+
+static bool
+dump_write(FILE *file, const void *buf, size_t len, pg_crc32c *crc)
+{
+	if (len == 0)
+		return true;
+	COMP_CRC32C(*crc, buf, len);
+	return fwrite(buf, len, 1, file) == 1;
+}
+
+/*
+ * on_shmem_exit callback of the postmaster: writes the store to
+ * PSSC_DUMP_FILE_TMP and renames it over PSSC_DUMP_FILE. It runs after
+ * every other process has exited, so it reads the store without any lock.
+ */
+static void
+store_shmem_shutdown(int code, Datum arg)
+{
+	PsscDumpHeader hdr;
+	FILE	   *file = NULL;
+	pg_crc32c	crc;
+	int64		n;
+
+	if (store_state == NULL || store_htab == NULL || !pssc_save)
+		return;
+	if (code != 0 || !cluster_shut_down_cleanly())
+	{
+		ereport(LOG,
+				(errmsg("pg_stat_statement_context: not saving statistics: the server did not shut down cleanly")));
+		return;
+	}
+
+	n = store_state->entries;
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.magic = PSSC_DUMP_MAGIC;
+	hdr.format = PSSC_DUMP_FORMAT;
+	hdr.pg_major = PG_MAJORVERSION_NUM;
+	strlcpy(hdr.ext_version, PSSC_EXT_VERSION, sizeof(hdr.ext_version));
+	hdr.epoch = store_state->epoch;
+	hdr.interval_us = store_state->interval_us;
+	hdr.bucket_count = store_state->bucket_count;
+	hdr.max_entries = store_state->max_entries;
+	hdr.max_tagset_bytes = store_state->max_tagset_bytes;
+	hdr.current_bucket = watermark_read();
+	hdr.nentries = n;
+	hdr.stats_reset = store_state->stats_reset;
+	hdr.dealloc = store_state->dealloc;
+	hdr.reclaimed_entries = store_state->reclaimed_entries;
+	hdr.evicted_entries = store_state->evicted_entries;
+	hdr.invalid_tags = pg_atomic_read_u64(&store_state->invalid_tags);
+	hdr.dropped_tags = pg_atomic_read_u64(&store_state->dropped_tags);
+	hdr.regex_compile_failures = pg_atomic_read_u64(&store_state->regex_compile_failures);
+	hdr.heuristic_scans = pg_atomic_read_u64(&store_state->heuristic_scans);
+	hdr.capped_tags = pg_atomic_read_u64(&store_state->capped_tags);
+	hdr.cap_table_full = pg_atomic_read_u64(&store_state->cap_table_full);
+	hdr.utility_missing_queryid = pg_atomic_read_u64(&store_state->utility_missing_queryid);
+	hdr.dropped_records = pg_atomic_read_u64(&store_state->dropped_records);
+
+	file = AllocateFile(PSSC_DUMP_FILE_TMP, PG_BINARY_W);
+	if (file == NULL)
+		goto error;
+
+	INIT_CRC32C(crc);
+	if (!dump_write(file, &hdr, sizeof(hdr), &crc))
+		goto error;
+	for (int64 i = 0; i < n; i++)
+	{
+		PsscEvictSlot *es = &store_state->evict_slots[i];
+		const PsscKey *key = (const PsscKey *) es->entry;
+		PsscEntryHeader *eh = entry_header(es->entry);
+		PsscDumpRecord rec;
+
+		memset(&rec, 0, sizeof(rec));
+		rec.dbid = key->dbid;
+		rec.userid = key->userid;
+		rec.queryid = key->queryid;
+		rec.last_bucket = eh->last_bucket;
+		rec.calls_total = eh->calls_total;
+		rec.exec_time_total = eh->exec_time_total;
+		rec.usage = es->usage;
+		rec.stats_since = eh->stats_since;
+		rec.encoding = eh->encoding;
+		rec.tags_hash = key->tags_hash;
+		rec.tags_len = key->tags_len;
+		rec.toplevel = key->toplevel ? 1 : 0;
+		if (!dump_write(file, &rec, sizeof(rec), &crc) ||
+			!dump_write(file, key->tags, key->tags_len, &crc) ||
+			!dump_write(file, entry_slots(es->entry),
+						sizeof(PsscSlot) * store_state->bucket_count, &crc))
+			goto error;
+	}
+	FIN_CRC32C(crc);
+	if (fwrite(&crc, sizeof(crc), 1, file) != 1)
+		goto error;
+	if (FreeFile(file))
+	{
+		file = NULL;
+		goto error;
+	}
+	file = NULL;
+
+	/* durable, and atomic: a reader sees the old file or the new one */
+	if (durable_rename(PSSC_DUMP_FILE_TMP, PSSC_DUMP_FILE, LOG) != 0)
+	{
+		unlink(PSSC_DUMP_FILE_TMP);
+		return;
+	}
+	ereport(LOG,
+			(errmsg("pg_stat_statement_context: saved " INT64_FORMAT " entries to \"%s\"",
+					n, PSSC_DUMP_FILE)));
+	return;
+
+error:
+	ereport(LOG,
+			(errcode_for_file_access(),
+			 errmsg("could not write file \"%s\": %m", PSSC_DUMP_FILE_TMP)));
+	if (file)
+		FreeFile(file);
+	unlink(PSSC_DUMP_FILE_TMP);
+}
+
+/* One saved entry, as read by the first pass of store_load(). */
+typedef struct PsscLoadRecord
+{
+	PsscDumpRecord rec;
+	char		fate;			/* 'k'ept, 'd'ead, 's'kipped, 'e'victed */
+} PsscLoadRecord;
+
+typedef enum
+{
+	LOAD_OK,
+	LOAD_EOF,					/* short read: truncated */
+	LOAD_IO,					/* read error (errno set) */
+	LOAD_INVALID,				/* the data fails a check */
+	LOAD_NOMEM,					/* out of memory */
+} PsscLoadStatus;
+
+/*
+ * Memory for the load, sized from the file: never an ERROR (which would be
+ * FATAL for the postmaster), so the file is discarded instead.
+ */
+static void *
+load_alloc(Size size)
+{
+	return MemoryContextAllocExtended(CurrentMemoryContext, size,
+									  MCXT_ALLOC_HUGE | MCXT_ALLOC_NO_OOM);
+}
+
+static PsscLoadStatus
+load_read(FILE *file, void *buf, size_t len, pg_crc32c *crc)
+{
+	if (len == 0)
+		return LOAD_OK;
+	if (fread(buf, len, 1, file) != 1)
+		return ferror(file) ? LOAD_IO : LOAD_EOF;
+	if (crc != NULL)
+		COMP_CRC32C(*crc, buf, len);
+	return LOAD_OK;
+}
+
+/*
+ * Reads one record with its tags and slots, and checks what a well-formed
+ * entry satisfies (src/counters.h's ring invariants against the saved
+ * watermark, a tag set "k\0v\0..." that fits the saved max_tagset_bytes).
+ */
+static PsscLoadStatus
+load_record(FILE *file, const PsscDumpHeader *hdr, PsscDumpRecord *rec,
+			char *tags, PsscSlot *slots, pg_crc32c *crc)
+{
+	PsscLoadStatus st;
+	size_t		off = 0;
+	PsscTagView tag;
+	int			bad;
+
+	if ((st = load_read(file, rec, sizeof(*rec), crc)) != LOAD_OK)
+		return st;
+	if (rec->tags_len > hdr->max_tagset_bytes || rec->toplevel > 1 ||
+		!PG_VALID_BE_ENCODING(rec->encoding) ||
+		rec->last_bucket == PSSC_BUCKET_NONE || rec->calls_total < 1)
+		return LOAD_INVALID;
+	if ((st = load_read(file, tags, rec->tags_len, crc)) != LOAD_OK ||
+		(st = load_read(file, slots, sizeof(PsscSlot) * hdr->bucket_count,
+						crc)) != LOAD_OK)
+		return st;
+	/* well-formed tags (a null value is key \0 \0 \0) up to the end */
+	while (off < rec->tags_len && pssc_tagset_next(tags, rec->tags_len, &off, &tag))
+		;
+	if (off != rec->tags_len)
+		return LOAD_INVALID;
+	if (pssc_ring_check(slots, hdr->bucket_count, rec->last_bucket,
+						hdr->current_bucket, &bad) != NULL)
+		return LOAD_INVALID;
+	return LOAD_OK;
+}
+
+/*
+ * Inserts a saved entry into the table and appends its slot to the
+ * eviction array, as entry_init() and entry_accum() would have left it;
+ * slots that are no longer live at current are cleared. The caller holds
+ * the exclusive lock and has room. Returns false on a duplicate key.
+ */
+static bool
+load_insert(PsscKey *key, const PsscDumpRecord *rec, const char *tags,
+			const PsscSlot *slots, int64 current)
+{
+	void	   *entry;
+	bool		found;
+	PsscEntryHeader *eh;
+	PsscSlot   *es_slots;
+	PsscEvictSlot *es;
+	int			count = store_state->bucket_count;
+
+	Assert(LWLockHeldByMeInMode(store_state->lock, LW_EXCLUSIVE));
+	if (!pssc_store_build_key(key, rec->dbid, rec->userid, rec->queryid,
+							  rec->toplevel != 0, tags, rec->tags_len,
+							  rec->tags_hash))
+		return false;
+	entry = hash_search(store_htab, key, HASH_ENTER_NULL, &found);
+	if (entry == NULL || found)
+		return false;
+	eh = entry_header(entry);
+	es_slots = entry_slots(entry);
+	SpinLockInit(&eh->mutex);
+	eh->encoding = rec->encoding;
+	eh->evict_index = (int) store_state->entries;
+	eh->last_bucket = rec->last_bucket;
+	eh->calls_total = rec->calls_total;
+	eh->exec_time_total = rec->exec_time_total;
+	eh->stats_since = rec->stats_since;
+	for (int i = 0; i < count; i++)
+	{
+		if (slots[i].bucket_id != PSSC_BUCKET_NONE &&
+			pssc_bucket_is_live(slots[i].bucket_id, current, count))
+			es_slots[i] = slots[i];
+		else
+			pssc_slot_init(&es_slots[i]);
+	}
+	es = &store_state->evict_slots[eh->evict_index];
+	es->last_bucket = rec->last_bucket;
+	es->usage = rec->usage;
+	es->entry = entry;
+	store_state->entries++;
+	return true;
+}
+
+/*
+ * Loads PSSC_DUMP_FILE into the empty store (in the postmaster, before any
+ * other process exists) and unlinks it, whatever the outcome: a crash
+ * before the next clean shutdown must not replay it. A file that cannot be
+ * used is discarded with a LOG message; startup never fails because of it.
+ *
+ * Two passes: the first reads and checks every record (and the checksum),
+ * and decides which ones to keep; the second inserts those.
+ *	- a different format, PostgreSQL major or extension version, or a
+ *	  different bucket_interval or bucket_count: the file is discarded;
+ *	- the saved epoch is kept, so the saved bucket ids keep their meaning,
+ *	  and current_bucket becomes max(saved, the clock's bucket);
+ *	- entries dead at that watermark are dropped (reclaimed_entries) and
+ *	  slots that expired are cleared;
+ *	- entries whose tag set exceeds the current max_tagset_bytes are skipped;
+ *	- if more live entries remain than the current max_entries, the excess
+ *	  is evicted in the §5.3 order (last_bucket, usage, array order), as one
+ *	  eviction pass (dealloc, evicted_entries).
+ */
+static void
+store_load(void)
+{
+	FILE	   *file = NULL;
+	PsscDumpHeader hdr;
+	PsscLoadStatus st = LOAD_OK;
+	MemoryContext cxt;
+	MemoryContext oldcxt;
+	PsscLoadRecord *recs = NULL;
+	int64		nalloc;
+	char	   *tags;
+	PsscSlot   *slots = NULL;
+	PsscKey    *key;
+	pg_crc32c	crc;
+	pg_crc32c	saved_crc;
+	int64		current;
+	int64		ndead = 0;
+	int64		nskipped = 0;
+	int64		nlive = 0;
+	int64		nevicted = 0;
+	int64		loaded = 0;
+
+	if (!pssc_save)
+	{
+		if (unlink(PSSC_DUMP_FILE) == 0)
+			ereport(LOG,
+					(errmsg("pg_stat_statement_context: discarding saved statistics in \"%s\": pg_stat_statement_context.save is off",
+							PSSC_DUMP_FILE)));
+		return;
+	}
+
+	file = AllocateFile(PSSC_DUMP_FILE, PG_BINARY_R);
+	if (file == NULL)
+	{
+		if (errno != ENOENT)
+		{
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not read file \"%s\": %m", PSSC_DUMP_FILE)));
+			unlink(PSSC_DUMP_FILE);
+		}
+		return;
+	}
+
+	cxt = AllocSetContextCreate(CurrentMemoryContext,
+								"pg_stat_statement_context load",
+								ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(cxt);
+	tags = palloc(PSSC_TAGSET_BYTES_MAX);
+	key = palloc(store_keysize);
+
+	INIT_CRC32C(crc);
+	if ((st = load_read(file, &hdr, sizeof(hdr), &crc)) != LOAD_OK)
+		goto fail;
+	if (hdr.magic != PSSC_DUMP_MAGIC)
+	{
+		st = LOAD_INVALID;
+		goto fail;
+	}
+	hdr.ext_version[PSSC_DUMP_EXT_VERSION_LEN - 1] = '\0';
+	if (hdr.format != PSSC_DUMP_FORMAT || hdr.pg_major != PG_MAJORVERSION_NUM ||
+		strcmp(hdr.ext_version, PSSC_EXT_VERSION) != 0)
+	{
+		ereport(LOG,
+				(errmsg("pg_stat_statement_context: discarding saved statistics in \"%s\": written by a different version",
+						PSSC_DUMP_FILE),
+				 errdetail("The file has format %u, PostgreSQL %u, extension version \"%s\"; expected format %d, PostgreSQL %d, extension version \"%s\".",
+						   hdr.format, hdr.pg_major, hdr.ext_version,
+						   PSSC_DUMP_FORMAT, PG_MAJORVERSION_NUM, PSSC_EXT_VERSION)));
+		goto discard;
+	}
+	if (hdr.bucket_count < 1 || hdr.interval_us <= 0 || hdr.max_entries < 1 ||
+		hdr.max_tagset_bytes < 0 || hdr.max_tagset_bytes > PSSC_TAGSET_BYTES_MAX ||
+		hdr.nentries < 0 || hdr.nentries > hdr.max_entries ||
+		!IS_VALID_TIMESTAMP(hdr.epoch) || hdr.current_bucket == PSSC_BUCKET_NONE)
+	{
+		st = LOAD_INVALID;
+		goto fail;
+	}
+	if (hdr.bucket_count != store_state->bucket_count ||
+		hdr.interval_us != store_state->interval_us)
+	{
+		ereport(LOG,
+				(errmsg("pg_stat_statement_context: discarding saved statistics in \"%s\": bucket_interval or bucket_count changed",
+						PSSC_DUMP_FILE),
+				 errdetail("Saved with bucket_interval = " INT64_FORMAT " s and bucket_count = %d, now " INT64_FORMAT " s and %d.",
+						   hdr.interval_us / USECS_PER_SEC, hdr.bucket_count,
+						   store_state->interval_us / USECS_PER_SEC,
+						   store_state->bucket_count)));
+		goto discard;
+	}
+	/* the same bucket_count as the store's, so within its GUC's bounds */
+	slots = palloc(sizeof(PsscSlot) * hdr.bucket_count);
+
+	/*
+	 * Pass 1: read and check everything. The array grows as records arrive,
+	 * so a corrupt nentries cannot make us allocate more than the file holds.
+	 */
+	nalloc = Max(Min(hdr.nentries, 1024), 1);
+	recs = load_alloc(sizeof(PsscLoadRecord) * nalloc);
+	if (recs == NULL)
+	{
+		st = LOAD_NOMEM;
+		goto fail;
+	}
+	for (int64 i = 0; i < hdr.nentries; i++)
+	{
+		if (i == nalloc)
+		{
+			PsscLoadRecord *grown;
+
+			nalloc = Min(nalloc * 2, hdr.nentries);
+			grown = load_alloc(sizeof(PsscLoadRecord) * nalloc);
+			if (grown == NULL)
+			{
+				st = LOAD_NOMEM;
+				goto fail;
+			}
+			memcpy(grown, recs, sizeof(PsscLoadRecord) * i);
+			pfree(recs);
+			recs = grown;
+		}
+		if ((st = load_record(file, &hdr, &recs[i].rec, tags, slots, &crc)) != LOAD_OK)
+			goto fail;
+	}
+	FIN_CRC32C(crc);
+	if ((st = load_read(file, &saved_crc, sizeof(saved_crc), NULL)) != LOAD_OK)
+		goto fail;
+	if (!EQ_CRC32C(crc, saved_crc) || fgetc(file) != EOF)
+	{
+		st = LOAD_INVALID;
+		goto fail;
+	}
+
+	/* the watermark never goes back, and time has passed */
+	current = Max(hdr.current_bucket,
+				  pssc_bucket_for_time(GetCurrentTimestamp(), hdr.epoch, hdr.interval_us));
+	for (int64 i = 0; i < hdr.nentries; i++)
+	{
+		PsscLoadRecord *r = &recs[i];
+
+		if (pssc_bucket_entry_is_dead(r->rec.last_bucket, current, hdr.bucket_count))
+		{
+			r->fate = 'd';
+			ndead++;
+		}
+		else if (r->rec.tags_len > store_state->max_tagset_bytes)
+		{
+			r->fate = 's';
+			nskipped++;
+		}
+		else
+		{
+			r->fate = 'k';
+			nlive++;
+		}
+	}
+	if (nlive > store_state->max_entries)
+	{
+		PsscEvictCandidate *cands = load_alloc(sizeof(PsscEvictCandidate) * nlive);
+		int64		c = 0;
+
+		if (cands == NULL)
+		{
+			st = LOAD_NOMEM;
+			goto fail;
+		}
+
+		/* the order of an eviction pass (§5.3) over the array as saved */
+		for (int64 i = 0; i < hdr.nentries; i++)
+		{
+			if (recs[i].fate != 'k')
+				continue;
+			cands[c].last_bucket = recs[i].rec.last_bucket;
+			cands[c].usage = recs[i].rec.usage;
+			cands[c].entry = &recs[i];
+			cands[c].seq = (uint64) c;
+			c++;
+		}
+		pssc_evict_sort(cands, (size_t) nlive);
+		nevicted = nlive - store_state->max_entries;
+		for (int64 j = 0; j < nevicted; j++)
+			((PsscLoadRecord *) cands[j].entry)->fate = 'e';
+	}
+
+	/* pass 2: insert the kept entries, in the saved order */
+	if (fseeko(file, (off_t) sizeof(hdr), SEEK_SET) != 0)
+	{
+		st = LOAD_IO;
+		goto fail;
+	}
+	LWLockAcquire(store_state->lock, LW_EXCLUSIVE);
+	for (int64 i = 0; i < hdr.nentries; i++)
+	{
+		PsscDumpRecord rec;
+
+		/* the file was checked; only the postmaster could have changed it */
+		st = load_record(file, &hdr, &rec, tags, slots, NULL);
+		if (st == LOAD_OK && memcmp(&rec, &recs[i].rec, sizeof(rec)) != 0)
+			st = LOAD_INVALID;
+		if (st == LOAD_OK && recs[i].fate == 'k' &&
+			!load_insert(key, &rec, tags, slots, current))
+			st = LOAD_INVALID;	/* a duplicate key */
+		if (st != LOAD_OK)
+		{
+			store_clear_entries_locked();
+			LWLockRelease(store_state->lock);
+			goto fail;
+		}
+	}
+	loaded = store_state->entries;
+
+	store_state->epoch = hdr.epoch;
+	pg_atomic_write_u64(&store_state->current_bucket, (uint64) current);
+	store_state->stats_reset = hdr.stats_reset;
+	store_state->dealloc = hdr.dealloc + (nevicted > 0 ? 1 : 0);
+	store_state->reclaimed_entries = hdr.reclaimed_entries + ndead;
+	store_state->evicted_entries = hdr.evicted_entries + nevicted;
+	pg_atomic_write_u64(&store_state->invalid_tags, hdr.invalid_tags);
+	pg_atomic_write_u64(&store_state->dropped_tags, hdr.dropped_tags);
+	pg_atomic_write_u64(&store_state->regex_compile_failures, hdr.regex_compile_failures);
+	pg_atomic_write_u64(&store_state->heuristic_scans, hdr.heuristic_scans);
+	pg_atomic_write_u64(&store_state->capped_tags, hdr.capped_tags);
+	pg_atomic_write_u64(&store_state->cap_table_full, hdr.cap_table_full);
+	pg_atomic_write_u64(&store_state->utility_missing_queryid, hdr.utility_missing_queryid);
+	pg_atomic_write_u64(&store_state->dropped_records, hdr.dropped_records);
+#ifdef USE_ASSERT_CHECKING
+	assert_evict_slots();
+#endif
+	LWLockRelease(store_state->lock);
+
+	if (nskipped > 0)
+		ereport(LOG,
+				(errmsg("pg_stat_statement_context: skipped " INT64_FORMAT " saved entries whose tag set exceeds max_tagset_bytes (%d)",
+						nskipped, store_state->max_tagset_bytes)));
+	if (nevicted > 0)
+		ereport(LOG,
+				(errmsg("pg_stat_statement_context: max_entries shrank from %d to %d: evicted " INT64_FORMAT " saved entries",
+						hdr.max_entries, store_state->max_entries, nevicted)));
+	ereport(LOG,
+			(errmsg("pg_stat_statement_context: loaded " INT64_FORMAT " of " INT64_FORMAT " saved entries from \"%s\"",
+					loaded, hdr.nentries, PSSC_DUMP_FILE),
+			 errdetail(INT64_FORMAT " expired, " INT64_FORMAT " skipped, " INT64_FORMAT " evicted.",
+					   ndead, nskipped, nevicted)));
+	goto discard;
+
+fail:
+	if (st == LOAD_IO)
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not read file \"%s\": %m", PSSC_DUMP_FILE)));
+	else if (st == LOAD_NOMEM)
+		ereport(LOG,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("pg_stat_statement_context: discarding saved statistics in \"%s\": out of memory",
+						PSSC_DUMP_FILE)));
+	else
+		ereport(LOG,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("ignoring invalid data in file \"%s\"", PSSC_DUMP_FILE),
+				 errdetail("%s", st == LOAD_EOF ? "The file is truncated." :
+						   "The file fails a consistency check.")));
+
+discard:
+	FreeFile(file);
+	unlink(PSSC_DUMP_FILE);
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(cxt);
 }

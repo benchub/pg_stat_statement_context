@@ -22,6 +22,11 @@
  * inserting (and resetting) takes the exclusive lock. Tag extraction and
  * key building happen before any lock is taken.
  *
+ * Persistence (§5.5): with pg_stat_statement_context.save on, the
+ * postmaster saves the store to pg_stat/pg_stat_statement_context.stat when
+ * it exits after a clean shutdown, and loads (then unlinks) it when it
+ * creates the store; see the persistence section of store.c.
+ *
  * Eviction (§5.3): a record whose key is new while the table holds
  * max_entries entries first runs an eviction pass under the exclusive lock
  * (store_evict() in store.c), which scans the compact eviction array, not

@@ -19,8 +19,9 @@
 #     rejected and both an existing and a new backend keep recording with
 #     the old config; a good change makes an existing backend recompile its
 #     regex.
-#   - Restarts: no persistence in v1, so the store, its counters, the bucket
-#     watermark and the debug clock start fresh; resizing through the
+#   - Restarts that change bucket_interval and bucket_count discard the
+#     saved store (DESIGN.md §5.5; test/t/028_persist.pl), so the store, its
+#     counters, the bucket watermark and the debug clock start fresh; resizing through the
 #     postmaster GUCs (max_entries, bucket_count, bucket_interval,
 #     max_tags, max_tagset_bytes) takes effect for recording.
 #   - A forced hash collision (every key in one dynahash chain) followed by
@@ -321,7 +322,7 @@ sub keys_of
 		'restart: new interval and ring size; fresh watermark; the pinned debug clock is gone');
 	my $i = info();
 	is("$i->{entries} $i->{max_entries} $i->{buckets} $i->{oldest_bucket}", '0 100 2 NULL',
-		'restart: the store starts empty with the new sizes (no persistence in v1)');
+		'restart: the store starts empty with the new sizes (saved store discarded)');
 	is(join(' ', @$i{qw(dealloc evicted_entries invalid_tags dropped_tags heuristic_scans
 		  regex_compile_failures utility_missing_queryid)}), '0 0 0 0 0 0 0',
 		'restart: every counter starts at zero');

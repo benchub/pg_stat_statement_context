@@ -257,6 +257,7 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.max_tagset_bytes` | `512` | postmaster | Hard cap on the serialized tag set, which is part of the hash key (§5.1). Tags are kept greedily in priority order (allowlist order, or sorted keys for `'*'`); a tag that doesn't fit is dropped and counted, and smaller lower-priority tags may still be kept (§6.11). |
 | `pg_stat_statement_context.reclaim_worker` | `off` | postmaster | Start the background worker that reclaims dead entries on idle systems (§5.3, item 20261005-091225-34). Off: no worker is registered. |
 | `pg_stat_statement_context.reclaim_worker_interval` | `10s` | sighup | How often the reclaim worker wakes up (100 ms – 1 day, unit ms). |
+| `pg_stat_statement_context.save` | `on` | sighup | Save the store at a clean shutdown and load it at the next start (§5.5, item 20261005-091225-35), as `pg_stat_statements.save` (same default and context). Off: nothing is saved, and a saved file found at startup is discarded. |
 | `pg_stat_statement_context.scan_window` | `2kB` | sighup | Max bytes from the head/tail searched for comments (see §6.2). |
 | `pg_stat_statement_context.extractors` | `'sqlcommenter, marginalia'` | sighup | Extractor DSL (§4.2). |
 | `pg_stat_statement_context.tags` | `'action, controller, job'` | sighup | Allowlist of tag keys to keep, applied after `rename`. Tags not listed are discarded. `'*'` keeps all tags (not recommended, see §6.1). |
@@ -607,7 +608,9 @@ sizing rule.
   so it never decreases (decided 2026-10-05, item -14). Advancing it touches no
   entries, because each entry's ring rolls over lazily (below). The epoch is the
   shared-memory init time rounded down to a multiple of `bucket_interval` since
-  2000-01-01, so bucket boundaries fall on wall-clock multiples.
+  2000-01-01, so bucket boundaries fall on wall-clock multiples. When a saved
+  store is loaded at startup (§5.5), the saved epoch is kept instead, and
+  `current_bucket` resumes at max(saved, clock bucket).
 - Writers, once they hold the table lock (shared fast path or exclusive
   insert), re-read the clock and raise `current_bucket` to
   `max(current_bucket, clock bucket, computed id)`. The call is written to
@@ -747,6 +750,91 @@ than assumed (§9):
   only per-interval exclusive acquisition is the single header advance at each
   bucket boundary.
 - Tag extraction and hashing happen **before** any lock is taken.
+
+### 5.5 Persistence across clean restarts
+
+Done in item 20261005-091225-35, after `pg_stat_statements`
+(`pgss_shmem_shutdown()` / `pgss_shmem_startup()`). Controlled by
+`pg_stat_statement_context.save` (§4.1; `on`, `sighup`, as
+`pg_stat_statements.save`).
+
+- **File:** `$PGDATA/pg_stat/pg_stat_statement_context.stat`
+  (`PGSTAT_STAT_PERMANENT_DIRECTORY`, like pgss's file). It is written to
+  `<file>.tmp` with `AllocateFile()`, then renamed with `durable_rename()`, so
+  a reader sees the old file or the complete new one.
+- **Who saves, and when:** as in pgss, the callback is registered with
+  `on_shmem_exit()` only when `!IsUnderPostmaster`: by the **postmaster** (or a
+  standalone backend), not by every backend. It saves only when (a) the exit
+  code is 0, (b) `save` is on, and (c) `global/pg_control` (read directly, with
+  its CRC checked, because an ERROR inside `proc_exit()` would become FATAL)
+  says `DB_SHUTDOWNED` or `DB_SHUTDOWNED_IN_RECOVERY`. When the postmaster
+  exits after a smart or fast shutdown, every child has already exited and
+  the checkpointer has written the shutdown checkpoint. No other process is
+  attached to shared memory, so the store can no longer change, and it is
+  read without locks. Condition (c) is stricter than pgss: an **immediate**
+  shutdown also exits the postmaster with code 0, but its children were
+  `SIGQUIT`ed at arbitrary points, so the store may be torn. In that case
+  `pg_control` still says "in production", and nothing is saved (LOG "not
+  saving statistics: the server did not shut down cleanly"). The same LOG is
+  emitted for a crash-restart cycle (`shmem_exit(1)`).
+- **Format** (native byte order, since the same build reads it):
+  1. A header: magic `PSSC`, a binary format version (`PSSC_DUMP_FORMAT`,
+     bumped on any layout change, independent of the SQL version),
+     `PG_MAJORVERSION_NUM`, and the extension version (`default_version`,
+     injected by the Makefile).
+  2. The settings that shape the data: `epoch`, `interval_us`, `bucket_count`,
+     `max_entries`, `max_tagset_bytes`.
+  3. The state: `current_bucket`, the entry count, `stats_reset`, `dealloc`,
+     `reclaimed_entries`, `evicted_entries`, and the eight diagnostic counters.
+  4. One record per entry, in compact-eviction-array order. Each record holds
+     the key fields (including the stored `tags_hash`), `last_bucket`, usage,
+     the monotonic totals, `stats_since`, `encoding`, the tag bytes, and the
+     whole ring.
+  5. A CRC-32C over everything, and then nothing (trailing bytes are invalid).
+- **Load:** in `shmem_startup_hook`, when the postmaster creates the store,
+  before any other process exists. Like pgss, the file is **unlinked whatever
+  the outcome**, so a crash before the next clean shutdown cannot replay it.
+  The server never fails to start because of the file:
+  - **save is off:** the file is discarded (LOG).
+  - **Missing file:** start empty, silently.
+  - **Unreadable, bad magic, truncated, failed CRC, a malformed record**
+    (ring invariants of §5.2 against the saved watermark, the tag-set shape,
+    the encoding), **duplicate keys, trailing bytes:** LOG "ignoring invalid
+    data" (or "could not read file"), and start empty.
+  - **A different format, PostgreSQL major, or extension version:** LOG
+    "discarding ... written by a different version", and start empty.
+  - **A different `bucket_interval` or `bucket_count`:** LOG "discarding ...
+    bucket_interval or bucket_count changed", and start empty. Bucket ids
+    would mean other times, and pgss has no bucket analogue.
+  - **Out of memory:** loading reads the file twice (validate, then insert)
+    and keeps one fixed-size record per saved entry plus a sort array, so
+    its memory grows with the file's entry count. Every such allocation uses
+    `MCXT_ALLOC_HUGE | MCXT_ALLOC_NO_OOM` (an ERROR here would be FATAL in the
+    postmaster) and grows only as records are actually read. On failure:
+    LOG "discarding ... out of memory", and start empty.
+  - **Otherwise, load.** The saved `epoch` is kept, so the saved bucket ids
+    keep their meaning. `current_bucket` becomes max(the saved watermark, the
+    clock's bucket at that epoch); it is never loaded lower, and time has
+    passed. Entries that are dead at that watermark (§5.3) are dropped and
+    counted in `reclaimed_entries`. Expired slots of the other entries are
+    cleared.
+  - **Entries whose tag set exceeds the current `max_tagset_bytes`** (it may
+    have shrunk) are skipped, with one LOG line giving the count.
+  - **If more live entries remain than the current `max_entries`** (it
+    shrank), the excess is evicted in the §5.3 order: `last_bucket`, then
+    usage, then array order, with no usage decay. This counts as one eviction
+    pass (`dealloc` +1, `evicted_entries` += the excess) and is logged. A
+    larger `max_entries` loads everything.
+  - The kept entries are inserted in their saved order, so the compact
+    eviction array keeps its order, and the header counters, `stats_reset`,
+    and usage are restored. A LOG line summarizes the result ("loaded N of M
+    saved entries", with the expired, skipped, and evicted counts).
+- **Not saved:**
+  - the cardinality-cap tracking table (§6.1), so values seen before the
+    restart do not count against a cap after it;
+  - the debug clock and the collision mode (testing aids, which start from
+    their defaults);
+  - `bucket_advances` (a diagnostic, which restarts at 0).
 
 ## 6. Gotchas and mitigations
 
@@ -1295,12 +1383,15 @@ matches this extension's minimum supported version.
   `reclaim_worker` (postmaster, default `off`) and `reclaim_worker_interval`.
   It is not needed for correctness, since readers filter expired slots
   (§5.2).
-- **Persist stats across clean restarts** (dump/load like
-  `pg_stat_statements.save`), following pgss's lead (decided 2026-10-05): the
-  saved file is discarded on a file-format or extension-version mismatch; if
-  `max_entries` shrank, load what fits and evict the rest (§5.3); if
-  `bucket_interval` or `bucket_count` changed, discard the file (pgss has no
-  bucket analogue). Slots that expired during the downtime are dropped.
+- ~~**Persist stats across clean restarts** (dump/load like
+  `pg_stat_statements.save`)~~. Done (item 20261005-091225-35, 2026-10-07;
+  §4.1, §5.5). It follows pgss's lead (decided 2026-10-05):
+  - the saved file is discarded on a file-format or extension-version
+    mismatch;
+  - if `max_entries` shrank, what fits is loaded and the rest is evicted
+    (§5.3);
+  - if `bucket_interval` or `bucket_count` changed, the file is discarded;
+  - slots that expired during the downtime are dropped.
 
 **v2 — more context sources**
 - **`tags_override`:** context from a session or transaction GUC, e.g.
@@ -1423,6 +1514,15 @@ matches this extension's minimum supported version.
     `reclaimed_entries` grows, `dealloc` and survivors' usage unchanged),
     reloads its interval on SIGHUP, and with the default `off` no worker
     process exists and dead entries wait for an insert into a full table
+  - persistence (`028_persist.pl`, §5.5): a fast restart keeps the entries,
+    rings, usage, eviction-array order, counters, `stats_reset`, and epoch,
+    and recording finds the reloaded entries. Expired slots and dead entries
+    are dropped. A smaller `max_entries` evicts in §5.3 order, and a larger
+    one loads everything. A smaller `max_tagset_bytes` skips what no longer
+    fits. A changed `bucket_interval` or `bucket_count`, a version mismatch, a
+    corrupt, truncated, or foreign file, `save = off`, an immediate shutdown,
+    and a crash restart all start empty with a LOG line. The file is gone
+    after every start.
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset
 - **pg_regress suite** (`make installcheck`: smoke, guc, extract, normalize, appname, tags_override) runs in a

@@ -36,6 +36,9 @@ $P.exclude_tags = ''
 $P.extractors = 'sqlcommenter, marginalia, appname(format=sqlcommenter)'
 $P.max_tag_value_len = 8
 $P.track_utility = off
+# restarts must start from an empty store (counters included); persistence
+# is covered by test/t/028_persist.pl
+$P.save = off
 EOC
 $node->start;
 

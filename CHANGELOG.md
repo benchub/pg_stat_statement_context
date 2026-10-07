@@ -17,6 +17,19 @@ upgrade scripts (see [DESIGN.md §7](DESIGN.md#7-sql-interface-v1)).
   without waiting for an insert into a full table. It counts them in
   `_info().reclaimed_entries`, leaves `dealloc` and `evicted_entries` alone,
   and never evicts live entries or decays usage. With it off nothing changes.
+- **Statistics survive clean restarts** (`save`, sighup, default `on`, as
+  `pg_stat_statements.save`). After a clean shutdown the postmaster saves the
+  store to `pg_stat/pg_stat_statement_context.stat`, and the next start loads
+  it and removes the file. The loaded state keeps the entries, their buckets,
+  usage, counters, `stats_reset` and the bucket epoch.
+  - A file from another version is discarded, and so is one saved with a
+    different `bucket_interval` or `bucket_count`. A corrupt file is also
+    discarded.
+  - A smaller `max_entries` evicts the excess in eviction order. Tag sets
+    that no longer fit `max_tagset_bytes` are skipped.
+  - Nothing is saved after an immediate shutdown or a crash.
+
+  Each case is logged.
 
 ## [1.0.0] - 2026-10-06
 

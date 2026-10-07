@@ -22,6 +22,9 @@ $node->append_conf('postgresql.conf', qq{
 shared_preload_libraries = '$P'
 huge_pages = off
 max_connections = 40
+# every restart (configure()) starts from an empty store: persistence is
+# test/t/028_persist.pl
+$P.save = off
 });
 $node->start;
 $node->safe_psql('postgres', 'CREATE EXTENSION pssc_store_test');

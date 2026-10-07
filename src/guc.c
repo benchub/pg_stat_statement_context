@@ -61,6 +61,7 @@ int			pssc_max_tag_value_len = 64;
 int			pssc_max_tagset_bytes = 512;
 bool		pssc_reclaim_worker = false;
 int			pssc_reclaim_worker_interval = 10000;
+bool		pssc_save = true;
 int			pssc_scan_window = 2048;
 char	   *pssc_extractors = NULL;
 char	   *pssc_tags = NULL;
@@ -1973,6 +1974,17 @@ pssc_guc_define(void)
 							PGC_SIGHUP,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
+
+	/* read by the postmaster at startup and when it exits: store.c */
+	DefineCustomBoolVariable(PSSC_GUC_PREFIX ".save",
+							 "Saves the statistics across server shutdowns.",
+							 "The statistics are written to a file at a clean shutdown "
+							 "and loaded at the next start, as pg_stat_statements.save.",
+							 &pssc_save,
+							 true,
+							 PGC_SIGHUP,
+							 0,
+							 NULL, NULL, NULL);
 
 	DefineCustomStringVariable(PSSC_GUC_PREFIX ".extractors",
 							   "Sets the extractors that turn SQL comments into tags.",
