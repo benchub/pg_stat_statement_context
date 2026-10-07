@@ -1413,6 +1413,33 @@ Split from 20261007-064749-1 (round-2 review finding, not fixed within 2 rounds)
 **Open questions:** none
 **Status:** done
 
+### 20261007-133120-1: Per-database/role settings: untagged, tags, exclude_tags, scan_window (superuser context)
+
+**Description:** Reported by the owner on 2026-10-07: `ALTER DATABASE canvas SET pg_stat_statement_context.untagged = 'record'` fails with "cannot be changed now", because the GUC is `PGC_SIGHUP`. The audit decided (owner, 2026-10-07) to move four GUCs from `sighup` to `superuser` (`PGC_SUSET`) context, so that a superuser (or a role granted `SET`, PG 15+) can set them per database, per role, or per session: `untagged`, `tags`, `exclude_tags` and `scan_window`. Leave the others alone:
+- `save` and `reclaim_worker_interval` stay `sighup`: they are server-wide (postmaster/background worker).
+- `extractors`, `normalize`, `cardinality_cap` and `cardinality_cap_overrides` stay `sighup` for now. Mid-statement changes to the compiled regexes and caps need more work; they could be a later item.
+
+Each backend reads the four GUCs at extraction, and store entries are keyed by dbid, so differing values per database don't collide. Check:
+- **Mid-statement changes:** a function `SET` clause, `SET LOCAL`, or a GUC rollback on (sub)transaction abort can change `tags`/`exclude_tags` while an outer frame still holds data that came from the old parsed value. Examples are recap candidates (20261007-070036-2), which are re-filtered under the current allowlist at recap time. The assign hooks must not free anything that is still referenced. Assign hooks must also not throw.
+- **Parallel workers** must use the leader's values (PostgreSQL restores GUCs).
+- **`_extract()` and the activity view** follow the session's values.
+
+Update DESIGN.md (GUC table and any "sighup" wording, e.g. §4.1), docs/configuration.md (Reference table and each section; the context explanation added in 80c6675), CHANGELOG.md and docs/release-notes/v1.0.0.md. The frozen 1.0 SQL does not change. Land this before the v1.0.0 tag, then rerun the release matrix.
+
+**Acceptance criteria:**
+- TAP:
+  - `ALTER DATABASE ... SET` and `ALTER ROLE ... SET` work for all four GUCs, and take effect in new sessions of that database or role.
+  - With `untagged = 'record'` only in database A, an untagged statement is recorded in A and not in B.
+  - With a per-database `tags` allowlist, each database keeps different keys.
+  - A non-superuser can't `SET` them (permission error). On PG 15+, `GRANT SET ON PARAMETER` lets a role set them.
+  - `pg_settings.context` shows `superuser` for the four, and `sighup` for the others.
+  - Changing `tags` through a function's `SET` clause during a statement whose outer frame has recap candidates (role-scoped caps, a SECURITY DEFINER function) doesn't crash and gives a coherent result. Also run this under assert/Valgrind if practical.
+- Full suite passes on PG 14-18; `scripts/check-frozen-sql.sh` passes.
+
+**Depends on:** none
+**Open questions:** none (scope decided by the owner 2026-10-07)
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
