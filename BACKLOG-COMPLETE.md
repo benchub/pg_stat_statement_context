@@ -1120,6 +1120,25 @@ The same accounting can make `SET`/`ALTER SYSTEM` reject a normal pattern on an 
 **Open questions:** none
 **Status:** done
 
+### 20261006-192058-1: TAP tests: detect pg_stat_statements portably; fix the macOS failures in 010–019
+
+**Description:** In CI run 37535041023, the macOS cells failed. Tests 010–019 detect pg_stat_statements with `-e "$pkglibdir/pg_stat_statements.so"`, but on PG16+ macOS the module suffix is `.dylib`. So on macOS PG16–18, every pgss parity check was silently skipped (`plan skip_all` in 014, 017 and 019). Fix the detection (any of `.so`, `.dylib`, `.dll`), ideally through one shared helper instead of eight copies. Make a missing pgss a hard failure when the harness sets `PSSC_REQUIRE_PGSS=1`, so this can't silently recur. Set that variable in `docker/run-tests.sh`, because every harness image and the macOS build install pgss. Then fix the failures that the corrected detection, or macOS itself, exposes:
+- **013 #19:** the `set_conf('extractors', marginalia(position=prepend))` that test 19 relies on sits inside the pgss `SKIP` block. Move the setup out of it so test 19 doesn't depend on pgss.
+- **014:** the real-load "spelling variant" cases hardcode `.so` (`pg_stat_statements.so`, `"$libdir/$P.so"`). Use the platform's suffix. The matcher-only cases (`pssc_guc_test_load_order_wrong`) stay as they are, because `src/utility.c` strips every known suffix.
+- **012 #17–20:** with `track_utility = off`, a CALL/DO only nests on PG14–16 when pgss tracks it. Without pgss loaded, that falls back to this extension's own settings (src/utility.c `pgss_nests_utility`), so the children are top level there. Today the expectation assumes pgss is loaded. Make it follow `$have_pgss` and the version (on PG17+ it always nests).
+- **012 #202:** `ORDER BY step, tags::text` depends on collation. In C or byte order, `tx_outer` sorts before `tx`. Make the order deterministic, e.g. `COLLATE "C"` with the expected list adjusted.
+
+Verified locally on macOS (arm64, source builds, `docker/run-tests.sh`): with `.dylib` detection on PG18, 013, 014, 016, 017 and 019 pass, and only 012 #202 and 022 still fail.
+
+**Acceptance criteria:**
+- On macOS PG18 (host run of `docker/run-tests.sh` with `PSSC_REQUIRE_PGSS=1`), the pgss-dependent tests run rather than skip, and 010–019 pass; 012 and 013 also pass with pgss absent on PG14–16 and PG17+.
+- The Docker harness passes on PG14–18 (`scripts/docker-test.sh <major>`).
+- With `PSSC_REQUIRE_PGSS=1` and pgss genuinely missing, the tests fail rather than skip.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

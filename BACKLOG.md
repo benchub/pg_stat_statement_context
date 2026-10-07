@@ -52,7 +52,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | no | ready |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
-| 20261006-192058-1 | TAP tests: detect pg_stat_statements portably; fix the macOS failures in 010–019 | none | no | ready |
 | 20261006-192058-3 | Host runs of docker/run-tests.sh: skip worktrees/, stop the server on failure | none | no | ready |
 | 20261006-143225-1 | Close the deadline-postponement race in the test module's sleep injection | 20261006-113156-1 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
@@ -187,25 +186,6 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 - 2026-10-06: Do option 2 (compact per-entry array, keeps §5.3 semantics) first; only if p99 is still over ~1.5× pgss, add option 1 (adaptive batch) and update §5.3.
 
 **Depends on:** 20261006-043919-1
-**Open questions:** none
-**Status:** ready
-
-### 20261006-192058-1: TAP tests: detect pg_stat_statements portably; fix the macOS failures in 010–019
-
-**Description:** In CI run 37535041023, the macOS cells failed. Tests 010–019 detect pg_stat_statements with `-e "$pkglibdir/pg_stat_statements.so"`, but on PG16+ macOS the module suffix is `.dylib`. So on macOS PG16–18, every pgss parity check was silently skipped (`plan skip_all` in 014, 017 and 019). Fix the detection (any of `.so`, `.dylib`, `.dll`), ideally through one shared helper instead of eight copies. Make a missing pgss a hard failure when the harness sets `PSSC_REQUIRE_PGSS=1`, so this can't silently recur. Set that variable in `docker/run-tests.sh`, because every harness image and the macOS build install pgss. Then fix the failures that the corrected detection, or macOS itself, exposes:
-- **013 #19:** the `set_conf('extractors', marginalia(position=prepend))` that test 19 relies on sits inside the pgss `SKIP` block. Move the setup out of it so test 19 doesn't depend on pgss.
-- **014:** the real-load "spelling variant" cases hardcode `.so` (`pg_stat_statements.so`, `"$libdir/$P.so"`). Use the platform's suffix. The matcher-only cases (`pssc_guc_test_load_order_wrong`) stay as they are, because `src/utility.c` strips every known suffix.
-- **012 #17–20:** with `track_utility = off`, a CALL/DO only nests on PG14–16 when pgss tracks it. Without pgss loaded, that falls back to this extension's own settings (src/utility.c `pgss_nests_utility`), so the children are top level there. Today the expectation assumes pgss is loaded. Make it follow `$have_pgss` and the version (on PG17+ it always nests).
-- **012 #202:** `ORDER BY step, tags::text` depends on collation. In C or byte order, `tx_outer` sorts before `tx`. Make the order deterministic, e.g. `COLLATE "C"` with the expected list adjusted.
-
-Verified locally on macOS (arm64, source builds, `docker/run-tests.sh`): with `.dylib` detection on PG18, 013, 014, 016, 017 and 019 pass, and only 012 #202 and 022 still fail.
-
-**Acceptance criteria:**
-- On macOS PG18 (host run of `docker/run-tests.sh` with `PSSC_REQUIRE_PGSS=1`), the pgss-dependent tests run rather than skip, and 010–019 pass; 012 and 013 also pass with pgss absent on PG14–16 and PG17+.
-- The Docker harness passes on PG14–18 (`scripts/docker-test.sh <major>`).
-- With `PSSC_REQUIRE_PGSS=1` and pgss genuinely missing, the tests fail rather than skip.
-
-**Depends on:** none
 **Open questions:** none
 **Status:** ready
 
