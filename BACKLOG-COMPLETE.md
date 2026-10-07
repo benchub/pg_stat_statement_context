@@ -1088,6 +1088,22 @@ The same accounting can make `SET`/`ALTER SYSTEM` reject a normal pattern on an 
 **Open questions:** none
 **Status:** done
 
+### 20261006-173342-1: CI fuzz smoke: oracle misses `capped_tags`; failure artifacts unreadable
+
+**Description:** The first CI run (run 37535041023) failed the "Fuzz smoke" job for two reasons:
+
+1. `fuzz/sql/regex_fuzz.pl` checks that the `_extract()` result has exactly `@RESULT_KEYS`. Item 20261005-091225-32 added `capped_tags` to the result (`src/extract_fn.c`) without updating the oracle, so every call reports `result keys ...`. Add the key. The driver sets no `cardinality_cap*` GUCs (the default cap is 0, meaning none), so the oracle should also require `capped_tags = 0`, and treat a negative value as a negative counter. The `--self-test` should catch this kind of drift in future: for example, compare `@RESULT_KEYS` with the keys that `src/extract_fn.c` pushes.
+2. The "Upload artifacts" step failed with `EACCES` on `tmp/fuzz-sql/fail-round-1/server.log`, which the container wrote as another user. The upload steps in `.github/workflows/ci.yml` that collect files the Docker harness wrote to `tmp/` (fuzz-smoke, linux and linux-source) need to make those files readable first, for example with a `sudo chown -R` step on failure, or by having the harness write them readable.
+
+**Acceptance criteria:**
+- `perl fuzz/sql/regex_fuzz.pl --self-test` fails before the fix (it detects the key drift) and passes after.
+- `fuzz/sql/run.sh --pgdg --pg 18 -- --duration 30` passes.
+- The failure-upload steps of the Docker-based jobs can read what the harness wrote.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
