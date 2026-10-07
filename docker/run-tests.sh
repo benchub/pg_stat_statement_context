@@ -39,6 +39,14 @@ fail() {
 	cp -rf "$VGLOG" "$OUT"/ 2>/dev/null || true
 	exit 1
 }
+# As root (in Docker), the copies in $OUT are root's, and the server and TAP
+# logs keep pg_ctl's 0600: give them to the owner of the bind-mounted $OUT
+# (the host user) so the host and CI can read them.
+own_out() {
+	[ "$(id -u)" = 0 ] && [ -d "$OUT" ] || return 0
+	chown -R "$(stat -c %u:%g "$OUT")" "$OUT" && chmod -R u+rwX "$OUT" || true
+}
+trap own_out EXIT
 if [ "$(id -u)" = 0 ]; then
 	as_pg() { gosu postgres "$@"; }
 else

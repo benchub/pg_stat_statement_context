@@ -41,6 +41,8 @@ use Getopt::Long qw(GetOptions);
 use JSON::PP ();
 use Time::HiRes qw(time);
 use File::Path qw(make_path);
+use File::Basename qw(dirname);
+use File::Spec ();
 
 my %opt = (
 	duration => 60,
@@ -80,7 +82,7 @@ my $RESOURCE_RE = qr/invalid memory alloc request size|out of memory|regular exp
 my $CRASH_RE = qr/TRAP:|terminated by signal|PANIC|server process \(PID \d+\) (?:was terminated|exited with exit code)|terminating any other active server processes|server closed the connection|connection to server was lost/;
 my @RESULT_KEYS = sort qw(tags ntags tagset_bytes footer heuristic oom stmt_start
   stmt_end invalid_tags dropped_tags heuristic_scans regex_compile_failures
-  normalized_tags normalize_failures);
+  normalized_tags normalize_failures capped_tags);
 my $JSON = JSON::PP->new->utf8;
 
 print "regex_fuzz: seed $opt{seed}\n" unless $opt{self_test};
@@ -615,8 +617,11 @@ sub check_result
 	}
 	problem("$where: heuristic on a $qlen-byte query with scan_window $cfg->{window}")
 	  if $res->{heuristic} && $qlen <= $cfg->{window};
+	# the driver sets no cardinality_cap GUCs (default 0: no cap)
+	problem("$where: capped_tags $res->{capped_tags} without a cardinality cap")
+	  if $res->{capped_tags} > 0;
 	problem("$where: negative counter")
-	  if grep { $res->{$_} < 0 } qw(invalid_tags dropped_tags heuristic_scans);
+	  if grep { $res->{$_} < 0 } qw(invalid_tags dropped_tags heuristic_scans capped_tags);
 
 	my %vals;
 	for my $k (sort keys %$tags)
@@ -817,6 +822,49 @@ if ($opt{self_test})
 		$got = $got ? 1 : 0;
 		printf "%s: %s (reason '%s', want '%s')\n", $got == $ok ? 'ok' : 'FAILED', $name, $reason, $want;
 		$bad++ if $got != $ok;
+	}
+
+	# check_result on a synthetic result: the driver sets no cardinality cap,
+	# so capped_tags must be 0.
+	@limits{qw(max_tags max_tag_value_len max_tagset_bytes)} = (64, 256, 512);
+	my %base = (tags => {}, ntags => 0, tagset_bytes => 0, footer => JSON::PP::false,
+		heuristic => JSON::PP::false, oom => JSON::PP::false, stmt_start => 0, stmt_end => 8,
+		map { $_ => 0 } qw(invalid_tags dropped_tags heuristic_scans regex_compile_failures
+		  normalized_tags normalize_failures capped_tags));
+	my @rcases = (
+		# [name, overrides, ok]
+		['plain result accepted', {}, 1],
+		['capped_tags without a cardinality cap', { capped_tags => 1 }, 0],
+		['negative capped_tags', { capped_tags => -1 }, 0],
+	);
+	for my $t (@rcases)
+	{
+		my ($name, $over, $ok) = @$t;
+		@problems = ();
+		check_result({ id => 1, desc => 'self-test', q => 'SELECT 1' },
+			$JSON->encode({ %base, %$over }), { window => 1024, utf8 => 1 });
+		my $got = @problems ? 0 : 1;
+		printf "%s: %s%s\n", $got == $ok ? 'ok' : 'FAILED', $name,
+		  @problems ? " (reported: $problems[0])" : '';
+		$bad++ if $got != $ok;
+	}
+
+	# @RESULT_KEYS must match the keys src/extract_fn.c pushes into the
+	# result object, so a new key there fails here rather than in every call.
+	my $src = File::Spec->catfile(dirname(File::Spec->rel2abs(__FILE__)), '..', '..', 'src', 'extract_fn.c');
+	if (open my $fh, '<', $src)
+	{
+		my $text = do { local $/; <$fh> };
+		my @pushed = sort($text =~ /\bpush_(?:int|bool|key)\s*\(\s*&st\s*,\s*"(\w+)"/g);
+		my $ok = "@pushed" eq "@RESULT_KEYS";
+		printf "%s: result keys match src/extract_fn.c%s\n", $ok ? 'ok' : 'FAILED',
+		  $ok ? '' : " (pushed: @pushed; expected: @RESULT_KEYS)";
+		$bad++ unless $ok;
+	}
+	else
+	{
+		print "FAILED: cannot read $src: $!\n";
+		$bad++;
 	}
 	exit($bad ? 1 : 0);
 }
