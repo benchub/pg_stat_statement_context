@@ -186,6 +186,12 @@ dependencies and is not shown.
 - `scripts/test-integrations.sh`: still not runnable here. Pulling `quay.io/prometheuscommunity/postgres-exporter:v0.20.1` fails with the same Docker credential helper error (`error getting credentials ... (-50)`).
 - CHANGELOG.md and `docs/release-notes/v1.0.0.md` don't hard-code the matrix commit or results. They already describe the (role, database) cap scope. The owner steps above still apply; `main` is 27 commits ahead of `origin/main`. Note: CHANGELOG `[1.0.0]` is dated 2026-10-06; adjust it if the tag is cut later.
 
+**Progress (2026-10-07, agent, matrix rerun on d8f3333 after the per-database settings change f13607c):**
+- Matrix from a fresh `git clone` of d8f3333, cells run one after another: PGDG 14.24, 15.19, 16.15, 17.11, 18.6 PASS; `--assert` 14–18 PASS; `--valgrind` 18.6 PASS (no Valgrind errors). Everything passed on the first run. Version-guard and frozen-SQL checks (+ self-tests) pass on the host and in every cell; host unit tests and `make -C fuzz check` pass under UBSan.
+- `fuzz/run-libfuzzer.sh -t 15`: all 4 targets ok. `fuzz/sql/run.sh --pgdg --pg 18 -- --duration 30`: 528 rounds, 0 oracle errors.
+- README install + quick start from a fresh clone on PGDG 14 and 18: PASS.
+- `scripts/test-integrations.sh`: still blocked by the Docker credential helper error.
+
 **Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 (security fix, must land before the tag; the release matrix must be rerun after it); 20261007-133120-1 (per-database settings, owner request 2026-10-07; rerun the matrix after it)
 **Open questions:** none
 **Status:** ready
