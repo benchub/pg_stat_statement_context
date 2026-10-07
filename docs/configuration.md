@@ -1,9 +1,19 @@
 # Configuration
 
 All configuration uses GUCs (server settings). There is no separate
-configuration file. Settings can be put in `postgresql.conf`, set with
-`ALTER SYSTEM`, and, depending on their context, set per role, per database or
-per session. All of them are visible in `pg_settings`:
+configuration file. Settings can be put in `postgresql.conf` or set with
+`ALTER SYSTEM`. What else is possible depends on each GUC's context:
+
+- `postmaster`: server-wide, and takes effect only after a restart.
+- `sighup`: server-wide, and takes effect after a reload
+  (`SELECT pg_reload_conf()`). It can't be set per role, per database or per
+  session, so PostgreSQL rejects `ALTER DATABASE ... SET` and
+  `ALTER ROLE ... SET` with "cannot be changed now".
+- `superuser`: can also be set per role, per database or per session, but only
+  by a superuser (or a role granted `SET` on it, PG 15+).
+- `user`: can also be set per role, per database or per session, by any user.
+
+All of them are visible in `pg_settings`:
 
 ```sql
 SELECT name, setting, unit, context
