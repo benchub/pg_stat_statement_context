@@ -152,9 +152,31 @@ sub pgbench
 		'the shared memory segment grows by exactly the requested difference '
 		  . "(segment +" . ($t2 - $t1) . ", requested +$req)");
 	# Using more than requested would eat into the core's free slack.
-	ok($f2 - $f1 > -8192,
-		'the store allocates no more than it requested (free space: '
-		  . ($f2 - $f1) . ')');
+	# The bound is on the overshoot: used delta (segment minus free) minus
+	# requested delta. It deliberately ignores the free space, which also
+	# absorbs the segment's rounding:
+	#  - ipci.c (CreateSharedMemoryAndSemaphores() in PG 14, CalculateShmemSize()
+	#    from PG 15) rounds the total request up
+	#    with size += 8192 - size % 8192, so the segment exceeds the request
+	#    by s in [1, 8192]. Only the store's request differs between the
+	#    two restarts.
+	#  - So r = segment delta - requested delta = s2 - s1, in [-8191, 8191].
+	#  - free delta = r - overshoot. A bound on the free delta (> -8192) would
+	#    allow an overshoot of up to 8191 + r: anywhere from 0 to 16382
+	#    bytes, depending on where the totals fall. That flips with
+	#    unrelated size changes; the 24 B/entry eviction array made PG 16
+	#    fail with no store overshoot.
+	#  - This bound is 8192 whatever r is. That is tighter than the
+	#    free-space bound's worst case, and it does not depend on rounding.
+	# The overshoot itself is the cache-line padding of each allocation plus
+	# core allocations that vary from run to run (~3.6 kB measured on
+	# PG 16). An undercount that scales with max_entries would exceed the
+	# bound many times over: even 2 B per entry is 9800 B here.
+	my $used = ($t2 - $f2) - ($t1 - $f1);
+	ok($used - $req < 8192,
+		'the store allocates no more than it requested (overshoot '
+		  . ($used - $req) . ", used +$used, requested +$req, r = "
+		  . (($t2 - $t1) - $req) . ')');
 	is(sql(qq{SELECT string_agg(name, ',' ORDER BY name COLLATE "C")
 	            FROM pg_shmem_allocations WHERE name LIKE '$P%'}),
 		"$P,$P activity,$P cardinality caps,$P hash",

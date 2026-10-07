@@ -178,18 +178,14 @@ typedef struct EntriesState
 	is_live_fn	is_dead;
 } EntriesState;
 
-static void
-entries_visit(const PsscStoreEntryView *e, void *arg)
+/* "k\0v\0..." back to text[] (an incomplete trailing item is kept too) */
+static ArrayType *
+tags_array(const PsscKey *k)
 {
-	EntriesState *st = (EntriesState *) arg;
-	const PsscKey *k = e->key;
-	Datum	   *elems;
-	ArrayType  *tags;
+	Datum	   *elems = palloc(sizeof(Datum) * (k->tags_len + 1));
 	int			n = 0;
 	size_t		off = 0;
 
-	/* "k\0v\0..." back to text[] (an incomplete trailing item is kept too) */
-	elems = palloc(sizeof(Datum) * (k->tags_len + 1));
 	while (off < k->tags_len)
 	{
 		size_t		l = strnlen(k->tags + off, k->tags_len - off);
@@ -197,7 +193,15 @@ entries_visit(const PsscStoreEntryView *e, void *arg)
 		elems[n++] = PointerGetDatum(cstring_to_text_with_len(k->tags + off, l));
 		off += l + 1;
 	}
-	tags = construct_array(elems, n, TEXTOID, -1, false, TYPALIGN_INT);
+	return construct_array(elems, n, TEXTOID, -1, false, TYPALIGN_INT);
+}
+
+static void
+entries_visit(const PsscStoreEntryView *e, void *arg)
+{
+	EntriesState *st = (EntriesState *) arg;
+	const PsscKey *k = e->key;
+	ArrayType  *tags = tags_array(k);
 
 	for (int i = 0; i < e->bucket_count; i++)
 	{
@@ -246,6 +250,43 @@ pssc_store_test_entries(PG_FUNCTION_ARGS)
 	st.is_dead = (is_live_fn) main_sym("pssc_bucket_entry_is_dead");
 	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 	fe(entries_visit, &st);
+	MemoryContextSwitchTo(oldcxt);
+	return (Datum) 0;
+}
+
+typedef int64 (*evict_slots_fn) (PsscEvictSlotVisitor, void *);
+
+static void
+evict_slots_visit(int64 idx, const PsscKey *k, int64 last_bucket, double usage,
+				  void *arg)
+{
+	EntriesState *st = (EntriesState *) arg;
+	Datum		v[6];
+	bool		nulls[6] = {0};
+
+	v[0] = Int64GetDatum(idx);
+	v[1] = Int64GetDatum(k->queryid);
+	v[2] = PointerGetDatum(tags_array(k));
+	v[3] = BoolGetDatum(k->toplevel);
+	v[4] = Int64GetDatum(last_bucket);
+	v[5] = Float8GetDatum(usage);
+	tuplestore_putvalues(st->ts, st->desc, v, nulls);
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_evict_slots);
+Datum
+pssc_store_test_evict_slots(PG_FUNCTION_ARGS)
+{
+	evict_slots_fn fn = (evict_slots_fn) main_sym("pssc_store_debug_evict_slots");
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	EntriesState st;
+	MemoryContext oldcxt;
+
+	pssc_init_materialized_srf(fcinfo, 0);
+	st.ts = rsinfo->setResult;
+	st.desc = rsinfo->setDesc;
+	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+	(void) fn(evict_slots_visit, &st);
 	MemoryContextSwitchTo(oldcxt);
 	return (Datum) 0;
 }

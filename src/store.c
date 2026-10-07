@@ -8,6 +8,20 @@
  *	[0, keysize)						PsscKey (dynahash key)
  *	[keysize, + MAXALIGN(header))		PsscEntryHeader
  *	[..., + bucket_count * PsscSlot)	the ring; index = bucket_id mod count
+ *
+ * The compact eviction array (§5.3): the shared header ends with
+ * evict_slots[max_entries], one PsscEvictSlot per entry in the table, in
+ * slots [0, entries) (dense: removing an entry moves the last slot into its
+ * hole). A slot holds the entry's last_bucket (a copy of the header's), its
+ * usage (kept only here) and a pointer to the entry, which holds the slot's
+ * index in evict_index. An eviction pass scans these 24-byte slots instead
+ * of the whole entries (about 870 bytes each at the defaults) and touches
+ * only the entries it removes. Locking follows the entries: the slot of an
+ * entry is written under that entry's spinlock by a holder of the table
+ * lock (shared), as the rest of the entry; slots are added, moved or
+ * removed, and evict_index changes, only under the exclusive lock. So a
+ * holder of the shared lock may read evict_index without the spinlock, and
+ * the exclusive lock holder may read and write every slot without any.
  */
 #include "postgres.h"
 
@@ -35,15 +49,28 @@
 /* Per-entry state after the key (ctxEntry of DESIGN.md §5.1). */
 typedef struct PsscEntryHeader
 {
-	slock_t		mutex;			/* protects everything below and the slots */
+	slock_t		mutex;			/* protects everything below and the slots,
+								 * and this entry's evict_slots[] slot */
 	int			encoding;		/* of tags[] (that of key.dbid) */
-	int64		last_bucket;	/* newest bucket_id written */
-	double		usage;			/* pgss-style, for eviction (§5.3) */
+	int			evict_index;	/* its slot in evict_slots[] (changed only
+								 * under the exclusive lock) */
+	int64		last_bucket;	/* newest bucket_id written (also in the slot) */
 	/* monotonic since stats_since, whatever bucket each call landed in */
 	int64		calls_total;
 	double		exec_time_total;	/* ms */
 	TimestampTz stats_since;	/* when the entry was created */
 } PsscEntryHeader;
+
+/*
+ * One slot of the compact eviction array (top of this file): what an
+ * eviction pass needs to know about an entry without reading it.
+ */
+typedef struct PsscEvictSlot
+{
+	int64		last_bucket;	/* = the entry header's last_bucket */
+	double		usage;			/* pgss-style, for eviction (§5.3) */
+	void	   *entry;			/* the hash entry */
+} PsscEvictSlot;
 
 /* Shared header. */
 typedef struct PsscSharedState
@@ -100,6 +127,13 @@ typedef struct PsscSharedState
 	pg_atomic_uint64 utility_missing_queryid;
 	pg_atomic_uint64 dropped_records;	/* new keys dropped: no room even
 										 * after an eviction pass */
+
+	/*
+	 * The compact eviction array: [0, entries) in use (top of this file).
+	 * Its length is entries, so it changes with entries, under the
+	 * exclusive lock.
+	 */
+	PsscEvictSlot evict_slots[FLEXIBLE_ARRAY_MEMBER];	/* [max_entries] */
 } PsscSharedState;
 
 static pssc_shmem_request_hook_type prev_shmem_request_hook = NULL;
@@ -139,6 +173,12 @@ entry_slots(void *entry)
 	return (PsscSlot *) ((char *) entry + ENTRY_SLOTS_OFFSET(store_keysize));
 }
 
+static inline PsscEvictSlot *
+entry_slot(void *entry)
+{
+	return &store_state->evict_slots[entry_header(entry)->evict_index];
+}
+
 /* Largest debug clock offset either way: about 3000 years. */
 #define PSSC_DEBUG_CLOCK_MAX_OFFSET INT64CONST(100000000000000000)
 
@@ -161,6 +201,14 @@ pssc_store_entrysize_for(Size keysize, int bucket_count)
 					mul_size((Size) bucket_count, sizeof(PsscSlot)));
 }
 
+/* The shared header with its eviction array of max_entries slots. */
+static Size
+header_size_for(int max_entries)
+{
+	return add_size(offsetof(PsscSharedState, evict_slots),
+					mul_size((Size) max_entries, sizeof(PsscEvictSlot)));
+}
+
 Size
 pssc_store_shmem_size_for(int max_entries, int max_tagset_bytes, int bucket_count)
 {
@@ -170,7 +218,7 @@ pssc_store_shmem_size_for(int max_entries, int max_tagset_bytes, int bucket_coun
 		elog(ERROR, "invalid max_entries %d", max_entries);
 	entrysize = pssc_store_entrysize_for(pssc_store_keysize_for(max_tagset_bytes),
 										 bucket_count);
-	return add_size(MAXALIGN(sizeof(PsscSharedState)),
+	return add_size(MAXALIGN(header_size_for(max_entries)),
 					hash_estimate_size(max_entries, entrysize));
 }
 
@@ -307,10 +355,11 @@ store_shmem_startup(void)
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
-	state = ShmemInitStruct(PSSC_STORE_NAME, sizeof(PsscSharedState), &found);
+	state = ShmemInitStruct(PSSC_STORE_NAME, header_size_for(pssc_max_entries),
+							&found);
 	if (!found)
 	{
-		memset(state, 0, sizeof(PsscSharedState));
+		memset(state, 0, header_size_for(pssc_max_entries));
 		state->lock = &(GetNamedLWLockTranche(PSSC_LWLOCK_TRANCHE))->lock;
 		state->max_entries = pssc_max_entries;
 		state->bucket_count = pssc_bucket_count;
@@ -476,16 +525,28 @@ pssc_store_bucket_start(int64 bucket_id)
 
 /* ------------------------------------------------------------- recording */
 
+/*
+ * Initializes a new entry and appends its slot to the eviction array; the
+ * caller holds the exclusive lock, has room (entries < max_entries) and
+ * counts the entry.
+ */
 static void
 entry_init(void *entry)
 {
 	PsscEntryHeader *hdr = entry_header(entry);
 	PsscSlot   *slots = entry_slots(entry);
+	PsscEvictSlot *es;
 
+	Assert(LWLockHeldByMeInMode(store_state->lock, LW_EXCLUSIVE));
+	Assert(store_state->entries < store_state->max_entries);
 	SpinLockInit(&hdr->mutex);
 	hdr->encoding = GetDatabaseEncoding();
+	hdr->evict_index = (int) store_state->entries;
 	hdr->last_bucket = PSSC_BUCKET_NONE;
-	hdr->usage = pssc_usage_init();
+	es = &store_state->evict_slots[hdr->evict_index];
+	es->last_bucket = PSSC_BUCKET_NONE;
+	es->usage = pssc_usage_init();
+	es->entry = entry;
 	hdr->calls_total = 0;
 	hdr->exec_time_total = 0.0;
 	hdr->stats_since = GetCurrentTimestamp();
@@ -494,22 +555,50 @@ entry_init(void *entry)
 }
 
 /*
+ * Removes the entry in eviction slot idx from the hash table and the array
+ * (the last slot moves into its hole) and uncounts it; the caller holds
+ * the exclusive lock. Reads only the removed entry and, if a slot moves,
+ * writes the evict_index of the entry it points to.
+ */
+static void
+entry_remove(int64 idx)
+{
+	PsscEvictSlot *slots = store_state->evict_slots;
+	int64		last = store_state->entries - 1;
+	void	   *entry = slots[idx].entry;
+
+	Assert(LWLockHeldByMeInMode(store_state->lock, LW_EXCLUSIVE));
+	Assert(idx >= 0 && idx <= last);
+	Assert(entry_header(entry)->evict_index == idx);
+	hash_search(store_htab, entry, HASH_REMOVE, NULL);
+	if (idx != last)
+	{
+		slots[idx] = slots[last];
+		entry_header(slots[idx].entry)->evict_index = (int) idx;
+	}
+	store_state->entries--;
+}
+
+/*
  * Adds one call to the entry's ring in bucket current_bucket, read under the
  * entry spinlock: that bucket is live at the moment of the write, and it is
  * >= the entry's last_bucket (which an earlier writer read the same way from
  * the monotonic watermark), so every id in the ring stays <= current_bucket.
- * The caller holds the lock (any mode) and has already advanced the
- * watermark (observe_current_bucket()). Returns the id written.
+ * last_bucket and usage in the entry's eviction slot change under the same
+ * spinlock. The caller holds the lock (any mode) and has already advanced
+ * the watermark (observe_current_bucket()). Returns the id written.
  */
 static int64
 entry_accum(void *entry, double elapsed_ms)
 {
 	PsscEntryHeader *hdr = entry_header(entry);
 	PsscSlot   *slots = entry_slots(entry);
+	PsscEvictSlot *es = entry_slot(entry);
 	int			count = store_state->bucket_count;
 	int64		bucket_id;
 
 	SpinLockAcquire(&hdr->mutex);
+	Assert(es->entry == entry && es->last_bucket == hdr->last_bucket);
 	bucket_id = watermark_read();
 	Assert(hdr->last_bucket == PSSC_BUCKET_NONE || hdr->last_bucket <= bucket_id);
 
@@ -521,9 +610,10 @@ entry_accum(void *entry, double elapsed_ms)
 		pssc_slot_accum(slot, elapsed_ms);
 	}
 	hdr->last_bucket = bucket_id;
+	es->last_bucket = bucket_id;
 	hdr->calls_total++;
 	hdr->exec_time_total += elapsed_ms;
-	pssc_usage_exec(&hdr->usage);
+	pssc_usage_exec(&es->usage);
 
 #ifdef USE_ASSERT_CHECKING
 	{
@@ -594,18 +684,45 @@ evict_buffer(size_t cap, bool *transient)
 	return buf;
 }
 
+#ifdef USE_ASSERT_CHECKING
+/*
+ * The eviction array matches the table: as many slots as entries, each
+ * pointing to an entry that points back to it, with that entry's
+ * last_bucket. The caller holds the exclusive lock.
+ */
+static void
+assert_evict_slots(void)
+{
+	PsscEvictSlot *slots = store_state->evict_slots;
+
+	Assert(LWLockHeldByMeInMode(store_state->lock, LW_EXCLUSIVE));
+	Assert(store_state->entries == hash_get_num_entries(store_htab));
+	Assert(store_state->entries <= store_state->max_entries);
+	for (int64 i = 0; i < store_state->entries; i++)
+	{
+		PsscEntryHeader *hdr = entry_header(slots[i].entry);
+
+		Assert(hdr->evict_index == i);
+		Assert(slots[i].last_bucket == hdr->last_bucket);
+	}
+}
+#endif
+
 /*
  * One eviction pass (§5.3); the caller holds the exclusive lock and found
  * the table at max_entries. Returns the number of entries removed.
  *
- *	1. Raise current_bucket to the clock, as readers do, and scan the table
- *	   once: reclaim every dead entry (no slot in the live window); every
- *	   surviving entry's usage decays by PSSC_USAGE_DECREASE_FACTOR, as in
- *	   pgss's entry_dealloc(), and is offered to a selector
+ *	1. Raise current_bucket to the clock, as readers do, and scan the
+ *	   compact eviction array once (not the entries; top of this file):
+ *	   reclaim every dead entry (no slot in the live window), at which the
+ *	   last slot moves into the hole and is judged next; every surviving
+ *	   entry's usage decays by PSSC_USAGE_DECREASE_FACTOR, as in pgss's
+ *	   entry_dealloc(), and is offered to a selector
  *	   (pssc_evict_select_*()) that keeps the pssc_evict_target() first
  *	   live entries in eviction order: last_bucket, then usage, then scan
- *	   order. A pass never evicts more live entries than the target, so
- *	   the victims are among them.
+ *	   order (the order of the array as the pass meets it). A pass never
+ *	   evicts more live entries than the target, so the victims are among
+ *	   them.
  *	2. If the dead entries were fewer than the target, evict the first
  *	   (target - dead) live entries in that order: exactly the front of a
  *	   full sort of every live entry (pssc_evict_sort()), at O(n) cost
@@ -615,24 +732,26 @@ evict_buffer(size_t cap, bool *transient)
  *	   evicted_entries += the live ones (a sign that max_entries is too
  *	   small, where reclaiming dead entries is normal housekeeping).
  *
- * The entry fields are read and written without the entry spinlocks: those
- * are only ever taken by a backend holding the table lock (writers and
- * readers alike take it in shared mode), so under the exclusive lock nobody
- * else can be touching any entry.
+ * Only the removed entries are read (for their key and evict_index), plus
+ * the one whose slot moves into each hole (its evict_index is written).
+ *
+ * The slots and entries are read and written without the entry spinlocks:
+ * those are only ever taken by a backend holding the table lock (writers
+ * and readers alike take it in shared mode), so under the exclusive lock
+ * nobody else can be touching any entry or slot.
  *
  * The selector's buffer (evict_buffer()) is allocated with
  * MCXT_ALLOC_NO_OOM: recording runs inside user statements, so an
  * out-of-memory condition must not fail the statement. If it cannot be
  * allocated, only the dead entries are freed; the caller then drops its
  * record (dropped_records) if that left no room. Nothing between the
- * allocation and the pfree can raise an ERROR, and the table is consistent
- * after every single removal.
+ * allocation and the pfree can raise an ERROR, and the table and the array
+ * are consistent after every single removal.
  */
 static int64
 store_evict(void)
 {
-	HASH_SEQ_STATUS seq;
-	void	   *entry;
+	PsscEvictSlot *slots = store_state->evict_slots;
 	int			count = store_state->bucket_count;
 	int64		current;
 	int64		target;
@@ -658,24 +777,22 @@ store_evict(void)
 	if (cands != NULL)
 		pssc_evict_select_init(&sel, cands, (size_t) target);
 
-	/* deleting the entry just returned by hash_seq_search() is allowed */
-	hash_seq_init(&seq, store_htab);
-	while ((entry = hash_seq_search(&seq)) != NULL)
+	for (int64 i = 0; i < store_state->entries;)
 	{
-		PsscEntryHeader *hdr = entry_header(entry);
+		PsscEvictSlot *es = &slots[i];
 
-		if (pssc_bucket_entry_is_dead(hdr->last_bucket, current, count))
+		if (pssc_bucket_entry_is_dead(es->last_bucket, current, count))
 		{
-			hash_search(store_htab, entry, HASH_REMOVE, NULL);
+			/* the last slot (not yet seen) moves here: judge it next */
+			entry_remove(i);
 			dead++;
+			continue;
 		}
-		else
-		{
-			pssc_usage_decay(&hdr->usage);
-			nlive++;
-			if (cands != NULL)
-				pssc_evict_select_offer(&sel, hdr->last_bucket, hdr->usage, entry);
-		}
+		pssc_usage_decay(&es->usage);
+		nlive++;
+		if (cands != NULL)
+			pssc_evict_select_offer(&sel, es->last_bucket, es->usage, es->entry);
+		i++;
 	}
 	nvictims = pssc_evict_live_count(target, dead, nlive);
 	if (nvictims > 0 && cands != NULL)
@@ -683,18 +800,20 @@ store_evict(void)
 		size_t		n = pssc_evict_select_finish(&sel, (size_t) nvictims);
 
 		Assert(n == (size_t) nvictims);
-		for (size_t i = 0; i < n; i++)
-			hash_search(store_htab, cands[i].entry, HASH_REMOVE, NULL);
+		/* removals move slots, so look each victim's index up afresh */
+		for (size_t j = 0; j < n; j++)
+			entry_remove(entry_header(cands[j].entry)->evict_index);
 		evicted = (int64) n;
 	}
 	if (transient && cands != NULL)
 		pfree(cands);
 
-	store_state->entries -= dead + evicted;
 	store_state->dealloc++;
 	store_state->reclaimed_entries += dead;
 	store_state->evicted_entries += evicted;
-	Assert(store_state->entries == hash_get_num_entries(store_htab));
+#ifdef USE_ASSERT_CHECKING
+	assert_evict_slots();
+#endif
 	return dead + evicted;
 }
 
@@ -851,6 +970,7 @@ record_impl(const PsscKey *key, int64 bucket_id, double elapsed_ms,
 
 	Assert(store_state->entries == hash_get_num_entries(store_htab));
 	Assert(store_state->entries <= store_state->max_entries);
+	Assert(entry == NULL || entry_slot(entry)->entry == entry);
 	LWLockRelease(store_state->lock);
 	return result;
 }
@@ -881,11 +1001,16 @@ pssc_store_foreach(PsscStoreVisitor fn, void *arg)
 	{
 		PsscEntryHeader *hdr = entry_header(entry);
 		PsscEntryHeader *chdr;
+		double		usage;
 
-		/* the key is immutable once inserted; the rest needs the spinlock */
+		/*
+		 * The key is immutable once inserted; the rest, and the usage in
+		 * the entry's eviction slot, need the spinlock.
+		 */
 		memcpy(copy, entry, keysize);
 		SpinLockAcquire(&hdr->mutex);
 		memcpy(copy + keysize, (char *) entry + keysize, entrysize - keysize);
+		usage = entry_slot(entry)->usage;
 		SpinLockRelease(&hdr->mutex);
 
 		/*
@@ -898,7 +1023,7 @@ pssc_store_foreach(PsscStoreVisitor fn, void *arg)
 		view.key = (const PsscKey *) copy;
 		view.encoding = chdr->encoding;
 		view.last_bucket = chdr->last_bucket;
-		view.usage = chdr->usage;
+		view.usage = usage;
 		view.calls_total = chdr->calls_total;
 		view.exec_time_total = chdr->exec_time_total;
 		view.stats_since = chdr->stats_since;
@@ -924,7 +1049,7 @@ pssc_store_reset(void)
 	/* key_hash() runs under the exclusive lock, so the mode is stable */
 	while ((entry = hash_seq_search(&seq)) != NULL)
 		hash_search(store_htab, entry, HASH_REMOVE, NULL);
-	store_state->entries = 0;
+	store_state->entries = 0;	/* and so the eviction array is empty */
 	store_state->dealloc = 0;
 	store_state->reclaimed_entries = 0;
 	store_state->evicted_entries = 0;
@@ -1116,6 +1241,34 @@ pssc_store_debug_fail_next_eviction_alloc(void)
 	debug_fail_next_eviction_alloc = true;
 }
 
+int64
+pssc_store_debug_evict_slots(PsscEvictSlotVisitor fn, void *arg)
+{
+	int64		n;
+
+	if (store_state == NULL || store_htab == NULL)
+		elog(ERROR, "pg_stat_statement_context shared store is not set up");
+
+	LWLockAcquire(store_state->lock, LW_SHARED);
+	n = store_state->entries;
+	for (int64 i = 0; i < n; i++)
+	{
+		PsscEvictSlot *es = &store_state->evict_slots[i];
+		PsscEntryHeader *hdr = entry_header(es->entry);
+		int64		last_bucket;
+		double		usage;
+
+		/* the slot changes under the entry's spinlock (top of this file) */
+		SpinLockAcquire(&hdr->mutex);
+		last_bucket = es->last_bucket;
+		usage = es->usage;
+		SpinLockRelease(&hdr->mutex);
+		fn(i, (const PsscKey *) es->entry, last_bucket, usage, arg);
+	}
+	LWLockRelease(store_state->lock);
+	return n;
+}
+
 void
 pssc_store_set_record_test_hook(PsscStoreRecordTestHook hook, void *arg)
 {
@@ -1182,6 +1335,9 @@ pssc_store_check_invariants(void)
 	PsscKey    *bad_key = NULL;
 	int64		bad_last = 0;
 	PsscSlot	bad_contents = {0};
+	bool		bad_is_evict = false;
+	int64		bad_index = 0;
+	PsscEvictSlot bad_evict = {0};
 
 	if (store_state == NULL || store_htab == NULL)
 		elog(ERROR, "pg_stat_statement_context shared store is not set up");
@@ -1196,10 +1352,16 @@ pssc_store_check_invariants(void)
 	while ((entry = hash_seq_search(&seq)) != NULL)
 	{
 		PsscEntryHeader *hdr = entry_header(entry);
+		PsscEvictSlot es = {0};
+		int64		idx;
 
 		memcpy(copy, entry, keysize);
 		SpinLockAcquire(&hdr->mutex);
 		memcpy(copy + keysize, (char *) entry + keysize, entrysize - keysize);
+		/* evict_index changes only under the exclusive lock */
+		idx = hdr->evict_index;
+		if (idx >= 0 && idx < entries)
+			es = store_state->evict_slots[idx];
 		SpinLockRelease(&hdr->mutex);
 		current = watermark_read();	/* after the copy, as readers do */
 
@@ -1207,6 +1369,26 @@ pssc_store_check_invariants(void)
 		problem = pssc_ring_check(entry_slots(copy), store_state->bucket_count,
 								  entry_header(copy)->last_bucket, current,
 								  &bad_slot);
+
+		/*
+		 * The eviction array: the entry's slot is in use and points back
+		 * to it with its last_bucket. With n == entries (below) this makes
+		 * the slots in use and the entries a one-to-one match.
+		 */
+		if (problem == NULL)
+		{
+			if (idx < 0 || idx >= entries)
+				problem = "slot index out of range";
+			else if (es.entry != entry)
+				problem = "slot points to another entry";
+			else if (es.last_bucket != entry_header(copy)->last_bucket)
+				problem = "slot last_bucket differs from the entry's";
+			bad_is_evict = (problem != NULL);
+			if (bad_is_evict)
+				bad_slot = -1;
+			bad_index = idx;
+			bad_evict = es;
+		}
 		if (problem != NULL)
 		{
 			bad_key = (PsscKey *) copy;
@@ -1219,6 +1401,16 @@ pssc_store_check_invariants(void)
 	}
 	LWLockRelease(store_state->lock);
 
+	if (bad_is_evict)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pg_stat_statement_context eviction array invariant violated: %s",
+						problem),
+				 errdetail("queryid " INT64_FORMAT ", last_bucket " INT64_FORMAT
+						   ", eviction slot " INT64_FORMAT " of " INT64_FORMAT
+						   " (last_bucket " INT64_FORMAT ").",
+						   bad_key->queryid, bad_last, bad_index, entries,
+						   bad_evict.last_bucket)));
 	if (problem != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),

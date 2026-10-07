@@ -378,6 +378,8 @@ bench/run.sh --runs 6 --only '^(append/(pgss|ext|ext-cap)|evict/(pgss|ext-max100
    - `heuristic_scans` confirms which path each configuration took.
 4. **Sustained eviction raises p99 latency about 2.7× (PG 18, paired) to 5×
    (PG 14, single round) at `max_entries = 10000`.** This is the one clear performance finding.
+   It was measured before the two updates at the end of this item, which
+   bring the PG 18 ratio down to about 1.3–1.5×.
    - Evidence, PG 18, 5 rounds:
      - `evict/ext-max10000`: p99 1.200 ms against 0.477 ms for `evict/pgss`.
        The paired delta is +174.6%, with pair values +154.9% and +194.2%.
@@ -421,6 +423,38 @@ bench/run.sh --runs 6 --only '^(append/(pgss|ext|ext-cap)|evict/(pgss|ext-max100
      A shared-lock scan can't help this workload, since every statement
      inserts a new key. A throwaway build that evicted 20% per pass gave
      Δp99 +34%, but it changes §5.3 semantics; 20261006-075124-1 tracks that decision.
+   - **Update (item 20261006-075124-1):** a pass no longer walks the hash
+     table. It scans a compact array of 24-byte `(last_bucket, usage, entry)`
+     slots, one per entry, in shared memory (DESIGN.md §5.3). It touches a
+     full entry only when it removes it. The array costs `24 × max_entries`
+     bytes of shared memory (240 kB at the default). The semantics are
+     unchanged: the target is still 5%, and dead entries go first.
+     - Single pass, PG 18.6, 10,000 live entries, 500 victims, 80 passes
+       per build in two alternating rounds (timed around the record call
+       that triggered the pass):
+       - median 733 and 719 µs before, 273 and 270 µs after;
+       - p90 1,019 and 898 µs before, 344 and 317 µs after.
+     - Two paired runs of
+       `bench/run.sh --major 18 --only '^evict/(pgss|ext-max10000)$' --runs 5`
+       per build. The baseline is the parent commit, run just before. No
+       foreign containers were running.
+
+       | Run | Build | pgss p99 (ms) | ext p99 (ms) | Δp99 vs pgss | ΔTPS vs pgss |
+       |---|---|---:|---:|---:|---:|
+       | 1 | before | 0.340 | 0.800 | +122.1% | −12.3% |
+       | 1 | after | 0.326 | 0.481 | +67.9% | −19.4% [−23.8%, −15.1%] |
+       | 2 | before | 0.288 | 0.744 | +127.0% | −11.4% [−15.5%, −7.4%] |
+       | 2 | after | 0.325 | 0.425 | +25.8% | −7.6% [−10.4%, −4.8%] |
+
+     - The ratio of median p99s is now 1.48× and 1.31× pgss alone, against
+       2.35× and 2.58× before. That meets the ~1.5× target of the item.
+     - The paired Δp99 of run 1 (+67.9%) is above the target. In run 2 it is
+       +25.8%. Run 1 had other agents' containers running between rounds.
+     - The ΔTPS of run 1 (−19.4%) did not reproduce in run 2 (−7.6%, better
+       than the −11.4% before), so it is noise rather than a cost of keeping
+       the array up to date.
+     - A pass still holds the exclusive lock for about 0.27 ms at 10,000
+       entries. That remains the floor of the p99 under this workload.
 5. **Noise.**
    - Medians of the same configuration range 25–65% between runs (the TPS
      spread column).

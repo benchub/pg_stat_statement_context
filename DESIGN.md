@@ -517,15 +517,21 @@ typedef struct ctxSlot {
 
 typedef struct ctxEntry {
     ctxKey   key;          /* keysize fixed at startup */
-    slock_t  mutex;        /* protects everything below */
-    int64    last_bucket;  /* newest bucket_id written; drives reclamation */
-    double   usage;        /* pgss-style usage for eviction (not exposed) */
+    slock_t  mutex;        /* protects everything below, and its evictSlot */
     int      encoding;     /* encoding of tags[] (that of dbid) */
+    int      evict_index;  /* its slot in the eviction array (§5.3) */
+    int64    last_bucket;  /* newest bucket_id written; drives reclamation */
     int64    calls_total;      /* monotonic since stats_since (§7) */
     double   exec_time_total;  /* ms, monotonic since stats_since */
     TimestampTz stats_since;   /* entry creation time */
     ctxSlot  slots[FLEXIBLE]; /* bucket_count slots; index = bucket_id mod bucket_count */
 } ctxEntry;
+
+typedef struct evictSlot { /* the compact eviction array, §5.3 */
+    int64    last_bucket;  /* copy of the entry's */
+    double   usage;        /* pgss-style usage for eviction (not exposed) */
+    void    *entry;        /* the hash entry */
+} evictSlot;               /* 24 bytes; max_entries of them in the header */
 ```
 
 **Per-entry monotonic counters** (decided 2026-10-06, item
@@ -559,15 +565,19 @@ the used bytes. Keys are still built by `memset`-ing the whole key to zero first
 max_tagset_bytes)`; 24 is the fixed key header), and `entrysize` from `keysize`
 and `bucket_count` (`keysize + MAXALIGN(entry header) + bucket_count × 24`;
 the header is 48 bytes on 64-bit platforms). Shared memory is sized as
-`hash_estimate_size(max_entries, entrysize)` plus the header, using
-`add_size`/`mul_size` overflow checks. The table is created with
+`hash_estimate_size(max_entries, entrysize)` plus the header, which ends
+with the eviction array of `max_entries` 24-byte slots (§5.3):
+`MAXALIGN(header + max_entries × 24) + hash_estimate_size(max_entries,
+entrysize)`, using `add_size`/`mul_size` overflow checks. The table is created with
 `init_size = max_size = max_entries`, so all entries are preallocated.
 `ShmemInitHash`'s `max_size` is only an estimate, not a limit, so the
 `max_entries` cap is enforced by the extension under the exclusive lock.
 With the defaults, an entry is on the order of 1 KB, dominated by the tag set
 (872 bytes: a 536-byte key, the 48-byte header and 12 × 24-byte slots; the
-monotonic counters made it 24 bytes larger, about 2.8%, and `shmem_bytes` at
-the defaults 9,021,288 bytes, up from 8,781,288).
+monotonic counters made it 24 bytes larger, about 2.8%). `shmem_bytes` at
+the defaults is 9,261,288 bytes: 9,021,288 for the table and header, plus
+240,000 (about 2.7%) for the eviction array (item 20261006-075124-1; the
+monotonic counters had raised it from 8,781,288).
 `_info()` reports the exact `shmem_bytes` value.
 
 A record is dropped and counted in the header counter `dropped_records`
@@ -644,24 +654,42 @@ If an insert finds the table at `max_entries`, then under the exclusive lock:
    incremented; any non-zero value means the table is badly undersized (or
    the backend is short of memory).
 
-An eviction pass scans the whole table once. The live victims are chosen by
+An eviction pass scans a **compact eviction array** once, not the entries
+(item 20261006-075124-1): the shared header holds one 24-byte slot
+(`last_bucket`, `usage`, entry pointer) per entry, dense in
+`[0, entries)`, and each entry records its slot's index (`evict_index`).
+`usage` lives only in the slot; `last_bucket` is a copy of the entry's. A
+write updates the slot together with the entry, under the entry spinlock; an
+insert appends a slot; a removal (reclaim, eviction) moves the last slot
+into the hole and updates the moved entry's `evict_index`; a reset empties
+it. A pass thus reads 24 bytes per entry instead of the whole entry (about
+870 bytes at the defaults), and touches only the entries it removes (and
+the one whose slot moves into each hole). The live victims are chosen by
 partial selection (a bounded heap of `target` candidates), not by sorting
 every entry (item 20261006-043919-1). Ties in (`last_bucket`, `usage`) are
-broken by scan order, so the victims of a pass are deterministic. That cost is
-paid only when the table is full; the benchmarks measure it (§9).
+broken by the order in which the pass meets the slots (array order), so the
+victims of a pass are deterministic. That cost is paid only when the table is
+full; the benchmarks measure it (§9).
 
 Details (decided 2026-10-05, item -15):
 - **Target:** each pass aims to free `max(1, max_entries * 5 / 100)` entries.
 - **Dead entries:** the pass first raises `current_bucket` to the clock, as
-  readers do. One scan then reclaims *all* dead entries, even beyond the
-  target, without allocating anything.
+  readers do. One scan of the eviction array then reclaims *all* dead
+  entries, even beyond the target, without allocating anything (the slot
+  moved into a reclaimed entry's hole is judged next).
 - **Live entries:** these are evicted only when the dead entries fall short of
   the target.
 - **Decay:** every surviving entry's `usage` is multiplied by 0.99 on every
   pass, as in pgss.
 - **No entry spinlocks:** every path that takes an entry spinlock holds the
   table lock (shared), so the pass reads and writes `last_bucket` and `usage`
-  without spinlocks while it holds the exclusive lock.
+  without spinlocks while it holds the exclusive lock. The eviction array
+  needs no lock of its own: a slot is written only under its entry's
+  spinlock by a holder of the shared lock, or by the holder of the exclusive
+  lock; slots are added, moved and removed (and `evict_index` changes) only
+  under the exclusive lock. `pssc_store_check_invariants()` (and an
+  assertion after every pass) checks that the array and the table match one
+  to one.
 - **Out of memory:** the candidate buffer (`target` entries, kept per backend
   when ≤ 64 kB, otherwise allocated per pass) uses `MCXT_ALLOC_NO_OOM`. If
   that fails, only dead entries are reclaimed. The user's statement never

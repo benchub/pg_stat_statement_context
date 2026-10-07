@@ -42,6 +42,15 @@ CREATE FUNCTION pssc_store_test_entries(OUT dbid oid, OUT userid oid,
                                         OUT current_bucket bigint)
 RETURNS SETOF record AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- The compact eviction array (pssc_store_debug_evict_slots(); DESIGN.md
+-- §5.3; test/t/026_evict_slots.pl): one row per slot in use, idx 0 ..
+-- entries - 1, with the key of the hash entry the slot points to and the
+-- slot's own last_bucket and usage.
+CREATE FUNCTION pssc_store_test_evict_slots(OUT idx bigint, OUT queryid bigint,
+                                            OUT tags text[], OUT toplevel bool,
+                                            OUT last_bucket bigint, OUT usage float8)
+RETURNS SETOF record AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
 -- Shared header counters and sizes (pssc_store_get_counters()).
 CREATE FUNCTION pssc_store_test_counters(OUT entries bigint, OUT max_entries bigint,
                                          OUT dealloc bigint, OUT evicted_entries bigint,

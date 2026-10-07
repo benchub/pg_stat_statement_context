@@ -8,8 +8,11 @@
  *	keysize   = MAXALIGN(offsetof(PsscKey, tags) + max_tagset_bytes)
  *	entrysize = keysize + MAXALIGN(sizeof(PsscEntryHeader))
  *				+ bucket_count * sizeof(PsscSlot)
- *	shmem     = MAXALIGN(sizeof(PsscSharedState))
+ *	shmem     = MAXALIGN(offsetof(PsscSharedState, evict_slots)
+ *						 + max_entries * sizeof(PsscEvictSlot))
  *				+ hash_estimate_size(max_entries, entrysize)
+ * The shared header ends with the compact eviction array (store.c), one
+ * 24-byte (last_bucket, usage, entry) slot per possible entry.
  * The table is created with init_size = max_size = max_entries; the
  * max_entries cap itself is enforced by pssc_store_record() under the
  * exclusive lock (ShmemInitHash's max_size is only an estimate).
@@ -21,11 +24,12 @@
  *
  * Eviction (§5.3): a record whose key is new while the table holds
  * max_entries entries first runs an eviction pass under the exclusive lock
- * (store_evict() in store.c): every dead entry is reclaimed, every
- * surviving entry's usage decays by 0.99 (as in pgss), and if fewer than
+ * (store_evict() in store.c), which scans the compact eviction array, not
+ * the entries: every dead entry is reclaimed, every surviving entry's usage
+ * decays by 0.99 (as in pgss), and if fewer than
  * max(1, max_entries * 5 / 100) entries were freed (pssc_evict_target()),
  * live entries are evicted in order of last_bucket, then usage, both
- * ascending, then scan order (pssc_evict_cmp(); chosen by partial
+ * ascending, then array order (pssc_evict_cmp(); chosen by partial
  * selection, pssc_evict_select_*()), until that many are. dealloc counts the
  * passes, reclaimed_entries the dead entries they removed and
  * evicted_entries the live ones. The new entry is then inserted. Only if
@@ -375,6 +379,20 @@ extern PGDLLEXPORT void pssc_store_set_info_scan_test_hook(PsscStoreRecordTestHo
  * (test/modules/pssc_store_test).
  */
 extern PGDLLEXPORT void pssc_store_debug_fail_next_eviction_alloc(void);
+
+/*
+ * Testing aid: calls fn for every slot in use of the compact eviction array
+ * (store.c), in index order, under the shared lock: its index, the key of
+ * the hash entry it points to, and the slot's last_bucket and usage (read
+ * under that entry's spinlock). fn must not call into the store. Returns
+ * the number of slots visited. Reachable only from C
+ * (test/modules/pssc_store_test).
+ */
+typedef void (*PsscEvictSlotVisitor) (int64 index, const PsscKey *key,
+									  int64 last_bucket, double usage,
+									  void *arg);
+extern PGDLLEXPORT int64 pssc_store_debug_evict_slots(PsscEvictSlotVisitor fn,
+													  void *arg);
 
 /*
  * Testing aid (DESIGN.md §9): a debug clock for clock steps and bucket
