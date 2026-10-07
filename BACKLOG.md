@@ -179,6 +179,13 @@ dependencies and is not shown.
 - Benchmarks in `docs/benchmarks.md` were measured at 22f9e0f, before -33/-34/-35 (all off by default or off the hot path); not re-run.
 - **Remaining (owner):** push `main`, wait for CI to be green, tag `v1.0.0`, create the GitHub release from `docs/release-notes/v1.0.0.md`, then run `scripts/backlog-complete.py 20261005-091225-29`.
 
+**Progress (2026-10-07, agent, matrix rerun on cd7dbc9 after the security fixes 4167f96/3fb341a, the upstream merge ccd297b and the flake fixes dbbc976/25f5b35/7d84415):**
+- Matrix from a fresh `git clone` of cd7dbc9 (`scripts/docker-test.sh`, cells run one after another): PGDG 14.24, 15.19, 16.15, 17.11, 18.6 PASS; `--assert` 14.24, 15.19, 16.15, 17.11, 18.6 PASS, all on the first run (no flakes); `--valgrind` 18.6 PASS (no Valgrind errors in 13 + 33 processes; the 6 pg_regress tests pass). Unit tests (ASan/UBSan), version-guard and frozen-SQL checks (+ self-tests) pass in every cell. On the host (macOS), the version-guard and frozen-SQL checks pass. The host unit tests and `make -C fuzz check` pass with `SANITIZE="-fsanitize=undefined -fno-sanitize-recover=all"`. Under ASan they could not run in this environment: even an empty `-fsanitize=address` binary hangs at startup. They ran under ASan in every Docker cell.
+- `fuzz/run-libfuzzer.sh -t 15`: all 4 targets ok.
+- README install + quick start (code blocks extracted from the committed README) from a fresh clone in the PGDG 14 and 18 images: `make`, `make install`, both `CREATE EXTENSION`s, the quick-start output matches (2 rows, calls 2 and 1), `_extract()` returns the documented tags, extversion 1.0, no server-log warnings.
+- `scripts/test-integrations.sh`: still not runnable here. Pulling `quay.io/prometheuscommunity/postgres-exporter:v0.20.1` fails with the same Docker credential helper error (`error getting credentials ... (-50)`).
+- CHANGELOG.md and `docs/release-notes/v1.0.0.md` don't hard-code the matrix commit or results. They already describe the (role, database) cap scope. The owner steps above still apply; `main` is 27 commits ahead of `origin/main`. Note: CHANGELOG `[1.0.0]` is dated 2026-10-06; adjust it if the tag is cut later.
+
 **Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 (security fix, must land before the tag; the release matrix must be rerun after it)
 **Open questions:** none
 **Status:** ready
