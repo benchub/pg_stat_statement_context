@@ -108,6 +108,11 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_extract_test_regex_attempts() RETURNS int
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- Of those, how many engine calls were let run but did not complete (threw,
+-- or returned an error such as REG_CANCEL): interrupted mid-compile.
+CREATE FUNCTION pssc_extract_test_regex_interrupted() RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
 -- How long into the attempt the 'expire' injection makes the compile time
 -- limit expire (default 300 ms), in this backend. Returns the old value.
 CREATE FUNCTION pssc_extract_test_regex_expire_ms(ms int) RETURNS int

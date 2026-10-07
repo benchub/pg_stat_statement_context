@@ -296,7 +296,8 @@ typedef enum InjectAction
 	INJ_LATEWAIT,				/* deadline, then wait 1 s without CFI, then CFI */
 	INJ_LATECONFLICT,			/* deadline, then a recovery conflict, then CFI */
 	INJ_LATEREGCONFLICT,		/* deadline, then a recovery conflict, REG_CANCEL */
-	INJ_EXPIRE					/* let the engine run; the limit expires mid-compile */
+	INJ_EXPIRE,					/* let the engine run; the limit expires mid-compile */
+	INJ_EXPIREAFTER				/* the limit expires once the engine has returned */
 } InjectAction;
 
 static int	inj_phase = -1;
@@ -305,6 +306,9 @@ static InjectAction inj_action = INJ_NONE;
 static int	inj_remaining = 0;	/* -1: unlimited */
 static int	inj_fired = 0;
 static int	inj_attempts = 0;	/* hook calls for the phase/index, fired or not */
+static int	inj_engine_entered = 0; /* of those, engine calls let run */
+static int	inj_engine_ok = 0;	/* engine calls that returned REG_OKAY */
+static bool inj_expire_after = false;	/* INJ_EXPIREAFTER fired, engine running */
 
 /* REG_CANCEL of the PG14/15 engine (21); PG16+ throws instead. */
 #define PSSC_TEST_REG_CANCEL 21
@@ -378,14 +382,52 @@ busy_past_limit(void)
 		expire(1);
 }
 
+static int	inject_action(void);
+
 static int
 inject_hook(int phase, int index)
 {
+	int			rc = REG_OKAY;
+
 	if (phase != inj_phase || (inj_index >= 0 && index != inj_index))
 		return REG_OKAY;
 	inj_attempts++;
-	if (inj_remaining == 0)
-		return REG_OKAY;
+	if (inj_remaining != 0)
+		rc = inject_action();
+	if (rc == REG_OKAY)
+		inj_engine_entered++;
+	return rc;
+}
+
+/*
+ * The engine returned (it didn't throw). INJ_EXPIREAFTER: the compile time
+ * limit expires now, after the engine completed but before it is disarmed,
+ * as when the backend is descheduled right after the engine returns.
+ */
+static void
+inject_engine_hook(int phase, int index, int rc)
+{
+	if (phase != inj_phase || (inj_index >= 0 && index != inj_index))
+		return;
+	if (rc == REG_OKAY)
+		inj_engine_ok++;
+	if (inj_expire_after)
+	{
+		void		(*expire) (int) = (void (*) (int)) main_sym("pssc_regex_test_expire_in");
+
+		inj_expire_after = false;
+		expire(1);
+		for (int i = 0; i < 5000 && !QueryCancelPending; i++)
+			pg_usleep(1000L);
+		if (!QueryCancelPending)
+			ereport(WARNING,
+					(errmsg("pssc_extract_test: the compile time limit did not expire after the engine returned")));
+	}
+}
+
+static int
+inject_action(void)
+{
 	if (inj_remaining > 0)
 		inj_remaining--;
 	inj_fired++;
@@ -482,6 +524,9 @@ inject_hook(int phase, int index)
 				expire(inj_expire_ms);
 				return REG_OKAY;
 			}
+		case INJ_EXPIREAFTER:
+			inj_expire_after = true;
+			return REG_OKAY;
 	}
 	return REG_OKAY;
 }
@@ -495,6 +540,7 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 	char	   *action = text_to_cstring(PG_GETARG_TEXT_PP(2));
 	int			count = PG_GETARG_INT32(3);
 	PsscRegexTestHook *hook = (PsscRegexTestHook *) main_sym("pssc_regex_test_hook");
+	PsscRegexTestEngineHook *ehook = (PsscRegexTestEngineHook *) main_sym("pssc_regex_test_engine_hook");
 	static const char *const names[] = {
 		[INJ_NONE] = "none", [INJ_ESPACE] = "espace", [INJ_ETOOBIG] = "etoobig",
 		[INJ_OOM] = "oom", [INJ_ERROR] = "error", [INJ_CANCEL] = "cancel",
@@ -503,7 +549,7 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 		[INJ_REGSTALL] = "regstall", [INJ_LATEINT] = "lateint",
 		[INJ_LATEREGINT] = "lateregint", [INJ_LATEWAIT] = "latewait",
 		[INJ_LATECONFLICT] = "lateconflict", [INJ_LATEREGCONFLICT] = "lateregconflict",
-		[INJ_EXPIRE] = "expire"
+		[INJ_EXPIRE] = "expire", [INJ_EXPIREAFTER] = "expireafter"
 	};
 	int			a = -1;
 
@@ -533,7 +579,11 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 	inj_remaining = count;
 	inj_fired = 0;
 	inj_attempts = 0;
+	inj_engine_entered = 0;
+	inj_engine_ok = 0;
+	inj_expire_after = false;
 	*hook = a == INJ_NONE ? NULL : inject_hook;
+	*ehook = a == INJ_NONE ? NULL : inject_engine_hook;
 	PG_RETURN_VOID();
 }
 
@@ -555,6 +605,18 @@ Datum
 pssc_extract_test_regex_attempts(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(inj_attempts);
+}
+
+/*
+ * Of those attempts, how many engine calls were interrupted: let run, but
+ * did not complete (they threw, as PG16+ on a cancel, or returned an error,
+ * as REG_CANCEL from PG14/15).
+ */
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_interrupted);
+Datum
+pssc_extract_test_regex_interrupted(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(inj_engine_entered - inj_engine_ok);
 }
 
 PG_FUNCTION_INFO_V1(pssc_extract_test_regex_expire_ms);

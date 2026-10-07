@@ -624,10 +624,15 @@ for my $action (qw(sleep regsleep))
 # speed; the attempt used little CPU time, so it is retried and compiles.
 # The backend's memory growth from the lazy compile (and the check hook's
 # test compile before it) must match a clean compile's. That the expiry
-# landed mid-compile is checked directly: the hook runs once per attempt,
-# so it ran twice only if the first attempt was stopped and retried. A
-# trivial pattern, whose compile ends long before the expiry, shows that it
-# then runs once.
+# landed mid-compile is checked directly: the test module counts the
+# attempts (hook calls) and, of those, the engine calls that did not
+# complete (PG16+ threw the cancel, PG14/15 returned REG_CANCEL). Two
+# attempts of which one was interrupted is the case under test. An expiry
+# after the engine completed is not: a trivial pattern, whose lazy compile
+# ends long before the expiry, is accepted in one attempt; and an expiry
+# made to fire right after the engine returned, before the limit is
+# disarmed ('expireafter'), makes the strict check hook retry, but nothing
+# was interrupted.
 {
 	my $s = session_open();
 	sq($s, 'SELECT pssc_extract_test_regex_compile_limit(60000)');
@@ -635,9 +640,18 @@ for my $action (qw(sleep regsleep))
 	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, 'expire', 1)");
 	sex($s, sqlq(q{SELECT 1 /* zz=a */}));
 	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, 'expiry after the compile finished: injected once');
-	is(sq($s, 'SELECT pssc_extract_test_regex_attempts()'), 1, 'expiry after the compile finished: one attempt, not retried');
+	is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '1|0',
+		'expiry after the compile finished: one attempt, not interrupted');
 	is(rstats($s), '1|0|1|0', 'expiry after the compile finished: one regex live');
 	is(sq($s, 'SELECT pg_sleep(0.4), 42'), '|42', 'expiry after the compile finished: no cancel left pending');
+
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'expireafter', 1)");
+	my (undef, $err) = sq_err($s, "SELECT pssc_extract_test_set_local('$P.extractors', " . sqlq(q{regex(pattern='yy=(\w+)', keys=yy)}) . ')');
+	is($err, '', 'check hook, expiry after the engine completed: accepted');
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, 'check hook, expiry after the engine completed: injected once');
+	is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '2|0',
+		'check hook, expiry after the engine completed: retried, but not interrupted');
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', 'check hook, expiry after the engine completed: no cancel left pending');
 	session_close($s);
 }
 my $MID = q{((?:(?:$)|\Zda|(?<!1)|\S){0,14})};
@@ -670,7 +684,7 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 		if ($expire)
 		{
 			is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "$what, check hook: expired once");
-			is(sq($s, 'SELECT pssc_extract_test_regex_attempts()'), 2,
+			is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '2|1',
 				"$what, check hook: the attempt was stopped mid-compile and retried");
 		}
 		sq($s, "SELECT pssc_extract_test_regex_inject('$phase', 0, 'expire', 1)") if $expire;
@@ -684,7 +698,8 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 		if ($expire)
 		{
 			is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "$name: expired once");
-			is(sq($s, 'SELECT pssc_extract_test_regex_attempts()'), 2, "$name: stopped mid-compile and retried");
+			is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '2|1',
+				"$name: stopped mid-compile and retried");
 		}
 		note "$name: ${dt}s, backend grew by $grew bytes";
 		$res{$expire} = [ $grew, $dt ];
