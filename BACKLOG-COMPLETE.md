@@ -1154,6 +1154,19 @@ Verified locally on macOS (arm64, source builds, `docker/run-tests.sh`): with `.
 **Open questions:** none
 **Status:** done
 
+### 20261007-064749-1: 006: retry-cleanup precondition must not depend on runner speed
+
+**Description:** In `test/t/006_regex.pl` (around line 662), the "attempt expired mid-compile, retried" checks from 20261006-080948-1 assert `cmp_ok($res{0}[1], '>', 0.6, "...compiling takes long enough to be interrupted mid-compile")`. The 'expire' injection fires 300 ms into the compile of `$MID`, so the clean compile only has to outlast 300 ms (plus margin) for the interrupt to land mid-compile. On fast GitHub runners the clean compile took 0.56–0.59 s, which failed this precondition (CI run 37630525613: Linux PG14 assert #208, Linux PG15 PGDG #208 and #218) even though the interruption itself worked. Make the precondition check what actually matters, with margin that doesn't depend on how fast the runner is. For example: confirm the expiry happened while the compile was still in progress, scale the expiry point to the measured clean compile time, or use a pattern that is reliably several times slower than the expiry point without making the test much slower.
+
+**Acceptance criteria:**
+- The precondition no longer fails just because a clean compile takes 0.3–0.6 s. Demonstrate this with a failing-before test, for example by making the compile faster in a test-only way or by running the check against the recorded CI timings.
+- The precondition still fails, so the test is not vacuous, if the expiry lands after the compile has finished.
+- The Docker harness passes on PG14–18, and on the macOS host for PG18.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
