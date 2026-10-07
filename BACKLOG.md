@@ -53,6 +53,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261007-064749-2 | 006: calibrate the retry-cleanup expiry from engine time, not client round trip | 20261007-064749-1 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 | no | ready |
 | 20261006-220356-1 | Flaky TAP 017: utility time parity with pgss under assert builds | none | no | ready |
+| 20261007-095213-1 | 017: the stall rerun must not erase first-run non-timing failures | 20261006-220356-1 | no | blocked-on-deps |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -210,6 +211,24 @@ Split from 20261007-064749-1 (round-2 review finding, not fixed within 2 rounds)
 **Depends on:** none
 **Open questions:** none
 **Status:** ready
+
+### 20261007-095213-1: 017: the stall rerun must not erase first-run non-timing failures
+
+**Description:** Split from 20261006-220356-1 (its round-2 review finding, gpt-6.1-sol, not fixed within the 2-round limit). In `test/t/017_lifecycle.pl`, `compare()` reruns a configuration's workload once if the first pgss-parity comparison failed only on utility time and passed the coverage checks. Other per-configuration invariants are asserted after `compare()` returns, on state the rerun replaces:
+- the `utility_missing_queryid` counter in the wrong-load-order case (the callback around line 1121 overwrites `$m0`);
+- the lifecycle and tag-attribution checks;
+- the presence checks for differing settings.
+
+So a first-run failure in one of them, together with a utility stall, is erased when the rerun passes. The reviewer showed it in memory: complete coverage, a utility excess, and a first-run counter of 999 where 5 was expected. Everything passed after the rerun. A deterministic bug fails again on the rerun, so only a non-deterministic bug that coincides with a utility stall could be hidden.
+
+**Acceptance criteria:**
+- Each configuration's non-timing invariants are evaluated on the first run before any reset. The workload is retried only if they all pass; otherwise the first run's failures are reported.
+- A scratch stub demonstrates it: a wrong first-run counter plus a utility excess fails and is not retried.
+- 017 still passes repeated `--assert 16` runs under load; the full suite passes on PG 14-18.
+
+**Depends on:** 20261006-220356-1
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ---
 

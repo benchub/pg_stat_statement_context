@@ -17,6 +17,18 @@
 #     utility and our frame bookkeeping, a bounded per-call cost. Allowed:
 #     1% of pgss's time + $UTIL_SLACK_MS per call (default 2 ms;
 #     PSSC_TEST_UTILITY_SLACK_MS overrides it, e.g. under Valgrind).
+#     A scheduling stall between the two clock reads lands in the
+#     enclosing hook's time only, and on a loaded host (seen under --assert
+#     in a laptop Docker VM: 5.6 ms for one RELEASE SAVEPOINT) exceeds any
+#     slack tight enough to matter. So when the only problems of a
+#     comparison are utility times beyond that bound in the enclosing hook's
+#     direction (ours above pgss's; pgss's above ours with the wrong load
+#     order), the configuration's workload is run once more (after a reset)
+#     and the second comparison is final, with the same bound. A stall is
+#     rare and random, so it does not hit twice; a systematic error (a
+#     per-call offset, double counting) fails again. Widening the bound or
+#     tolerating "a few outliers" instead would hide double counting: only
+#     the few utilities slower than the slack (EXPLAIN ANALYZE) reveal it.
 # The workload: prepared statements over the extended protocol (named
 # statements Parsed once and Bound/Executed many times, through the raw
 # protocol driver below so that every version is covered; unnamed ones
@@ -730,7 +742,10 @@ sub fetch_rows
 	return @rows;
 }
 
-# Time check for a row present in both (see the header).
+# Time check for a row present in both (see the header). Returns the
+# problem, if any, and whether it is a utility time difference a stall can
+# cause (see compare()): the enclosing hook's time above the other's, ours
+# with the documented load order, pgss's with the wrong one.
 sub time_problem
 {
 	my ($r, $enclosing) = @_;
@@ -738,13 +753,14 @@ sub time_problem
 	my $eps = 1e-9 * ($s > 1 ? $s : 1);
 	if ($r->{plannable})
 	{
-		return abs($o - $s) <= $eps ? undef
-		  : "plannable time $o != $s";
+		return abs($o - $s) <= $eps ? () : ("plannable time $o != $s", 0);
 	}
-	return "utility time $o < pgss's $s" if $enclosing && $o < $s - $eps;
+	return ("utility time $o < pgss's $s", 0)
+	  if $enclosing && $o < $s - $eps;
 	my $max = 0.01 * $s + $UTIL_SLACK_MS * $r->{ours};
-	return abs($o - $s) <= $max ? undef
-	  : "utility time $o vs pgss's $s (allowed difference $max)";
+	return abs($o - $s) <= $max ? ()
+	  : ("utility time $o vs pgss's $s (allowed difference $max)",
+		$enclosing ? $o > $s : $s > $o);
 }
 
 # Compares this extension's rows with pgss's.
@@ -753,12 +769,50 @@ sub time_problem
 #                the other's, with equal calls and times on shared keys.
 #   mode wrong:  wrong load order; ours a subset, every missing row a
 #                utility; returns the calls of the missing rows.
+# If the only problems are utility times beyond the bound in the direction
+# a stall can cause (see the header and time_problem()), and the coverage
+# checks (rows shared, both roles, both databases) hold, the workload is reset and run once more, then
+# $after (if given) is called, and the second comparison is final.
 sub compare
 {
-	my ($label, $mode, $sub) = @_;
+	my ($label, $mode, $sub, $after) = @_;
+	my $c = compare_rows($mode, $sub);
+	my $covered = sub {
+		my ($x) = @_;
+		return $x->{shared} >= 40
+		  && join(',', sort keys %{ $x->{users} }) eq join(',', sort values %uid)
+		  && join(',', sort keys %{ $x->{dbs} }) eq join(',', sort values %dbid);
+	};
+	# An incomplete comparison is never retried: its coverage failures are
+	# reported, not replaced by a rerun's.
+	if (@{ $c->{bad} } && $c->{stall_only} && $covered->($c))
+	{
+		diag("$label: utility time above the bound only, running the workload again:\n"
+			  . join("\n", @{ $c->{bad} }));
+		reset_all();
+		run_workload("$label (rerun)");
+		$after->() if $after;
+		$c = compare_rows($mode, $sub);
+	}
+	ok($c->{shared} >= 40,
+		"$label: workload produced rows recorded by both ($c->{shared})");
+	is_deeply([ sort keys %{ $c->{users} } ], [ sort values %uid ],
+		"$label: rows of both roles compared");
+	is_deeply([ sort keys %{ $c->{dbs} } ], [ sort values %dbid ],
+		"$label: rows of both databases compared");
+	is(scalar(@{ $c->{bad} }), 0,
+		"$label: per-(userid, dbid, queryid, toplevel) calls and total_exec_time equal pgss's"
+	) or diag(join("\n", @{ $c->{bad} }));
+	return $c->{missing_calls};
+}
+
+sub compare_rows
+{
+	my ($mode, $sub) = @_;
 	my @rows = fetch_rows();
 	my (@bad, $shared, $missing_calls);
-	$missing_calls = 0;
+	$shared = $missing_calls = 0;
+	my $stall_only = 1;
 	my (%users, %dbs);
 	for my $r (@rows)
 	{
@@ -772,15 +826,23 @@ sub compare
 			if ($r->{ours} != $r->{theirs})
 			{
 				push @bad, "calls differ: $desc";
+				$stall_only = 0;
 				next;
 			}
-			my $p = time_problem($r, $mode ne 'wrong');
-			push @bad, "$p: $desc" if $p;
+			my ($p, $excess) = time_problem($r, $mode ne 'wrong');
+			if ($p)
+			{
+				push @bad, "$p: $desc";
+				$stall_only &&= $excess;
+			}
 		}
 		elsif ($r->{ours} >= 0)
 		{
-			push @bad, "only here: $desc"
-			  unless $mode eq 'subset' && $sub eq 'pgss';
+			unless ($mode eq 'subset' && $sub eq 'pgss')
+			{
+				push @bad, "only here: $desc";
+				$stall_only = 0;
+			}
 		}
 		else
 		{
@@ -789,6 +851,7 @@ sub compare
 				if ($r->{plannable})
 				{
 					push @bad, "plannable only in pgss: $desc";
+					$stall_only = 0;
 				}
 				else
 				{
@@ -798,19 +861,18 @@ sub compare
 			elsif (!($mode eq 'subset' && $sub eq 'ours'))
 			{
 				push @bad, "only in pgss: $desc";
+				$stall_only = 0;
 			}
 		}
 	}
-	ok($shared >= 40,
-		"$label: workload produced rows recorded by both ($shared)");
-	is_deeply([ sort keys %users ], [ sort values %uid ],
-		"$label: rows of both roles compared");
-	is_deeply([ sort keys %dbs ], [ sort values %dbid ],
-		"$label: rows of both databases compared");
-	is(scalar(@bad), 0,
-		"$label: per-(userid, dbid, queryid, toplevel) calls and total_exec_time equal pgss's"
-	) or diag(join("\n", @bad));
-	return $missing_calls;
+	return {
+		bad => \@bad,
+		stall_only => $stall_only,
+		shared => $shared,
+		users => \%users,
+		dbs => \%dbs,
+		missing_calls => $missing_calls
+	};
 }
 
 # "toplevel:ours/pgss" of one queryid in database postgres, both users.
@@ -1055,7 +1117,8 @@ for my $track ('top', 'all')
 	run_workload($label);
 	# (reset_all() also reset the counter.)
 	my $m0 = missing_queryid();
-	my $missing = compare($label, 'wrong');
+	my $missing = compare($label, 'wrong', undef,
+		sub { $m0 = missing_queryid(); });
 	ok($missing > 0, "$label: pgss recorded utilities this extension could not");
 	is($m0, $missing + lost($track, 'on'),
 		"$label: every utility missing here, and every re-executed cached utility, was counted in utility_missing_queryid");
