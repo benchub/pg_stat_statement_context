@@ -1,0 +1,14 @@
+# Builds Ubuntu 24.04 (noble) .deb packages of pg_stat_statement_context
+# against PGDG PostgreSQL. Usage: scripts/build-debs.sh
+FROM ubuntu:noble
+ARG PG_MAJORS="14 15 16 17 18"
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates postgresql-common build-essential dpkg-dev \
+ && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
+ && for v in ${PG_MAJORS}; do pkgs="$pkgs postgresql-server-dev-$v"; done \
+ && apt-get install -y --no-install-recommends $pkgs \
+ && rm -rf /var/lib/apt/lists/*
+COPY build-deb.sh /usr/local/bin/build-deb.sh
+ENTRYPOINT ["/usr/local/bin/build-deb.sh"]

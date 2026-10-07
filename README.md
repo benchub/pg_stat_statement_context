@@ -46,6 +46,8 @@ make install # may need sudo
 # for a specific server: make PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config install
 ```
 
+To build Ubuntu 24.04 (noble) `.deb` packages for PostgreSQL 14–18 from PGDG, on amd64 and arm64, run `scripts/build-debs.sh`. It needs Docker, builds the committed tree, and writes the packages to `binaries/`. Each package is named `postgresql-<major>-pg-stat-statement-context`.
+
 Add the library to `shared_preload_libraries` in `postgresql.conf`. If you use `pg_stat_statements` too, it **must come first**:
 
 ```ini
