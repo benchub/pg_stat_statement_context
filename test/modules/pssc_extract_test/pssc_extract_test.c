@@ -311,6 +311,8 @@ static int	inj_attempts = 0;	/* hook calls for the phase/index, fired or not */
 static int	inj_engine_entered = 0; /* of those, engine calls let run */
 static int	inj_engine_ok = 0;	/* engine calls that returned REG_OKAY */
 static bool inj_expire_after = false;	/* INJ_EXPIREAFTER fired, engine running */
+static instr_time inj_engine_start;	/* the engine call let run last */
+static double inj_engine_ms = -1;	/* wall time of the last that completed */
 
 /* REG_CANCEL of the PG14/15 engine (21); PG16+ throws instead. */
 #define PSSC_TEST_REG_CANCEL 21
@@ -446,7 +448,10 @@ inject_hook(int phase, int index)
 	if (inj_remaining != 0)
 		rc = inject_action();
 	if (rc == REG_OKAY)
+	{
 		inj_engine_entered++;
+		INSTR_TIME_SET_CURRENT(inj_engine_start);
+	}
 	return rc;
 }
 
@@ -461,7 +466,14 @@ inject_engine_hook(int phase, int index, int rc)
 	if (phase != inj_phase || (inj_index >= 0 && index != inj_index))
 		return;
 	if (rc == REG_OKAY)
+	{
+		instr_time	now;
+
+		INSTR_TIME_SET_CURRENT(now);
+		INSTR_TIME_SUBTRACT(now, inj_engine_start);
+		inj_engine_ms = INSTR_TIME_GET_MILLISEC(now);
 		inj_engine_ok++;
+	}
 	if (inj_expire_after)
 	{
 		void		(*expire) (int) = (void (*) (int)) main_sym("pssc_regex_test_expire_in");
@@ -638,6 +650,7 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 	inj_engine_entered = 0;
 	inj_engine_ok = 0;
 	inj_expire_after = false;
+	inj_engine_ms = -1;
 	*hook = a == INJ_NONE ? NULL : inject_hook;
 	*ehook = a == INJ_NONE ? NULL : inject_engine_hook;
 	PG_RETURN_VOID();
@@ -673,6 +686,22 @@ Datum
 pssc_extract_test_regex_interrupted(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(inj_engine_entered - inj_engine_ok);
+}
+
+/*
+ * Wall-clock time, in ms, of the last engine call for the injected phase
+ * (and index) that completed, measured in this backend from right before
+ * the engine was entered to its return; NULL if none completed since the
+ * injection was set. Unlike a client's round trip, it does not include
+ * statement processing, IPC or the client being descheduled.
+ */
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_engine_ms);
+Datum
+pssc_extract_test_regex_engine_ms(PG_FUNCTION_ARGS)
+{
+	if (inj_engine_ms < 0)
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(inj_engine_ms);
 }
 
 PG_FUNCTION_INFO_V1(pssc_extract_test_regex_expire_ms);

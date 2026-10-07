@@ -644,10 +644,15 @@ for my $action (qw(sleep regsleep))
 # attempt stopped by the limit after the real engine allocated (PG16+ throw
 # out of pg_regcomp() before its cleanup, PG14/15 return REG_CANCEL) and
 # then retried must not keep the abandoned allocations. 'expire' makes the
-# limit (60 s here) expire into the compile of $MID, at half the time a
-# clean compile took on this host (0.5-1 s), so that the abandoned attempt
-# has allocated about half of what the compile needs whatever the host's
-# speed; the attempt used little CPU time, so it is retried and compiles.
+# limit (60 s here) expire into the compile of $MID, at half the time the
+# engine took for the same clean compile on this host (0.5-1 s), so that the
+# abandoned attempt has allocated about half of what the compile needs
+# whatever the host's speed; the attempt used little CPU time, so it is
+# retried and compiles. That time is measured in the backend around the
+# engine call (backlog 20261007-064749-2), not as the client's round trip,
+# which also counts statement processing, IPC and the client being
+# descheduled: the clean compile's round trip here includes a client delay
+# longer than the compile, which an expiry calibrated from it would miss.
 # The backend's memory growth from the lazy compile (and the check hook's
 # test compile before it) must match a clean compile's. That the expiry
 # landed mid-compile is checked directly: the test module counts the
@@ -681,6 +686,7 @@ for my $action (qw(sleep regsleep))
 	session_close($s);
 }
 my $MID = q{((?:(?:$)|\Zda|(?<!1)|\S){0,14})};
+my $BASELINE_DELAY_US = 2_000_000;
 for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(position=any, merge=on)", undef, 'compile' ],
 	[ 'normalize rule', 'sqlcommenter(position=any)', "a: '$MID' => 'y'", 'norm_compile' ])
 {
@@ -695,11 +701,10 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 		};
 		my $m0 = $mem->();
 		sq($s, 'SELECT pssc_extract_test_regex_compile_limit(60000)');
-		if ($expire)
-		{
-			sq($s, 'SELECT pssc_extract_test_regex_expire_ms(' . int(1000 * $res{0}[1] / 2 + 1) . ')');
-			sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'expire', 1)");
-		}
+		# With count 0 the injection only counts attempts and times the
+		# engine, for the clean compile.
+		sq($s, 'SELECT pssc_extract_test_regex_expire_ms(' . int($res{0}[2] / 2 + 1) . ')') if $expire;
+		sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'expire', $expire)");
 		my (undef, $err) = sq_err($s, "SELECT pssc_extract_test_set_local('$P.extractors', " . sqlq($ext) . ')');
 		if (defined $norm)
 		{
@@ -707,16 +712,28 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 			$err .= $err2;
 		}
 		is($err, '', "$what, check hook" . ($expire ? ', attempt expired mid-compile' : '') . ': accepted');
+		my $check_ms = sq($s, 'SELECT pssc_extract_test_regex_engine_ms()');
 		if ($expire)
 		{
 			is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "$what, check hook: expired once");
 			is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '2|1',
 				"$what, check hook: the attempt was stopped mid-compile and retried");
 		}
-		sq($s, "SELECT pssc_extract_test_regex_inject('$phase', 0, 'expire', 1)") if $expire;
+		else
+		{
+			is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '1|0',
+				"$what, check hook, clean compile: one attempt, not interrupted");
+			cmp_ok($check_ms, '>', 0, "$what, check hook, clean compile: engine time measured (${check_ms} ms)");
+		}
+		sq($s, 'SELECT pssc_extract_test_regex_expire_ms(' . int($res{0}[3] / 2 + 1) . ')') if $expire;
+		sq($s, "SELECT pssc_extract_test_regex_inject('$phase', 0, 'expire', $expire)");
 		my $t0 = time;
 		my $r = sex($s, sqlq(q{SELECT 1 /* x */ /*a='x'*/}));
+		# The client's round trip does not calibrate the expiry: a client
+		# delayed in the clean compile's round trip changes nothing.
+		usleep($BASELINE_DELAY_US) unless $expire;
 		my $dt = time - $t0;
+		my $compile_ms = sq($s, 'SELECT pssc_extract_test_regex_engine_ms()');
 		my $grew = $mem->() - $m0;
 		my $name = "$what, " . ($expire ? 'attempt expired mid-compile, retried' : 'clean compile');
 		is($r->{regex_fail}, 0, "$name: compiled, not counted");
@@ -727,8 +744,14 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 			is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '2|1',
 				"$name: stopped mid-compile and retried");
 		}
-		note "$name: ${dt}s, backend grew by $grew bytes";
-		$res{$expire} = [ $grew, $dt ];
+		else
+		{
+			is(sq($s, 'SELECT pssc_extract_test_regex_attempts(), pssc_extract_test_regex_interrupted()'), '1|0',
+				"$name: one attempt, not interrupted");
+			cmp_ok($compile_ms, '>', 0, "$name: engine time measured (${compile_ms} ms)");
+		}
+		note "$name: ${dt}s round trip, engine ${check_ms} ms (check hook) and ${compile_ms} ms, backend grew by $grew bytes";
+		$res{$expire} = [ $grew, $dt, $check_ms, $compile_ms ];
 		session_close($s);
 	}
 	cmp_ok($res{1}[0] - $res{0}[0], '<', $res{0}[0] / 4,

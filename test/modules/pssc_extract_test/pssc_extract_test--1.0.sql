@@ -113,6 +113,13 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_extract_test_regex_interrupted() RETURNS int
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- Wall-clock ms of the last engine call for the injection's phase (and idx)
+-- that completed, measured in the backend around the engine alone; NULL if
+-- none since the injection was set. With count 0 an injection fires nothing
+-- but still counts attempts and times the engine.
+CREATE FUNCTION pssc_extract_test_regex_engine_ms() RETURNS float8
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
 -- How long into the attempt the 'expire' injection makes the compile time
 -- limit expire (default 300 ms), in this backend. Returns the old value.
 CREATE FUNCTION pssc_extract_test_regex_expire_ms(ms int) RETURNS int
