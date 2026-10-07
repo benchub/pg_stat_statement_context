@@ -30,6 +30,7 @@ The GUCs exist only when the library is in `shared_preload_libraries`.
 | [`max_tagset_bytes`](#max_tagset_bytes) | integer (bytes) | `512` | 128 – 8192 | postmaster |
 | [`reclaim_worker`](#reclaim_worker) | bool | `off` | | postmaster |
 | [`reclaim_worker_interval`](#reclaim_worker_interval) | integer (ms) | `10000` (`10s`) | 100 ms – 1 day | sighup |
+| [`save`](#save) | bool | `on` | | sighup |
 | [`scan_window`](#scan_window) | integer (bytes) | `2048` (`2kB`) | 64 B – 1 MB | sighup |
 | [`extractors`](#extractors) | string | `'sqlcommenter, marginalia'` | extractor DSL | sighup |
 | [`tags`](#tags) | string | `'action, controller, job'` | key list or `'*'` | sighup |
@@ -168,6 +169,24 @@ the current bucket unchanged since the last one does nothing, so dead entries
 are freed at most `reclaim_worker_interval` after their last bucket expires,
 and the worker takes the table's exclusive lock at most once per
 `bucket_interval`. Ignored when `reclaim_worker` is off.
+
+### `save`
+
+Keeps the statistics across clean restarts, like `pg_stat_statements.save`.
+After a smart or fast shutdown the postmaster writes the store to
+`$PGDATA/pg_stat/pg_stat_statement_context.stat`; the next start loads it
+and removes the file. Entries, their buckets, the counters, `stats_reset`
+and the bucket times are kept; buckets that expired while the server was
+down are dropped. Exemplars are not saved.
+
+The file is not used (each case is logged, and the server starts with an
+empty store) when it was written by another file format, PostgreSQL major
+version or extension version; when `bucket_interval` or `bucket_count`
+changed; when it is corrupt; or when `save` is off at startup. A smaller
+`max_entries` evicts the excess in [eviction](#eviction) order, and tag sets
+that no longer fit `max_tagset_bytes` are skipped. Nothing is saved after an
+immediate shutdown or a crash, and the file is removed at every start, so
+statistics from before a crash are never loaded.
 
 ### `scan_window`
 
@@ -446,7 +465,7 @@ caps fail closed. `pg_stat_statement_context_reset()` empties the table.
 ### `exemplar_keys`
 
 Keys whose most recent value is stored with each entry as an **exemplar**,
-shown in the `exemplars` column of the views (version 1.1), e.g.
+shown in the `exemplars` column of the views, e.g.
 `'traceparent'`: from an expensive aggregate you can jump to one real trace
 without grouping by the trace id. A comma-separated list of at most 8 keys
 (at most 63 bytes each, no whitespace or `*`, case-sensitive; duplicates
@@ -570,8 +589,9 @@ on wall-clock multiples of `bucket_interval`, and all backends agree on them.
   steps back, new calls go into the newest bucket already seen; if it jumps
   forward by more than the history window, all old buckets expire at once.
 
-The statistics live in shared memory only: they are lost on a server restart
-or crash.
+The statistics live in shared memory. With [`save`](#save) on they survive
+a clean restart (unless `bucket_interval` or `bucket_count` changed); they
+are lost after a crash or an immediate shutdown.
 
 ## Eviction
 

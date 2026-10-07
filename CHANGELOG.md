@@ -9,28 +9,6 @@ upgrade scripts (see [DESIGN.md §7](DESIGN.md#7-sql-interface-v1)).
 
 ## [Unreleased]
 
-### Added
-
-- **Reclaim worker** (`reclaim_worker`, postmaster, default `off`;
-  `reclaim_worker_interval`, sighup, default `10s`): an optional background
-  worker that frees dead entries (all buckets expired) on idle systems,
-  without waiting for an insert into a full table. It counts them in
-  `_info().reclaimed_entries`, leaves `dealloc` and `evicted_entries` alone,
-  and never evicts live entries or decays usage. With it off nothing changes.
-- **Statistics survive clean restarts** (`save`, sighup, default `on`, as
-  `pg_stat_statements.save`). After a clean shutdown the postmaster saves the
-  store to `pg_stat/pg_stat_statement_context.stat`, and the next start loads
-  it and removes the file. The loaded state keeps the entries, their buckets,
-  usage, counters, `stats_reset` and the bucket epoch.
-  - A file from another version is discarded, and so is one saved with a
-    different `bucket_interval` or `bucket_count`. A corrupt file is also
-    discarded.
-  - A smaller `max_entries` evicts the excess in eviction order. Tag sets
-    that no longer fit `max_tagset_bytes` are skipped.
-  - Nothing is saved after an immediate shutdown or a crash.
-
-  Each case is logged.
-
 ## [1.0.0] - 2026-10-06
 
 First release. SQL extension version `1.0`. Supports PostgreSQL 14, 15, 16,
@@ -75,6 +53,34 @@ First release. SQL extension version `1.0`. Supports PostgreSQL 14, 15, 16,
   reclaimed first, then live entries by pgss-style usage. Victims are chosen
   from a compact 24-byte-per-entry candidate array with a bounded heap, so a
   pass no longer walks or sorts the whole hash table.
+- **Reclaim worker** (`reclaim_worker`, postmaster, default `off`;
+  `reclaim_worker_interval`, sighup, default `10s`): an optional background
+  worker that frees dead entries (all buckets expired) on idle systems,
+  without waiting for an insert into a full table. It counts them in
+  `_info().reclaimed_entries`, leaves `dealloc` and `evicted_entries` alone,
+  and never evicts live entries or decays usage. With it off nothing changes.
+- **Statistics survive clean restarts** (`save`, sighup, default `on`, as
+  `pg_stat_statements.save`). After a clean shutdown the postmaster saves the
+  store to `pg_stat/pg_stat_statement_context.stat`, and the next start loads
+  it and removes the file. The loaded state keeps the entries, their buckets,
+  usage, counters, `stats_reset` and the bucket epoch.
+  - A file from another file format, PostgreSQL major or extension version
+    is discarded, and so is one saved with a different `bucket_interval` or
+    `bucket_count`. A corrupt file is also discarded.
+  - A smaller `max_entries` evicts the excess in eviction order. Tag sets
+    that no longer fit `max_tagset_bytes` are skipped.
+  - Nothing is saved after an immediate shutdown or a crash.
+
+  Each case is logged.
+- **Exemplars** for high-cardinality keys that are not grouped by, such as
+  `traceparent` (`exemplar_keys`, postmaster, default `''` = off, at most 8
+  keys; `exemplar_memory`, postmaster, default `2MB`): the most recent value
+  of each listed key is stored per entry and shown in the `exemplars` jsonb
+  column of the stats views (`{}` when none; `NULL` when `tags` is). Values
+  longer than the per-value room (`_info().exemplar_value_bytes`) are dropped
+  and counted in `_info().exemplar_values_dropped`;
+  `_info().exemplar_shmem_bytes` reports their memory. Exemplars are not
+  saved across restarts.
 - **SQL interface:** `pg_stat_statement_context(showtags, merge_buckets)`
   with the `pg_stat_statement_context` (per bucket) and
   `pg_stat_statement_context_totals` (per entry) views;

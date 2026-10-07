@@ -1198,7 +1198,7 @@ provider adds it. This is the main obstacle to adoption.
 High-cardinality keys such as `traceparent` must not be grouped by (§6.1),
 but a link from an aggregate to one real trace is useful. An **exemplar** is
 the most recent value of such a key, stored per entry without becoming part
-of the key (item 20261005-091225-33, extension version 1.1).
+of the key (item 20261005-091225-33; part of SQL version 1.0, §7).
 
 - **Which keys:** only those listed in `exemplar_keys` (§4.1), a dedicated
   postmaster GUC (decided 2026-10-05): the denylist does not double as the
@@ -1226,14 +1226,13 @@ of the key (item 20261005-091225-33, extension version 1.1).
   exemplar is the latest value *seen*, not necessarily from the latest call.
   The value written is the one of the statement that recorded last, which
   under concurrency is the last to take the spinlock.
-- **Reads:** a jsonb object `{key: value}` in the 1.1 `exemplars` column of
+- **Reads:** a jsonb object `{key: value}` in the `exemplars` column of
   the stats views and functions (§7), `{}` when nothing is stored. Values are
   converted from the entry's encoding like tags. Visibility is that of tags
   (§6.11): `NULL` for other roles' rows without `pg_read_all_stats`, and
   with `showtags = false`.
 - **Not saved** across restarts (§5.5), and zeroed by `_reset()` with the
-  entries. Since the dump file records the extension version (§5.5), the
-  first restart onto the 1.1 library discards a file saved by 1.0.
+  entries.
 - **Off by default:** with `exemplar_keys = ''` nothing is captured, no
   memory is used, and `exemplars` is `{}`.
 
@@ -1246,6 +1245,14 @@ ones, so any later change to the SQL surface ships as an upgrade script
 in the `.control` file, and its scripts are added to `sql/frozen.sha256` when
 that version is released. `scripts/check-frozen-sql.sh` (run in CI and by
 `docker/run-tests.sh`) fails if a listed script is edited in place.
+
+Version 1.0 was never released before v1.0.0, so the SQL surface added on
+`main` after the first freeze (exemplars, item 20261005-091225-33, briefly
+version 1.1 with an upgrade script) was folded into
+`pg_stat_statement_context--1.0.sql` and its checksum re-recorded (owner
+decision, 2026-10-06, item 20261005-091225-29). The first release therefore
+ships a single install script and no upgrade scripts; the freeze applies from
+v1.0.0 on.
 
 ```sql
 CREATE FUNCTION pg_stat_statement_context(
@@ -1298,22 +1305,9 @@ CREATE FUNCTION pg_stat_statement_context_info(
     OUT exemplar_value_bytes int, OUT exemplar_values_dropped bigint) ...;
 ```
 
-These are the 1.1 definitions (item 20261005-091225-33,
-`sql/pg_stat_statement_context--1.0--1.1.sql`). Version 1.1 adds the
-`exemplars` column (§6.13) as the last column of both functions and so of
-all three views, and three columns at the end of `_info()`. A function's
-result type cannot be changed in place, so the upgrade script drops the
-three views and the three functions and creates them again, pointing at new
-C symbols (`pg_stat_statement_context_1_1`,
-`pg_stat_statement_context_last_bucket_1_1`,
-`pg_stat_statement_context_info_1_1`), then repeats the `GRANT SELECT ...
-TO PUBLIC` on the views. Custom grants on those objects, and user views that
-depend on them, must be recreated after `ALTER EXTENSION
-pg_stat_statement_context UPDATE` (the `DROP` fails, and the update with it,
-while a user view depends on them). The 1.0 C symbols remain in the 1.1
-library with their 11 and 22 columns, so a database still at 1.0 keeps
-working until it is updated. `CREATE EXTENSION` installs 1.1 by running the
-frozen 1.0 script and then the upgrade script.
+These are the 1.0 definitions. The `exemplars` column (§6.13, item
+20261005-091225-33) is the last column of both functions and so of all three
+views, and the three `exemplar_*` columns are the last ones of `_info()`.
 
 Debug function (item -11, ships in 1.0):
 
@@ -1363,7 +1357,7 @@ the store only; `cap_shmem_bytes` is the exact size of the separate cap table
 `evicted_entries` (now live entries only), and `dropped_records` (§5.1,
 §5.3). Added on 2026-10-06 for exporters (item 20261006-010149-1, below):
 `bucket_seconds`, `current_bucket_start`, `last_closed_bucket_start` and
-`stats_reset_epoch`. Added in 1.1 (item 20261005-091225-33, §6.13):
+`stats_reset_epoch`. Added for exemplars (item 20261005-091225-33, §6.13):
 `exemplar_shmem_bytes` (the exemplar slots' part of `shmem_bytes`:
 `max_entries` × the per-entry block, at most `exemplar_memory`; 0 when off),
 `exemplar_value_bytes` (the most bytes an exemplar value may take) and
@@ -1480,17 +1474,17 @@ matches this extension's minimum supported version.
   trace without the key exploding. Exemplar keys are an explicit list in a
   dedicated GUC; the `exclude_tags` denylist does not double as that list.
   Total exemplar storage is bounded by a configurable memory cap (decided
-  2026-10-05).~~ Done (item 20261005-091225-33, extension 1.1; §4.1, §5.1,
+  2026-10-05).~~ Done (item 20261005-091225-33, ships in v1.0.0; §4.1, §5.1,
   §6.11, §6.13, §7): `exemplar_keys` and `exemplar_memory` (postmaster), the
   `exemplars` jsonb column, over-long values dropped and counted.
 - ~~Optional background worker that reclaims dead entries (all slots expired)
-  on idle systems.~~ Done (item 20261005-091225-34, 2026-10-06; §4.1, §5.3):
+  on idle systems.~~ Done (item 20261005-091225-34, 2026-10-06, ships in v1.0.0; §4.1, §5.3):
   `reclaim_worker` (postmaster, default `off`) and `reclaim_worker_interval`.
   It is not needed for correctness, since readers filter expired slots
   (§5.2).
 - ~~**Persist stats across clean restarts** (dump/load like
-  `pg_stat_statements.save`)~~. Done (item 20261005-091225-35, 2026-10-07;
-  §4.1, §5.5). It follows pgss's lead (decided 2026-10-05):
+  `pg_stat_statements.save`)~~. Done (item 20261005-091225-35, 2026-10-07,
+  ships in v1.0.0; §4.1, §5.5). It follows pgss's lead (decided 2026-10-05):
   - the saved file is discarded on a file-format or extension-version
     mismatch;
   - if `max_entries` shrank, what fits is loaded and the rest is evicted
@@ -1554,7 +1548,7 @@ matches this extension's minimum supported version.
   e.g. `/users/\d+` → `/users/:id`, set with `normalize` (§4.1). They run after
   rename and the allowlist/denylist, and before truncation and cardinality caps
   (§6.11 step 6). The `normalize_*` counters appear only in `_extract()`. Adding
-  them to `_info()` is deferred to the 1.1 upgrade-script decision.
+  them to `_info()` is deferred to a later upgrade script.
 
 **v3 — ecosystem**
 - **Integrations (done, item -42):** `docs/integrations/` ships recipes for
@@ -1633,8 +1627,8 @@ matches this extension's minimum supported version.
     `exemplars` shows the latest one; keys not listed are never stored;
     over-long values are dropped and counted, and `exemplar_shmem_bytes`
     stays within `exemplar_memory`; other roles' exemplars are `NULL` for
-    unprivileged viewers; nested statements inherit them; `CREATE EXTENSION
-    ... VERSION '1.0'` then `ALTER EXTENSION ... UPDATE TO '1.1'` adds the
+    unprivileged viewers; nested statements inherit them; 1.0 is the only
+    available version (no update paths) and a fresh install has the
     columns. Unit tests (`test_tagset`) cover the capture step.
   - cross-database encodings, including `SQL_ASCII`
   - visibility for unprivileged roles, and `REVOKE` on reset

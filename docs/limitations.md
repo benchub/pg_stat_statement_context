@@ -115,10 +115,14 @@ not stored; get them from `pg_stat_statements` (see
 [Joining](sql-interface.md#joining-to-pg_stat_statements)). Apportioning them
 to contexts by execution time is an approximation.
 
-## Statistics are not persistent
+## Statistics survive only clean restarts
 
-The statistics live in shared memory and are lost on a restart or crash. The
-history covers only the last `bucket_count × bucket_interval`.
+The statistics live in shared memory. With [`save`](configuration.md#save)
+on (the default) they are saved at a clean shutdown and loaded at the next
+start, but they are lost after a crash or an immediate shutdown, and when
+`bucket_interval`, `bucket_count` or the extension version changes.
+Exemplars are never saved. The history covers only the last
+`bucket_count × bucket_interval`.
 
 ## Visibility and PII
 
@@ -138,8 +142,7 @@ used there.
 
 ## Not in v1
 
-Exemplars and persistence across restarts are not implemented. The
-[cardinality caps](configuration.md#cardinality_cap) don't decay: a value
+The [cardinality caps](configuration.md#cardinality_cap) don't decay: a value
 admitted under a key's cap keeps its place until
 `pg_stat_statement_context_reset()` or a restart, even after its entries are
 evicted.

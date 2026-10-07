@@ -3,7 +3,7 @@
 # lists keys whose most recent value is stored per entry, whether or not the
 # key is also a grouping tag (it is captured after step 4, before the
 # allowlist/denylist of step 5), and shown in the exemplars column of the
-# 1.1 views; exemplar_memory (postmaster) caps their total shared memory, and
+# views; exemplar_memory (postmaster) caps their total shared memory, and
 # a value longer than the per-value room derived from it is dropped (the
 # entry keeps its previous exemplar) and counted in
 # _info().exemplar_values_dropped.
@@ -16,8 +16,8 @@
 # dropped and counted; tags_override beats a comment, as for tags; utility
 # statements; visibility (NULL for other roles' rows without
 # pg_read_all_stats, and with showtags = false); _reset(); exemplars are not
-# saved across a restart; CREATE EXTENSION VERSION '1.0' then ALTER
-# EXTENSION UPDATE TO '1.1'.
+# saved across a restart; version 1.0 (the only one) has the exemplars
+# columns, with no upgrade path.
 use strict;
 use warnings;
 
@@ -41,8 +41,8 @@ sub sql { return $node->safe_psql($_[1] // 'postgres', $_[0]); }
 sub info { return sql("SELECT $_[0] FROM ${P}_info()"); }
 
 sql("CREATE EXTENSION $P; CREATE TABLE t(i int)");
-is(sql("SELECT extversion FROM pg_extension WHERE extname = '$P'"), '1.1',
-	'CREATE EXTENSION installs 1.1');
+is(sql("SELECT extversion FROM pg_extension WHERE extname = '$P'"), '1.0',
+	'CREATE EXTENSION installs 1.0');
 
 # ---------------------------------------------------------------------------
 # GUCs: off by default
@@ -212,42 +212,34 @@ sql("ALTER SYSTEM SET $P.exemplar_memory = '16kB'");
 $node->restart;
 
 # ---------------------------------------------------------------------------
-# Upgrade 1.0 -> 1.1
+# Exemplars are part of 1.0 (folded in before the first release): a single
+# version, no upgrade scripts, and a fresh install has every column.
 # ---------------------------------------------------------------------------
-sql('CREATE DATABASE up');
-sql("CREATE EXTENSION $P VERSION '1.0'", 'up');
+is(sql("SELECT string_agg(version, ',' ORDER BY version) FROM pg_available_extension_versions WHERE name = '$P'"),
+	'1.0', 'the only available version is 1.0');
+is(sql("SELECT count(*) FROM pg_extension_update_paths('$P')"), 0, 'no upgrade paths');
+sql('CREATE DATABASE fresh');
+sql("CREATE EXTENSION $P", 'fresh');
 my $cols = sub {
 	return sql(qq{SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
-	              WHERE attrelid = '$_[0]'::regclass AND attnum > 0}, 'up');
+	              WHERE attrelid = '$_[0]'::regclass AND attnum > 0}, 'fresh');
 };
-my $v10 = 'bucket_start,userid,dbid,queryid,toplevel,tags,calls,total_exec_time,'
-  . 'calls_total,exec_time_total,stats_since';
-is($cols->($P), $v10, '1.0: the view has no exemplars column');
-sql("CREATE TABLE t(i int); SELECT * FROM t /*controller='up',traceparent='tp-up'*/", 'up');
-is(sql("SELECT count(*) FROM $P WHERE tags->>'controller' = 'up'", 'up'), 1,
-	'1.0 functions still work with the 1.1 library');
-is(sql("SELECT count(*) FROM ${P}_info()", 'up'), 1, '1.0 _info() still works');
-sql("ALTER EXTENSION $P UPDATE TO '1.1'", 'up');
-is(sql("SELECT extversion FROM pg_extension WHERE extname = '$P'", 'up'), '1.1', 'updated to 1.1');
 for my $v ($P, "${P}_totals", "${P}_last_bucket")
 {
-	is($cols->($v), "$v10,exemplars", "1.1: $v has the exemplars column");
+	is($cols->($v),
+		'bucket_start,userid,dbid,queryid,toplevel,tags,calls,total_exec_time,'
+		  . 'calls_total,exec_time_total,stats_since,exemplars',
+		"1.0: $v ends with the exemplars column");
 }
-is(sql("SELECT exemplars FROM ${P}_totals WHERE tags->>'controller' = 'up'", 'up'),
-	'{"traceparent": "tp-up"}', 'after the update the exemplar is readable');
-is(sql("SELECT exemplar_shmem_bytes FROM ${P}_info()", 'up'), 16000, '1.1 _info() columns');
+sql("CREATE TABLE t(i int); SELECT * FROM t /*controller='fresh',traceparent='tp-fresh'*/", 'fresh');
+is(sql("SELECT exemplars FROM ${P}_totals WHERE tags->>'controller' = 'fresh'", 'fresh'),
+	'{"traceparent": "tp-fresh"}', '1.0: the exemplar is readable');
+is(sql("SELECT exemplar_shmem_bytes FROM ${P}_info()", 'fresh'), 16000, '1.0: _info() exemplar columns');
 is(sql(q{SELECT has_table_privilege('alice', 'pg_stat_statement_context', 'SELECT')
                 AND has_table_privilege('alice', 'pg_stat_statement_context_totals', 'SELECT')
-                AND has_table_privilege('alice', 'pg_stat_statement_context_last_bucket', 'SELECT')}, 'up'),
-	't', 'the recreated views are readable by PUBLIC');
-is(sql(qq{SELECT count(*) FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
-          WHERE e.extname = '$P' AND d.deptype = 'e'
-            AND d.classid = 'pg_proc'::regclass}, 'up'),
-	sql(qq{SELECT count(*) FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
-           WHERE e.extname = '$P' AND d.deptype = 'e'
-             AND d.classid = 'pg_proc'::regclass}),
-	'an updated install has the same functions as a fresh 1.1 one');
-sql("DROP EXTENSION $P", 'up');
+                AND has_table_privilege('alice', 'pg_stat_statement_context_last_bucket', 'SELECT')}, 'fresh'),
+	't', 'the views are readable by PUBLIC');
+sql("DROP EXTENSION $P", 'fresh');
 
 unlike(slurp_file($node->logfile), qr/PANIC|TRAP|terminated by signal/, 'no crash');
 done_testing();

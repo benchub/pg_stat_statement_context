@@ -19,15 +19,6 @@ The views and functions work only when the library is in
 `shared_preload_libraries`; otherwise they fail with
 `pg_stat_statement_context must be loaded via "shared_preload_libraries"`.
 
-**Upgrading from 1.0.** Version 1.1 adds the `exemplars` column and three
-`_info()` columns. After installing the new library, run
-`ALTER EXTENSION pg_stat_statement_context UPDATE` in each database that has
-the extension (the 1.0 objects keep working with the new library until
-then). The update drops and recreates the three views and the functions
-behind them, so recreate any custom grants on them afterwards, and drop
-your own views that depend on them first. Statistics saved at shutdown by
-the 1.0 library are discarded at the first start with the 1.1 library.
-
 Statistics are cluster-wide: every database's statements are collected, and
 the views show all of them (filter on `dbid` if needed), as in
 `pg_stat_statements`.
@@ -57,7 +48,7 @@ Both have the same columns:
 | `calls_total` | `bigint` | Calls of the **entry** since `stats_since`, whatever bucket they were counted in. Never decreases while the entry exists: expired buckets don't lower it. |
 | `exec_time_total` | `float8` | Execution time of the entry since `stats_since`, in milliseconds, like `calls_total`. |
 | `stats_since` | `timestamptz` | When the entry was created, i.e. when `calls_total` and `exec_time_total` started counting. |
-| `exemplars` | `jsonb` | The most recent value of each key in [`exemplar_keys`](configuration.md#exemplar_keys) seen for the entry, e.g. `{"traceparent": "00-…-01"}`, even if the key is not a grouping tag; `{}` when none is stored. Per entry, like `calls_total`. `NULL` whenever `tags` is (other roles' rows without `pg_read_all_stats`, `showtags = false`). New in version 1.1. |
+| `exemplars` | `jsonb` | The most recent value of each key in [`exemplar_keys`](configuration.md#exemplar_keys) seen for the entry, e.g. `{"traceparent": "00-…-01"}`, even if the key is not a grouping tag; `{}` when none is stored. Per entry, like `calls_total`. `NULL` whenever `tags` is (other roles' rows without `pg_read_all_stats`, `showtags = false`). |
 
 An entry is one (`userid`, `dbid`, `queryid`, `toplevel`, `tags`)
 combination. `pg_stat_statement_context` returns one row per **live** bucket
@@ -388,11 +379,11 @@ SELECT * FROM pg_stat_statement_context_info();
 | `utility_missing_queryid` | `bigint` | Tracked utility statements that arrived without a query ID and were not recorded; normally a sign of the wrong `shared_preload_libraries` order (see the [README](../README.md#load-order)). It also rises, in the correct order, when a utility statement is re-executed from a plan cache (for example a named prepared `SET` over the extended protocol): pg_stat_statements clears its query ID after the first execution, so neither extension counts the re-executions. |
 | `capped_tags` | `bigint` | Tag values recorded as JSON `null` because their key had reached its [cardinality cap](configuration.md#cardinality_cap), including those counted in `cap_table_full`. |
 | `cap_table_full` | `bigint` | Of `capped_tags`, the values collapsed because the shared table of admitted values was full ([`cardinality_cap_slots`](configuration.md#cardinality_cap_slots)). |
-| `stats_reset` | `timestamptz` | Time of the last `pg_stat_statement_context_reset()`, or of server start. |
+| `stats_reset` | `timestamptz` | Time of the last `pg_stat_statement_context_reset()`, or of the server start that began with an empty store (statistics [loaded at startup](configuration.md#save) keep their saved `stats_reset`). |
 | `stats_reset_epoch` | `bigint` | `stats_reset` in whole Unix epoch seconds, for exporters that need a number. |
-| `exemplar_shmem_bytes` | `bigint` | Shared memory used by the [exemplar](configuration.md#exemplar_keys) values, part of `shmem_bytes`; never more than `exemplar_memory`, 0 when `exemplar_keys` is empty. New in 1.1. |
-| `exemplar_value_bytes` | `int` | The longest exemplar value that can be stored, in bytes (at most 256), derived from `exemplar_memory`, `max_entries` and the number of keys. New in 1.1. |
-| `exemplar_values_dropped` | `bigint` | Exemplar values not stored because they were longer than `exemplar_value_bytes` (the entry keeps its previous value). New in 1.1. |
+| `exemplar_shmem_bytes` | `bigint` | Shared memory used by the [exemplar](configuration.md#exemplar_keys) values, part of `shmem_bytes`; never more than `exemplar_memory`, 0 when `exemplar_keys` is empty. |
+| `exemplar_value_bytes` | `int` | The longest exemplar value that can be stored, in bytes (at most 256), derived from `exemplar_memory`, `max_entries` and the number of keys. |
+| `exemplar_values_dropped` | `bigint` | Exemplar values not stored because they were longer than `exemplar_value_bytes` (the entry keeps its previous value). |
 
 The extraction counters (`invalid_tags`, `dropped_tags`, `heuristic_scans`,
 `capped_tags`, `cap_table_full`) are collected per backend and added to the

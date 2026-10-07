@@ -110,7 +110,8 @@ monotonic watermark that follows the clock forwards but never moves back
   `pssc_info_reclaimed_entries_total` counts expired entries recycled when
   the table is full, which is normal. `pssc_info_dropped_records_total` should
   always be 0 (see [Eviction](../configuration.md#eviction)).
-* **`pg_stat_statement_context_reset()`** (or a restart) clears the buckets.
+* **`pg_stat_statement_context_reset()`** (or a restart that does not load
+  [saved statistics](../configuration.md#save)) clears the buckets.
   The gauges read `0` until the next bucket closes, and the `pssc_info_*_total`
   counters restart from 0, which `rate()` handles as an ordinary counter reset.
   `pssc_info_stats_reset_timestamp_seconds` records when this happened.

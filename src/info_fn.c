@@ -31,7 +31,7 @@
  *					because the tracking table was full
  *	stats_reset, stats_reset_epoch	the latter in whole Unix epoch seconds
  *	exemplar_shmem_bytes, exemplar_value_bytes, exemplar_values_dropped
- *					(1.1 only, §6.13) the shared memory of the exemplar
+ *					(§6.13) the shared memory of the exemplar
  *					slots (included in shmem_bytes), the bytes a value may
  *					take, and the values dropped as longer than that
  * Finding oldest_bucket scans the whole table under the shared lock, as the
@@ -80,8 +80,7 @@
 #include "extract.h"
 #include "store.h"
 
-#define INFO_COLS_1_0	22
-#define INFO_COLS_1_1	25		/* + the exemplar columns */
+#define INFO_COLS	25
 
 static void
 require_preloaded(void)
@@ -93,11 +92,11 @@ require_preloaded(void)
 }
 
 static Datum
-info_row(FunctionCallInfo fcinfo, int ncols)
+info_row(FunctionCallInfo fcinfo)
 {
 	TupleDesc	tupdesc;
-	Datum		values[INFO_COLS_1_1];
-	bool		nulls[INFO_COLS_1_1];
+	Datum		values[INFO_COLS];
+	bool		nulls[INFO_COLS];
 	PsscStoreCounters c;
 	int64		oldest;
 	int			i = 0;
@@ -105,7 +104,7 @@ info_row(FunctionCallInfo fcinfo, int ncols)
 	require_preloaded();
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
-	if (tupdesc->natts != ncols)
+	if (tupdesc->natts != INFO_COLS)
 		elog(ERROR, "incorrect number of output arguments");
 
 	pssc_flush_extract_stats();
@@ -139,13 +138,10 @@ info_row(FunctionCallInfo fcinfo, int ncols)
 	values[i++] = TimestampTzGetDatum(c.stats_reset);
 	values[i++] = Int64GetDatum(pssc_bucket_floor_div(c.stats_reset, USECS_PER_SEC) +
 								(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY);
-	if (ncols == INFO_COLS_1_1)
-	{
-		values[i++] = Int64GetDatum((int64) c.exemplar_shmem_bytes);
-		values[i++] = Int32GetDatum(c.exemplar_value_len);
-		values[i++] = Int64GetDatum(c.exemplar_values_dropped);
-	}
-	Assert(i == ncols);
+	values[i++] = Int64GetDatum((int64) c.exemplar_shmem_bytes);
+	values[i++] = Int32GetDatum(c.exemplar_value_len);
+	values[i++] = Int64GetDatum(c.exemplar_values_dropped);
+	Assert(i == INFO_COLS);
 
 	tupdesc = BlessTupleDesc(tupdesc);
 	return HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
@@ -156,15 +152,7 @@ PG_FUNCTION_INFO_V1(pg_stat_statement_context_info);
 Datum
 pg_stat_statement_context_info(PG_FUNCTION_ARGS)
 {
-	return info_row(fcinfo, INFO_COLS_1_0);
-}
-
-PG_FUNCTION_INFO_V1(pg_stat_statement_context_info_1_1);
-
-Datum
-pg_stat_statement_context_info_1_1(PG_FUNCTION_ARGS)
-{
-	return info_row(fcinfo, INFO_COLS_1_1);
+	return info_row(fcinfo);
 }
 
 PG_FUNCTION_INFO_V1(pg_stat_statement_context_reset);

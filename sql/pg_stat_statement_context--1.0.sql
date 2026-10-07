@@ -22,7 +22,11 @@
 -- exec_time_total and stats_since are per entry, not per bucket: they only
 -- grow from the entry's creation (stats_since) until it is evicted or reset,
 -- whatever bucket the calls landed in, and repeat on every bucket row of the
--- entry.
+-- entry. exemplars (DESIGN.md §6.13) holds the most recent value of each key
+-- of pg_stat_statement_context.exemplar_keys seen in the entry's statements
+-- ({} when none is stored), whether or not the key is a grouping tag; it is
+-- NULL exactly when tags is. Exemplars live only in shared memory (not saved
+-- across restarts).
 CREATE FUNCTION pg_stat_statement_context(
     IN showtags boolean DEFAULT true,
     IN merge_buckets boolean DEFAULT false,
@@ -36,7 +40,8 @@ CREATE FUNCTION pg_stat_statement_context(
     OUT total_exec_time float8,
     OUT calls_total bigint,
     OUT exec_time_total float8,
-    OUT stats_since timestamptz
+    OUT stats_since timestamptz,
+    OUT exemplars jsonb
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stat_statement_context_1_0'
@@ -65,7 +70,8 @@ CREATE FUNCTION pg_stat_statement_context_last_bucket(
     OUT total_exec_time float8,
     OUT calls_total bigint,
     OUT exec_time_total float8,
-    OUT stats_since timestamptz
+    OUT stats_since timestamptz,
+    OUT exemplars jsonb
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stat_statement_context_last_bucket_1_0'
@@ -138,9 +144,13 @@ REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PU
 -- size requested at startup (shmem_bytes) and for the separate cardinality
 -- caps table (cap_shmem_bytes), the extraction counters, the
 -- values collapsed to null by the cardinality caps (capped_tags; of which
--- cap_table_full because the tracking table was full), and the time of the
--- last reset (or of startup), also in Unix epoch seconds. Readable by
--- everyone, like pg_stat_statements_info.
+-- cap_table_full because the tracking table was full), the time of the
+-- last reset (or of startup), also in Unix epoch seconds, and the exemplar
+-- counters (DESIGN.md §6.13): the exemplar slots' share of shmem_bytes
+-- (exemplar_shmem_bytes), the most bytes a value may take
+-- (exemplar_value_bytes; longer values are dropped) and the values dropped
+-- as too long (exemplar_values_dropped). Readable by everyone, like
+-- pg_stat_statements_info.
 CREATE FUNCTION pg_stat_statement_context_info(
     OUT entries bigint,
     OUT max_entries bigint,
@@ -163,7 +173,10 @@ CREATE FUNCTION pg_stat_statement_context_info(
     OUT capped_tags bigint,
     OUT cap_table_full bigint,
     OUT stats_reset timestamptz,
-    OUT stats_reset_epoch bigint
+    OUT stats_reset_epoch bigint,
+    OUT exemplar_shmem_bytes bigint,
+    OUT exemplar_value_bytes int,
+    OUT exemplar_values_dropped bigint
 )
 RETURNS record
 AS 'MODULE_PATHNAME', 'pg_stat_statement_context_info'

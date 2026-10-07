@@ -1241,7 +1241,7 @@ Fix options: block SIGALRM around the snapshot and postponement, or expose deadl
 - Overflow: **dropped**, not truncated (a truncated trace id is useless); the slot keeps its previous value; counted in `_info().exemplar_values_dropped`.
 - Capture: after the step-4 rename, before the step-5 allowlist/denylist, independently of it; per-extractor `keys` apply, normalize/truncation/caps don't. First occurrence in a statement wins (override > comments > footer > appname). Nested statements with `nested_tags = inherit` inherit the outer exemplars.
 - Storage: fixed per-entry slots after the counter ring, in exemplar_keys order; written under the entry spinlock with the call (no table-lock upgrade). Not saved across restarts; cleared by `_reset()`.
-- SQL: extension 1.1 adds `exemplars jsonb` as the last column of the SRF/`_last_bucket`/the three views and `exemplar_shmem_bytes`, `exemplar_value_bytes`, `exemplar_values_dropped` at the end of `_info()`, via `--1.0--1.1.sql` (drop and recreate, new `_1_1` C symbols; the 1.0 symbols stay). `exemplars` is `NULL` exactly when `tags` is.
+- (Superseded 2026-10-06 by 20261005-091225-29: 1.1 was folded into the unreleased 1.0 before v1.0.0; there is no upgrade script and no `_1_1` symbols.) SQL: extension 1.1 adds `exemplars jsonb` as the last column of the SRF/`_last_bucket`/the three views and `exemplar_shmem_bytes`, `exemplar_value_bytes`, `exemplar_values_dropped` at the end of `_info()`, via `--1.0--1.1.sql` (drop and recreate, new `_1_1` C symbols; the 1.0 symbols stay). `exemplars` is `NULL` exactly when `tags` is.
 
 **Open questions:** none
 
