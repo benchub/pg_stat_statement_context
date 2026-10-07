@@ -184,6 +184,12 @@ jobs:
         with:
           path: ${{ env.PGPREFIX }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
+      # docker/run-tests.sh on the host: skips worktrees/, and stops its
+      # server when it fails. Seconds; builds nothing.
+      - name: Harness self-test
+        run: |
+          export PATH="$PGPREFIX/bin:$PATH"
+          scripts/test-run-tests.sh
       - name: Run tests
         env:
           PSSC_SRC: ${{ github.workspace }}
@@ -204,5 +210,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-pg${{ matrix.pg }}-logs
-          path: tmp/macos-${{ matrix.pg }}/
+          path: |
+            tmp/macos-${{ matrix.pg }}/
+            tmp/test-run-tests/*/output.log
           if-no-files-found: ignore

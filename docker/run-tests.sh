@@ -32,6 +32,7 @@ PGBIN=$(pg_config --bindir)
 step() { printf '\n=== %s\n' "$*"; }
 fail() {
 	echo "FAIL: $*" >&2
+	stop_server
 	cp -f "$BUILD"/regression.diffs "$BUILD"/regression.out "$OUT"/ 2>/dev/null || true
 	cp -rf "$BUILD"/results "$OUT"/ 2>/dev/null || true
 	cp -rf "$BUILD"/tmp_check/log "$OUT"/tap-log 2>/dev/null || true
@@ -46,7 +47,6 @@ own_out() {
 	[ "$(id -u)" = 0 ] && [ -d "$OUT" ] || return 0
 	chown -R "$(stat -c %u:%g "$OUT")" "$OUT" && chmod -R u+rwX "$OUT" || true
 }
-trap own_out EXIT
 if [ "$(id -u)" = 0 ]; then
 	as_pg() { gosu postgres "$@"; }
 else
@@ -54,6 +54,13 @@ else
 fi
 pg_start() { as_pg "$PGBIN/pg_ctl" -D "$PGDATA_DIR" -l "$WORK/$1.log" -w start >/dev/null; }
 pg_stop() { as_pg "$PGBIN/pg_ctl" -D "$PGDATA_DIR" -m fast -w stop >/dev/null; }
+# On any failure or early exit. In Docker the server dies with the container,
+# but on the host it would stay up on PGPORT and break the next run.
+stop_server() {
+	[ -f "$PGDATA_DIR/postmaster.pid" ] || return 0
+	as_pg "$PGBIN/pg_ctl" -D "$PGDATA_DIR" -m immediate -w stop >/dev/null 2>&1 || true
+}
+trap 'stop_server; own_out' EXIT
 
 case $MODE in
 pgdg | release | assert | valgrind) ;;
@@ -68,8 +75,9 @@ step "copy sources"
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 # Skip host build/test output so artifacts from another PG version (or the
-# host OS) are never reused; make clean below is a second safeguard.
-tar -C "$SRC" --exclude=./.git --exclude=./tmp \
+# host OS) are never reused; make clean below is a second safeguard. Skip
+# worktrees/ (other checkouts of the repo, CLAUDE.md §7) too.
+tar -C "$SRC" --exclude=./.git --exclude=./tmp --exclude=./worktrees \
 	--exclude='*.o' --exclude='*.so' --exclude='*.dylib' --exclude='*.bc' \
 	--exclude='*.dSYM' --exclude=./results --exclude=./tmp_check \
 	--exclude=./log --exclude=./regression.diffs --exclude=./regression.out \

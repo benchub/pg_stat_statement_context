@@ -29,7 +29,8 @@ check_tree() {
 			END { exit bad }
 		' "$f" || status=1
 	done < <(find "$root" \
-		\( -name .git -o -name tmp -o -name tmp_check -o -name results -o -name log \) -prune -o \
+		\( -name .git -o -name tmp -o -name tmp_check -o -name results -o -name log \
+		   -o -path "$root/worktrees" \) -prune -o \
 		-type f \( -name '*.c' -o -name '*.h' \) -print0)
 	return $status
 }
@@ -79,6 +80,8 @@ self_test() {
 
 	mkdir -p "$dir/tmp" && printf '#if PG_VERSION_NUM\n#endif\n' > "$dir/tmp/x.c"
 	expect pass "tmp/ is ignored"
+	mkdir -p "$dir/worktrees/item/src" && printf '#if PG_VERSION_NUM\n#endif\n' > "$dir/worktrees/item/src/compat.h"
+	expect pass "worktrees/ (other checkouts) is ignored"
 
 	[ $fails -eq 0 ] && echo "version-guard self-test passed"
 	return $fails

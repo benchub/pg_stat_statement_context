@@ -1318,7 +1318,10 @@ matches this extension's minimum supported version.
     pg_regress suite; any Valgrind error fails the cell.
 
   macOS builds 14–18 with `docker/build-postgres.sh` and runs
-  `docker/run-tests.sh` on the host. Source builds are cached, keyed on
+  `docker/run-tests.sh` on the host. The harness skips `worktrees/` when it
+  copies the sources and stops its server on any failure, so a failed host
+  run doesn't leave a postmaster on `PGPORT`; `scripts/test-run-tests.sh`
+  checks both on the host first. Source builds are cached, keyed on
   release, flavor and a hash of the build scripts. A separate job runs
   `scripts/check-version-guards.sh`. TAP tests use the PG15+
   `PostgreSQL::Test::*` names; PG14 installs them as aliases only from 14.6, so
