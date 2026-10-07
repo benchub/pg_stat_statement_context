@@ -52,6 +52,9 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | no | ready |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
+| 20261006-192058-1 | TAP tests: detect pg_stat_statements portably; fix the macOS failures in 010–019 | none | no | ready |
+| 20261006-192058-2 | macOS: 022 superuser name, 006 malloc accounting, 017 utility slack in CI | none | no | ready |
+| 20261006-192058-3 | Host runs of docker/run-tests.sh: skip worktrees/, stop the server on failure | none | no | ready |
 | 20261006-143225-1 | Close the deadline-postponement race in the test module's sleep injection | 20261006-113156-1 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | blocked-on-deps |
@@ -185,6 +188,56 @@ Once this lands, simplify the recipes in `docs/integrations/` and update `script
 - 2026-10-06: Do option 2 (compact per-entry array, keeps §5.3 semantics) first; only if p99 is still over ~1.5× pgss, add option 1 (adaptive batch) and update §5.3.
 
 **Depends on:** 20261006-043919-1
+**Open questions:** none
+**Status:** ready
+
+### 20261006-192058-1: TAP tests: detect pg_stat_statements portably; fix the macOS failures in 010–019
+
+**Description:** In CI run 37535041023, the macOS cells failed. Tests 010–019 detect pg_stat_statements with `-e "$pkglibdir/pg_stat_statements.so"`, but on PG16+ macOS the module suffix is `.dylib`. So on macOS PG16–18, every pgss parity check was silently skipped (`plan skip_all` in 014, 017 and 019). Fix the detection (any of `.so`, `.dylib`, `.dll`), ideally through one shared helper instead of eight copies. Make a missing pgss a hard failure when the harness sets `PSSC_REQUIRE_PGSS=1`, so this can't silently recur. Set that variable in `docker/run-tests.sh`, because every harness image and the macOS build install pgss. Then fix the failures that the corrected detection, or macOS itself, exposes:
+- **013 #19:** the `set_conf('extractors', marginalia(position=prepend))` that test 19 relies on sits inside the pgss `SKIP` block. Move the setup out of it so test 19 doesn't depend on pgss.
+- **014:** the real-load "spelling variant" cases hardcode `.so` (`pg_stat_statements.so`, `"$libdir/$P.so"`). Use the platform's suffix. The matcher-only cases (`pssc_guc_test_load_order_wrong`) stay as they are, because `src/utility.c` strips every known suffix.
+- **012 #17–20:** with `track_utility = off`, a CALL/DO only nests on PG14–16 when pgss tracks it. Without pgss loaded, that falls back to this extension's own settings (src/utility.c `pgss_nests_utility`), so the children are top level there. Today the expectation assumes pgss is loaded. Make it follow `$have_pgss` and the version (on PG17+ it always nests).
+- **012 #202:** `ORDER BY step, tags::text` depends on collation. In C or byte order, `tx_outer` sorts before `tx`. Make the order deterministic, e.g. `COLLATE "C"` with the expected list adjusted.
+
+Verified locally on macOS (arm64, source builds, `docker/run-tests.sh`): with `.dylib` detection on PG18, 013, 014, 016, 017 and 019 pass, and only 012 #202 and 022 still fail.
+
+**Acceptance criteria:**
+- On macOS PG18 (host run of `docker/run-tests.sh` with `PSSC_REQUIRE_PGSS=1`), the pgss-dependent tests run rather than skip, and 010–019 pass; 012 and 013 also pass with pgss absent on PG14–16 and PG17+.
+- The Docker harness passes on PG14–18 (`scripts/docker-test.sh <major>`).
+- With `PSSC_REQUIRE_PGSS=1` and pgss genuinely missing, the tests fail rather than skip.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
+
+### 20261006-192058-2: macOS: 022 superuser name, 006 malloc accounting, 017 utility slack in CI
+
+**Description:** These are the remaining failures in the macOS CI cells (run 37535041023):
+- **022:** `session_open('postgres')` (lines 276, 277, 348) assumes the bootstrap superuser is called `postgres`. On a host run it's the OS user (`FATAL: role "postgres" does not exist`). Use the cluster's actual superuser name.
+- **006 #209, #219, #305 (PG14/15):** `pssc_extract_test_mem()`'s `malloc_used` (and `pssc_guc_test_malloc_used()`) only works through glibc's `mallinfo2()`, so on macOS it is NULL. PG14/15's regex engine mallocs directly, so the memory checks see nothing (growth −7168 bytes, 16384 bytes per generation). PG16+ allocates regexes in memory contexts, so it isn't affected. Implement `malloc_used` on macOS with `malloc_zone_statistics(NULL, &st)` (`size_in_use`) in both test modules. The precondition check ("a leak of the compiled regexes would show") must keep failing loudly, not skip, when neither source sees the regexes.
+- **017 #10, #80 (PG14/15 CI only, not locally):** the utility-time excess, which is pgss's own `pgss_store()` of a new entry inside our clock reads, reached 3–14 ms on the `macos-latest` runners, against the 2 ms default slack. Set `PSSC_TEST_UTILITY_SLACK_MS` (for example 50) in the macOS job's "Run tests" step of `.github/workflows/ci.yml`, with a comment explaining why. Don't loosen the default.
+
+**Acceptance criteria:**
+- 022 passes on a host run where the superuser is not `postgres`, and still passes in Docker.
+- On macOS PG14, `pssc_extract_test_mem()` reports a non-null `malloc_used`, and 006 passes. A test shows `malloc_used` grows after a known large malloc-backed allocation (it must fail before the fix).
+- The Docker harness passes on PG14–18.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
+
+### 20261006-192058-3: Host runs of docker/run-tests.sh: skip worktrees/, stop the server on failure
+
+**Description:** `docker/run-tests.sh` (used on the host by the macOS CI cells and locally) has two problems:
+- **It copies `worktrees/`.** The source copy excludes `./tmp` but not `./worktrees`, so the version-guard check scans every worktree's `src/compat.h` and fails. The same applies to `scripts/docker-test.sh` run from the main checkout, which mounts the whole repo. Exclude `./worktrees` (and keep the check scanning only the copied tree).
+- **It leaks a server on failure.** `fail()` exits without stopping the server that `pg_start` started. In Docker the container dies with it, but on a host it stays up on the default port, and the next run then fails with "Address already in use". Stop it (`pg_ctl -m immediate`, tolerating "not running") from the failure and exit paths.
+
+**Acceptance criteria:**
+- A run from a checkout that contains `worktrees/` passes the version-guard step (a test that fails before the fix).
+- After a failing host run, no postmaster from `$PSSC_WORK` is left running (a test that fails before the fix).
+- The Docker harness passes on PG14–18.
+
+**Depends on:** none
 **Open questions:** none
 **Status:** ready
 
