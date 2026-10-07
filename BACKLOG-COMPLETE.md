@@ -1104,6 +1104,22 @@ The same accounting can make `SET`/`ALTER SYSTEM` reject a normal pattern on an 
 **Open questions:** none
 **Status:** done
 
+### 20261006-192058-2: macOS: 022 superuser name, 006 malloc accounting, 017 utility slack in CI
+
+**Description:** These are the remaining failures in the macOS CI cells (run 37535041023):
+- **022:** `session_open('postgres')` (lines 276, 277, 348) assumes the bootstrap superuser is called `postgres`. On a host run it's the OS user (`FATAL: role "postgres" does not exist`). Use the cluster's actual superuser name.
+- **006 #209, #219, #305 (PG14/15):** `pssc_extract_test_mem()`'s `malloc_used` (and `pssc_guc_test_malloc_used()`) only works through glibc's `mallinfo2()`, so on macOS it is NULL. PG14/15's regex engine mallocs directly, so the memory checks see nothing (growth −7168 bytes, 16384 bytes per generation). PG16+ allocates regexes in memory contexts, so it isn't affected. Implement `malloc_used` on macOS with `malloc_zone_statistics(NULL, &st)` (`size_in_use`) in both test modules. The precondition check ("a leak of the compiled regexes would show") must keep failing loudly, not skip, when neither source sees the regexes.
+- **017 #10, #80 (PG14/15 CI only, not locally):** the utility-time excess, which is pgss's own `pgss_store()` of a new entry inside our clock reads, reached 3–14 ms on the `macos-latest` runners, against the 2 ms default slack. Set `PSSC_TEST_UTILITY_SLACK_MS` (for example 50) in the macOS job's "Run tests" step of `.github/workflows/ci.yml`, with a comment explaining why. Don't loosen the default.
+
+**Acceptance criteria:**
+- 022 passes on a host run where the superuser is not `postgres`, and still passes in Docker.
+- On macOS PG14, `pssc_extract_test_mem()` reports a non-null `malloc_used`, and 006 passes. A test shows `malloc_used` grows after a known large malloc-backed allocation (it must fail before the fix).
+- The Docker harness passes on PG14–18.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

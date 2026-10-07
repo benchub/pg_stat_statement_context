@@ -53,7 +53,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261006-010149-1 | Exporter-friendly SQL surface: monotonic counters and bucket metadata | 20261005-091225-42 | no | ready |
 | 20261006-075124-1 | Fewer eviction passes under sustained churn (adaptive batch or compact scan) | 20261006-043919-1 | no | ready |
 | 20261006-192058-1 | TAP tests: detect pg_stat_statements portably; fix the macOS failures in 010–019 | none | no | ready |
-| 20261006-192058-2 | macOS: 022 superuser name, 006 malloc accounting, 017 utility slack in CI | none | no | ready |
 | 20261006-192058-3 | Host runs of docker/run-tests.sh: skip worktrees/, stop the server on failure | none | no | ready |
 | 20261006-143225-1 | Close the deadline-postponement race in the test module's sleep injection | 20261006-113156-1 | no | ready |
 | 20261005-213120-1 | `_info()`: distinguish live eviction from expired-entry reclamation | 20261005-091225-21 | no | ready |
@@ -205,22 +204,6 @@ Verified locally on macOS (arm64, source builds, `docker/run-tests.sh`): with `.
 - On macOS PG18 (host run of `docker/run-tests.sh` with `PSSC_REQUIRE_PGSS=1`), the pgss-dependent tests run rather than skip, and 010–019 pass; 012 and 013 also pass with pgss absent on PG14–16 and PG17+.
 - The Docker harness passes on PG14–18 (`scripts/docker-test.sh <major>`).
 - With `PSSC_REQUIRE_PGSS=1` and pgss genuinely missing, the tests fail rather than skip.
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
-
-### 20261006-192058-2: macOS: 022 superuser name, 006 malloc accounting, 017 utility slack in CI
-
-**Description:** These are the remaining failures in the macOS CI cells (run 37535041023):
-- **022:** `session_open('postgres')` (lines 276, 277, 348) assumes the bootstrap superuser is called `postgres`. On a host run it's the OS user (`FATAL: role "postgres" does not exist`). Use the cluster's actual superuser name.
-- **006 #209, #219, #305 (PG14/15):** `pssc_extract_test_mem()`'s `malloc_used` (and `pssc_guc_test_malloc_used()`) only works through glibc's `mallinfo2()`, so on macOS it is NULL. PG14/15's regex engine mallocs directly, so the memory checks see nothing (growth −7168 bytes, 16384 bytes per generation). PG16+ allocates regexes in memory contexts, so it isn't affected. Implement `malloc_used` on macOS with `malloc_zone_statistics(NULL, &st)` (`size_in_use`) in both test modules. The precondition check ("a leak of the compiled regexes would show") must keep failing loudly, not skip, when neither source sees the regexes.
-- **017 #10, #80 (PG14/15 CI only, not locally):** the utility-time excess, which is pgss's own `pgss_store()` of a new entry inside our clock reads, reached 3–14 ms on the `macos-latest` runners, against the 2 ms default slack. Set `PSSC_TEST_UTILITY_SLACK_MS` (for example 50) in the macOS job's "Run tests" step of `.github/workflows/ci.yml`, with a comment explaining why. Don't loosen the default.
-
-**Acceptance criteria:**
-- 022 passes on a host run where the superuser is not `postgres`, and still passes in Docker.
-- On macOS PG14, `pssc_extract_test_mem()` reports a non-null `malloc_used`, and 006 passes. A test shows `malloc_used` grows after a known large malloc-backed allocation (it must fail before the fix).
-- The Docker harness passes on PG14–18.
 
 **Depends on:** none
 **Open questions:** none
