@@ -1159,6 +1159,23 @@ Fix options: block SIGALRM around the snapshot and postponement, or expose deadl
 **Open questions:** none
 **Status:** done
 
+### 20261005-091225-34: Roadmap: background worker reclaiming dead entries
+
+**Description:** Add an optional background worker that, on idle systems, advances `current_bucket` and reclaims dead entries (every ring slot expired) so their space is free before the next insert needs it (§8 v1.x, §5.2, §5.3). It isn't needed for correctness, because readers already filter expired slots and eviction reclaims dead entries first. Enable it with a postmaster GUC.
+
+**Acceptance criteria:**
+- With the worker enabled, dead entries are freed without any query traffic, and `_info().entries` drops accordingly.
+- Disabling it changes nothing else.
+
+**Depends on:** 20261005-091225-15
+**Open questions:** none
+**Decisions** (2026-10-06, made while building; recorded in DESIGN.md §4.1, §5.3):
+- GUCs `reclaim_worker` (bool, postmaster, default `off`: no worker is registered at all) and `reclaim_worker_interval` (ms, sighup, default 10 s, 100 ms – 1 day; a reload wakes the worker).
+- The worker has shared-memory access only (no database connection), so it is not in `pg_stat_activity`; it is identified by its process title.
+- Each wake-up raises `current_bucket` like a reader and, only if it moved since the previous pass, runs the dead-entry scan of an eviction pass (shared helper) under the exclusive lock.
+- It never decays usage or evicts live entries, counts what it removes in `reclaimed_entries`, and does not increment `dealloc` (passes forced by a full table) or `evicted_entries`.
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

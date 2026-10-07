@@ -52,7 +52,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | ready |
 | 20261005-091225-33 | Roadmap: exemplars for excluded high-cardinality keys | 20261005-091225-17, 20261005-091225-20 | no | ready |
-| 20261005-091225-34 | Roadmap: background worker reclaiming dead entries | 20261005-091225-15 | no | ready |
 | 20261005-091225-35 | Roadmap: persist stats across clean restarts | 20261005-091225-15, 20261005-091225-21 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
@@ -199,23 +198,6 @@ dependencies and is not shown.
 
 **Open questions:** none
 
-**Status:** ready
-
-### 20261005-091225-34: Roadmap: background worker reclaiming dead entries
-
-**Description:** Add an optional background worker that, on idle systems, advances `current_bucket` and reclaims dead entries (every ring slot expired) so their space is free before the next insert needs it (§8 v1.x, §5.2, §5.3). It isn't needed for correctness, because readers already filter expired slots and eviction reclaims dead entries first. Enable it with a postmaster GUC.
-
-**Acceptance criteria:**
-- With the worker enabled, dead entries are freed without any query traffic, and `_info().entries` drops accordingly.
-- Disabling it changes nothing else.
-
-**Depends on:** 20261005-091225-15
-**Open questions:** none
-**Decisions** (2026-10-06, made while building; recorded in DESIGN.md §4.1, §5.3):
-- GUCs `reclaim_worker` (bool, postmaster, default `off`: no worker is registered at all) and `reclaim_worker_interval` (ms, sighup, default 10 s, 100 ms – 1 day; a reload wakes the worker).
-- The worker has shared-memory access only (no database connection), so it is not in `pg_stat_activity`; it is identified by its process title.
-- Each wake-up raises `current_bucket` like a reader and, only if it moved since the previous pass, runs the dead-entry scan of an eviction pass (shared helper) under the exclusive lock.
-- It never decays usage or evicts live entries, counts what it removes in `reclaimed_entries`, and does not increment `dealloc` (passes forced by a full table) or `evicted_entries`.
 **Status:** ready
 
 ### 20261005-091225-35: Roadmap: persist stats across clean restarts
