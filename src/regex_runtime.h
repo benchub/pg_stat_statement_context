@@ -21,7 +21,7 @@
  *
  * Never fails the statement: compile failures, including a compile aborted
  * at the compile time limit (PSSC_REGEX_COMPILE_LIMIT_MS), disable the
- * extractor for this backend until the next config generation (counted in
+ * extractor for this backend until the next regex generation (counted in
  * the backend's PsscTagsetStats.regex_compile_failures); match errors yield
  * no pairs for that comment. Query cancel and other interrupts are still
  * honored (they propagate as the usual ERROR / FATAL).
@@ -38,7 +38,7 @@
 extern void pssc_regex_init(void);
 
 /*
- * Releases the compiled regexes of an older config generation (also done
+ * Releases the compiled regexes of an older regex generation (also done
  * lazily by the hook). Called by pssc_extract_tags() before every pipeline
  * run so that a reload that removes all regex extractors frees them too.
  * Never throws.
@@ -62,7 +62,7 @@ extern PGDLLEXPORT void pssc_regex_extract(void *arg, int index,
  * back-references; \1..\9, \& and \\ in the replacement), except that
  * its output is cut on a character boundary at limit bytes (>= vlen), and
  * matching stops there. Rules are compiled lazily per backend like regex
- * extractors (a compile failure disables the rule until the next config
+ * extractors (a compile failure disables the rule until the next regex
  * generation and counts in regex_compile_failures). Each result is
  * allocated with alloc(alloc_arg, ...). Returns PSSC_NORMALIZE_NO_RULES if
  * no rule names key, PSSC_NORMALIZE_FAILED if a rule is disabled or failed

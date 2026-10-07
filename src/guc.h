@@ -9,12 +9,17 @@
  * exclude_tags, extractors and normalize) are flat, pointer-free blobs built by
  * a check_hook and installed by an assign_hook that cannot fail; each
  * effective change bumps the backend-local config generation, so caches
- * derived from the config (e.g. compiled regexes) can tell they are stale.
+ * derived from the config can tell they are stale (compiled regexes use the
+ * regex generation, which only extractors and normalize bump).
  *
- * Never keep a PsscTagList or PsscExtractorList pointer across statements:
- * the GUC machinery frees a blob once it is replaced. Fetch it again with
- * pssc_guc_tags(), pssc_guc_exclude_tags() or pssc_guc_extractors() each
- * time it is needed.
+ * tags and exclude_tags are superuser-context: besides a reload, SET (also
+ * SET LOCAL and a function's SET clause), its rollback, and per-database or
+ * per-role defaults change them, so they can change in the middle of a
+ * statement. Never keep a PsscTagList or PsscExtractorList pointer across
+ * anything that may run SQL or change a GUC: the GUC machinery frees a
+ * blob once it is replaced. Fetch it again with pssc_guc_tags(),
+ * pssc_guc_exclude_tags() or pssc_guc_extractors() each time it is needed;
+ * what a frame keeps (its tag set, recap candidates) is copied out of them.
  */
 #ifndef PSSC_GUC_H
 #define PSSC_GUC_H
@@ -263,6 +268,13 @@ extern PGDLLEXPORT const PsscNormalizeList *pssc_guc_normalize(void);
  * extractors, tags, exclude_tags or normalize changes in this process.
  */
 extern PGDLLEXPORT uint64 pssc_guc_config_generation(void);
+
+/*
+ * Backend-local regex generation: bumped only when extractors or normalize
+ * (the settings with compiled regexes) change. tags and exclude_tags can
+ * change per function call (SET clause), which must not recompile them.
+ */
+extern PGDLLEXPORT uint64 pssc_guc_regex_generation(void);
 
 /*
  * Parsed pg_stat_statement_context.tags_override (backlog item

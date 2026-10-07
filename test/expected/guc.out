@@ -22,7 +22,7 @@ pg_stat_statement_context.cardinality_cap_overrides|Sets per-key caps on the num
 pg_stat_statement_context.cardinality_cap_scope|Selects what the cardinality caps count distinct values per.|enum|role|postmaster||||{server,database,role}
 pg_stat_statement_context.cardinality_cap_slots|Sets the number of distinct (key, value) pairs the cardinality caps can track.|integer|16384|postmaster||256|67108864|
 pg_stat_statement_context.enabled|Enables collection of statement statistics per tag set.|bool|on|superuser||||
-pg_stat_statement_context.exclude_tags|Sets the tag keys to discard when tags is "*".|string|traceparent, tracestate, request_id|sighup||||
+pg_stat_statement_context.exclude_tags|Sets the tag keys to discard when tags is "*".|string|traceparent, tracestate, request_id|superuser||||
 pg_stat_statement_context.exemplar_keys|Sets the tag keys whose most recent value is stored with each entry.|string||postmaster||||
 pg_stat_statement_context.exemplar_memory|Sets the shared memory for exemplar values of all entries.|integer|2048|postmaster|kB|0|2147483647|
 pg_stat_statement_context.extractors|Sets the extractors that turn SQL comments into tags.|string|sqlcommenter, marginalia|sighup||||
@@ -35,12 +35,12 @@ pg_stat_statement_context.normalize|Sets regex-replace rules that normalize tag 
 pg_stat_statement_context.reclaim_worker|Starts a background worker that reclaims expired entries.|bool|off|postmaster||||
 pg_stat_statement_context.reclaim_worker_interval|Sets how often the reclaim worker wakes up.|integer|10000|sighup|ms|100|86400000|
 pg_stat_statement_context.save|Saves the statistics across server shutdowns.|bool|on|sighup||||
-pg_stat_statement_context.scan_window|Sets how many bytes at the head or tail of a long statement are searched for comments.|integer|2048|sighup|B|64|1048576|
-pg_stat_statement_context.tags|Sets the tag keys to keep ("*" keeps all).|string|action, controller, job|sighup||||
+pg_stat_statement_context.scan_window|Sets how many bytes at the head or tail of a long statement are searched for comments.|integer|2048|superuser|B|64|1048576|
+pg_stat_statement_context.tags|Sets the tag keys to keep ("*" keeps all).|string|action, controller, job|superuser||||
 pg_stat_statement_context.tags_override|Sets tags that override the tags of SQL comments in this session or transaction.|string||user||||
 pg_stat_statement_context.track|Selects which statements are tracked.|enum|top|superuser||||{none,top,all}
 pg_stat_statement_context.track_utility|Selects whether utility commands are tracked.|bool|on|superuser||||
-pg_stat_statement_context.untagged|Selects whether statements without tags are recorded.|enum|skip|sighup||||{skip,record}
+pg_stat_statement_context.untagged|Selects whether statements without tags are recorded.|enum|skip|superuser||||{skip,record}
 (26 rows)
 \pset format aligned
 SELECT count(*) AS gucs,
@@ -95,6 +95,34 @@ SHOW pg_stat_statement_context.nested_tags;
  none
 (1 row)
 
+SET pg_stat_statement_context.scan_window = '4kB';
+SHOW pg_stat_statement_context.scan_window;
+ pg_stat_statement_context.scan_window 
+---------------------------------------
+ 4kB
+(1 row)
+
+SET pg_stat_statement_context.tags = 'a, b';
+SHOW pg_stat_statement_context.tags;
+ pg_stat_statement_context.tags 
+--------------------------------
+ a, b
+(1 row)
+
+SET pg_stat_statement_context.exclude_tags = 'c';
+SHOW pg_stat_statement_context.exclude_tags;
+ pg_stat_statement_context.exclude_tags 
+----------------------------------------
+ c
+(1 row)
+
+SET pg_stat_statement_context.untagged = 'record';
+SHOW pg_stat_statement_context.untagged;
+ pg_stat_statement_context.untagged 
+------------------------------------
+ record
+(1 row)
+
 -- Invalid values are rejected and the previous value stays.
 SET pg_stat_statement_context.track = 'bogus';
 ERROR:  invalid value for parameter "pg_stat_statement_context.track": "bogus"
@@ -134,11 +162,19 @@ RESET pg_stat_statement_context.enabled;
 RESET pg_stat_statement_context.track;
 RESET pg_stat_statement_context.track_utility;
 RESET pg_stat_statement_context.nested_tags;
+RESET pg_stat_statement_context.scan_window;
+RESET pg_stat_statement_context.tags;
+RESET pg_stat_statement_context.exclude_tags;
+RESET pg_stat_statement_context.untagged;
 -- ---- a non-superuser cannot SET superuser GUCs ----
 SELECT current_setting('pg_stat_statement_context.enabled') AS enabled_before,
        current_setting('pg_stat_statement_context.track') AS track_before,
        current_setting('pg_stat_statement_context.track_utility') AS track_utility_before,
-       current_setting('pg_stat_statement_context.nested_tags') AS nested_tags_before
+       current_setting('pg_stat_statement_context.nested_tags') AS nested_tags_before,
+       current_setting('pg_stat_statement_context.scan_window') AS scan_window_before,
+       current_setting('pg_stat_statement_context.tags') AS tags_before,
+       current_setting('pg_stat_statement_context.exclude_tags') AS exclude_tags_before,
+       current_setting('pg_stat_statement_context.untagged') AS untagged_before
 \gset
 CREATE ROLE regress_pssc_nosuper;
 SET ROLE regress_pssc_nosuper;
@@ -150,31 +186,43 @@ SET pg_stat_statement_context.track_utility = off;
 ERROR:  permission denied to set parameter "pg_stat_statement_context.track_utility"
 SET pg_stat_statement_context.nested_tags = 'scan';
 ERROR:  permission denied to set parameter "pg_stat_statement_context.nested_tags"
+SET pg_stat_statement_context.scan_window = '4kB';
+ERROR:  permission denied to set parameter "pg_stat_statement_context.scan_window"
+SET pg_stat_statement_context.tags = 'a';
+ERROR:  permission denied to set parameter "pg_stat_statement_context.tags"
+SET pg_stat_statement_context.exclude_tags = 'a';
+ERROR:  permission denied to set parameter "pg_stat_statement_context.exclude_tags"
+SET pg_stat_statement_context.untagged = 'record';
+ERROR:  permission denied to set parameter "pg_stat_statement_context.untagged"
 SELECT set_config('pg_stat_statement_context.enabled', 'off', true);
 ERROR:  permission denied to set parameter "pg_stat_statement_context.enabled"
+SELECT set_config('pg_stat_statement_context.tags', '*', true);
+ERROR:  permission denied to set parameter "pg_stat_statement_context.tags"
 -- Reading them is allowed, and nothing changed.
 SELECT current_setting('pg_stat_statement_context.enabled') = :'enabled_before' AS enabled_kept,
        current_setting('pg_stat_statement_context.track') = :'track_before' AS track_kept,
        current_setting('pg_stat_statement_context.track_utility') = :'track_utility_before' AS track_utility_kept,
-       current_setting('pg_stat_statement_context.nested_tags') = :'nested_tags_before' AS nested_tags_kept;
- enabled_kept | track_kept | track_utility_kept | nested_tags_kept 
---------------+------------+--------------------+------------------
- t            | t          | t                  | t
+       current_setting('pg_stat_statement_context.nested_tags') = :'nested_tags_before' AS nested_tags_kept,
+       current_setting('pg_stat_statement_context.scan_window') = :'scan_window_before' AS scan_window_kept,
+       current_setting('pg_stat_statement_context.tags') = :'tags_before' AS tags_kept,
+       current_setting('pg_stat_statement_context.exclude_tags') = :'exclude_tags_before' AS exclude_tags_kept,
+       current_setting('pg_stat_statement_context.untagged') = :'untagged_before' AS untagged_kept;
+ enabled_kept | track_kept | track_utility_kept | nested_tags_kept | scan_window_kept | tags_kept | exclude_tags_kept | untagged_kept 
+--------------+------------+--------------------+------------------+------------------+-----------+-------------------+---------------
+ t            | t          | t                  | t                | t                | t         | t                 | t
 (1 row)
 
 RESET ROLE;
 DROP ROLE regress_pssc_nosuper;
 -- ---- sighup and postmaster GUCs cannot be SET in a session ----
-SET pg_stat_statement_context.scan_window = '4kB';
-ERROR:  parameter "pg_stat_statement_context.scan_window" cannot be changed now
 SET pg_stat_statement_context.extractors = 'marginalia';
 ERROR:  parameter "pg_stat_statement_context.extractors" cannot be changed now
-SET pg_stat_statement_context.tags = 'a';
-ERROR:  parameter "pg_stat_statement_context.tags" cannot be changed now
-SET pg_stat_statement_context.exclude_tags = 'a';
-ERROR:  parameter "pg_stat_statement_context.exclude_tags" cannot be changed now
-SET pg_stat_statement_context.untagged = 'record';
-ERROR:  parameter "pg_stat_statement_context.untagged" cannot be changed now
+SET pg_stat_statement_context.normalize = '';
+ERROR:  parameter "pg_stat_statement_context.normalize" cannot be changed now
+SET pg_stat_statement_context.cardinality_cap = 1;
+ERROR:  parameter "pg_stat_statement_context.cardinality_cap" cannot be changed now
+SET pg_stat_statement_context.save = off;
+ERROR:  parameter "pg_stat_statement_context.save" cannot be changed now
 SET pg_stat_statement_context.max_entries = 1000;
 ERROR:  parameter "pg_stat_statement_context.max_entries" cannot be changed without restarting the server
 SET pg_stat_statement_context.bucket_count = 6;

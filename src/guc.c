@@ -131,6 +131,7 @@ static const PsscNormalizeList empty_normalize_list = {
 static const PsscNormalizeList *cur_normalize = &empty_normalize_list;
 
 static uint64 config_generation = 0;
+static uint64 regex_generation = 0;
 
 static const PsscOverrideList *cur_override = NULL;
 static uint64 override_generation = 0;
@@ -204,6 +205,12 @@ uint64
 pssc_guc_config_generation(void)
 {
 	return config_generation;
+}
+
+uint64
+pssc_guc_regex_generation(void)
+{
+	return regex_generation;
 }
 
 const PsscOverrideList *
@@ -1357,7 +1364,10 @@ assign_extractors(const char *newval, void *extra)
 
 	if (cur_extractors == NULL || cur_extractors->size != list->size ||
 		memcmp(cur_extractors, list, list->size) != 0)
+	{
 		config_generation++;
+		regex_generation++;
+	}
 	cur_extractors = list;
 }
 
@@ -1718,7 +1728,10 @@ assign_normalize(const char *newval, void *extra)
 
 	if (cur_normalize->size != list->size ||
 		memcmp(cur_normalize, list, list->size) != 0)
+	{
 		config_generation++;
+		regex_generation++;
+	}
 	cur_normalize = list;
 }
 
@@ -2010,7 +2023,7 @@ pssc_guc_define(void)
 							 0,
 							 NULL, NULL, NULL);
 
-	/* sighup */
+	/* superuser: per database, role or session */
 	DefineCustomIntVariable(PSSC_GUC_PREFIX ".scan_window",
 							"Sets how many bytes at the head or tail of a long statement are searched for comments.",
 							NULL,
@@ -2018,10 +2031,44 @@ pssc_guc_define(void)
 							2048,
 							SCAN_WINDOW_MIN,
 							SCAN_WINDOW_MAX,
-							PGC_SIGHUP,
+							PGC_SUSET,
 							GUC_UNIT_BYTE,
 							NULL, NULL, NULL);
 
+	DefineCustomStringVariable(PSSC_GUC_PREFIX ".tags",
+							   "Sets the tag keys to keep (\"*\" keeps all).",
+							   "Comma-separated, case-sensitive keys of at most 63 bytes, "
+							   "matched after rename.",
+							   &pssc_tags,
+							   "action, controller, job",
+							   PGC_SUSET,
+							   GUC_LIST_INPUT,
+							   check_tags,
+							   assign_tags,
+							   NULL);
+
+	DefineCustomStringVariable(PSSC_GUC_PREFIX ".exclude_tags",
+							   "Sets the tag keys to discard when tags is \"*\".",
+							   "Comma-separated, case-sensitive keys of at most 63 bytes.",
+							   &pssc_exclude_tags,
+							   "traceparent, tracestate, request_id",
+							   PGC_SUSET,
+							   GUC_LIST_INPUT,
+							   check_exclude_tags,
+							   assign_exclude_tags,
+							   NULL);
+
+	DefineCustomEnumVariable(PSSC_GUC_PREFIX ".untagged",
+							 "Selects whether statements without tags are recorded.",
+							 "skip: not recorded; record: recorded with an empty tag set.",
+							 &pssc_untagged,
+							 PSSC_UNTAGGED_SKIP,
+							 untagged_options,
+							 PGC_SUSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	/* sighup */
 	DefineCustomIntVariable(PSSC_GUC_PREFIX ".reclaim_worker_interval",
 							"Sets how often the reclaim worker wakes up.",
 							"Only used when reclaim_worker is on.",
@@ -2054,39 +2101,6 @@ pssc_guc_define(void)
 							   check_extractors,
 							   assign_extractors,
 							   NULL);
-
-	DefineCustomStringVariable(PSSC_GUC_PREFIX ".tags",
-							   "Sets the tag keys to keep (\"*\" keeps all).",
-							   "Comma-separated, case-sensitive keys of at most 63 bytes, "
-							   "matched after rename.",
-							   &pssc_tags,
-							   "action, controller, job",
-							   PGC_SIGHUP,
-							   GUC_LIST_INPUT,
-							   check_tags,
-							   assign_tags,
-							   NULL);
-
-	DefineCustomStringVariable(PSSC_GUC_PREFIX ".exclude_tags",
-							   "Sets the tag keys to discard when tags is \"*\".",
-							   "Comma-separated, case-sensitive keys of at most 63 bytes.",
-							   &pssc_exclude_tags,
-							   "traceparent, tracestate, request_id",
-							   PGC_SIGHUP,
-							   GUC_LIST_INPUT,
-							   check_exclude_tags,
-							   assign_exclude_tags,
-							   NULL);
-
-	DefineCustomEnumVariable(PSSC_GUC_PREFIX ".untagged",
-							 "Selects whether statements without tags are recorded.",
-							 "skip: not recorded; record: recorded with an empty tag set.",
-							 &pssc_untagged,
-							 PSSC_UNTAGGED_SKIP,
-							 untagged_options,
-							 PGC_SIGHUP,
-							 0,
-							 NULL, NULL, NULL);
 
 	DefineCustomStringVariable(PSSC_GUC_PREFIX ".normalize",
 							   "Sets regex-replace rules that normalize tag values.",

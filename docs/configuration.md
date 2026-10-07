@@ -8,7 +8,10 @@ configuration file. Settings can be put in `postgresql.conf` or set with
 - `sighup`: server-wide, and takes effect after a reload
   (`SELECT pg_reload_conf()`). It can't be set per role, per database or per
   session, so PostgreSQL rejects `ALTER DATABASE ... SET` and
-  `ALTER ROLE ... SET` with "cannot be changed now".
+  `ALTER ROLE ... SET` with "cannot be changed now". `tags`, `exclude_tags`,
+  `untagged` and `scan_window` are `superuser`, so they can be set per
+  database or per role (see
+  [Changing the configuration from SQL](#changing-the-configuration-from-sql)).
 - `superuser`: can also be set per role, per database or per session, but only
   by a superuser (or a role granted `SET` on it, PG 15+).
 - `user`: can also be set per role, per database or per session, by any user.
@@ -41,11 +44,11 @@ The GUCs exist only when the library is in `shared_preload_libraries`.
 | [`reclaim_worker`](#reclaim_worker) | bool | `off` | | postmaster |
 | [`reclaim_worker_interval`](#reclaim_worker_interval) | integer (ms) | `10000` (`10s`) | 100 ms – 1 day | sighup |
 | [`save`](#save) | bool | `on` | | sighup |
-| [`scan_window`](#scan_window) | integer (bytes) | `2048` (`2kB`) | 64 B – 1 MB | sighup |
+| [`scan_window`](#scan_window) | integer (bytes) | `2048` (`2kB`) | 64 B – 1 MB | superuser |
 | [`extractors`](#extractors) | string | `'sqlcommenter, marginalia'` | extractor DSL | sighup |
-| [`tags`](#tags) | string | `'action, controller, job'` | key list or `'*'` | sighup |
-| [`exclude_tags`](#exclude_tags) | string | `'traceparent, tracestate, request_id'` | key list | sighup |
-| [`untagged`](#untagged) | enum | `skip` | `skip`, `record` | sighup |
+| [`tags`](#tags) | string | `'action, controller, job'` | key list or `'*'` | superuser |
+| [`exclude_tags`](#exclude_tags) | string | `'traceparent, tracestate, request_id'` | key list | superuser |
+| [`untagged`](#untagged) | enum | `skip` | `skip`, `record` | superuser |
 | [`normalize`](#normalize) | string | `''` | rule list | sighup |
 | [`tags_override`](#tags_override) | string | `''` | `key='value'` pairs | user |
 | [`cardinality_cap`](#cardinality_cap) | integer | `0` (off) | 0 – 1000000 | sighup |
@@ -205,7 +208,8 @@ How many bytes at the start or end of a long statement are searched for
 comments. Statements no longer than `scan_window` are always lexed exactly.
 It also bounds the total comment bytes examined per statement. See
 [Where comments are found](extractors.md#where-comments-are-found). It accepts
-byte units, e.g. `'4kB'`.
+byte units, e.g. `'4kB'`. A superuser can set it per database, per role or
+per session.
 
 ### `extractors`
 
@@ -227,11 +231,19 @@ used by `max_tags` and `max_tagset_bytes`. An empty list keeps no tags at all.
 `'*'` (alone) keeps every tag except those in `exclude_tags`. That is not
 recommended; see [Cardinality](extractors.md#allowlist-denylist-and-cardinality).
 
+A superuser can set it per database, per role or per session (`ALTER DATABASE
+... SET`, `ALTER ROLE ... SET`, `SET`), so each database can keep its own
+keys. A function's `SET` clause applies it to the statements the function
+runs, when they get their tags from their own text
+([`nested_tags = scan`](#nested_tags)); inherited tags were already filtered
+by the setting in effect when the outer statement started.
+
 ### `exclude_tags`
 
 The denylist: tag keys to discard. It applies **only when `tags = '*'`**.
 Same syntax as `tags`, without `'*'`. The default lists well-known
-high-cardinality keys.
+high-cardinality keys. Like `tags`, it can be set per database, per role or
+per session by a superuser.
 
 ### `untagged`
 
@@ -240,6 +252,10 @@ What to do with statements that end up with no tags:
 - `skip` (default): don't record them, so untagged traffic doesn't use
   entries.
 - `record`: record them with an empty tag set (`tags = {}`).
+
+A superuser can set it per database, per role or per session, e.g.
+`ALTER DATABASE canvas SET pg_stat_statement_context.untagged = 'record'` to
+record the untagged statements of one database only.
 
 ### `normalize`
 
@@ -306,7 +322,7 @@ complexity limits and query cancellation apply. If a rule fails at run time (the
 memory or reports an error), the tag is **dropped** rather than stored
 unnormalized, which could create many entries; this is counted in the debug
 function's `normalize_failures`. If a rule fails to compile in a backend at
-run time (including a compile stopped at the time limit), it is disabled there until the next configuration change (counted
+run time (including a compile stopped at the time limit), it is disabled there until the next `extractors` or `normalize` change (counted
 in `_info().regex_compile_failures`), and tags of its key are dropped. The
 user's statement never fails.
 
@@ -591,9 +607,8 @@ enough for a 55-byte `traceparent`.
 
 ## Changing the configuration from SQL
 
-The `sighup` settings, including `extractors`, `tags`, `exclude_tags` and
-`normalize`, can
-be changed without a restart:
+The `sighup` and `superuser` settings, including `extractors`, `tags`,
+`exclude_tags` and `normalize`, can be changed server-wide without a restart:
 
 ```sql
 ALTER SYSTEM SET pg_stat_statement_context.extractors = 'sqlcommenter, marginalia(position=prepend)';
@@ -631,6 +646,19 @@ record nested statements while investigating:
 ```sql
 SET pg_stat_statement_context.track = 'all';
 ```
+
+or per database or per role. The new value applies to sessions that start
+afterwards:
+
+```sql
+ALTER DATABASE canvas SET pg_stat_statement_context.untagged = 'record';
+ALTER DATABASE billing SET pg_stat_statement_context.tags = 'controller, action, tenant';
+ALTER ROLE batch SET pg_stat_statement_context.tags = 'job';
+```
+
+Entries are keyed by database and role, so different values don't mix in one
+entry. On PostgreSQL 15 and later, a superuser can let another role set one
+of them with `GRANT SET ON PARAMETER pg_stat_statement_context.tags TO ...`.
 
 ## Sizing `max_entries`
 

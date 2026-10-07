@@ -317,14 +317,15 @@ for my $pa ((map { [ 'compile', $_ ] } qw(espace etoobig oom error)),
 	is(rstats($s), '1|0|1|1', "compile failure ($action): one compiled, one failed");
 	is(sq($s, 'SELECT 42'), 42, "compile failure ($action): session healthy");
 	sq($s, "SELECT pssc_extract_test_regex_inject('$phase', -1, 'none')");
-	# A new generation retries the compilation.
-	alter_and_reload("SET $P.exclude_tags = 'zz'");
+	# A new regex generation (an extractors or normalize change, not tags or
+	# exclude_tags) retries the compilation.
+	alter_and_reload("SET $P.normalize = 'zz: ''z'' => ''y'''");
 	$r = sex($s, $Q);
 	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o,service=s 0',
 		"compile failure ($action): next generation compiles it again");
 	is(rstats($s), '3|1|2|0', "compile failure ($action): old regex freed, both compiled");
 	session_close($s);
-	alter_and_reload("SET $P.exclude_tags = ''");
+	alter_and_reload("SET $P.normalize = ''");
 }
 {
 	# per backend: another backend is not affected

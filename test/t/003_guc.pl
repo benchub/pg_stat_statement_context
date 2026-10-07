@@ -1,5 +1,6 @@
 # Core GUCs (DESIGN.md §4.1, backlog 20261005-091225-7): ALTER SYSTEM +
-# reload for sighup GUCs, restart for postmaster GUCs (pending_restart),
+# reload for sighup GUCs, SET for superuser GUCs (also tags, exclude_tags,
+# untagged, scan_window), restart for postmaster GUCs (pending_restart),
 # invalid values rejected with the previous value kept (reload and startup),
 # bounds with units, the parsed tags/exclude_tags lists, the backend-local
 # config generation, and prefix reservation. The parsed state is read
@@ -202,6 +203,30 @@ alter_and_reload("SET $P.enabled = off", "SET $P.track = 'all'");
 is(show('enabled') . '/' . show('track'), 'off/all',
 	'ALTER SYSTEM + reload changes superuser GUCs');
 alter_and_reload("RESET $P.enabled", "RESET $P.track");
+
+# tags and exclude_tags are superuser GUCs: SET, SET LOCAL and its rollback
+# install the parsed list in this backend and bump its generation.
+like(sql(qq{SELECT pssc_guc_test_generation();
+           SET $P.tags = 'x, y';
+           SELECT match_all, nkeys, keys FROM pssc_guc_test_list('tags');
+           SELECT pssc_guc_test_generation();
+           BEGIN;
+           SET LOCAL $P.tags = '*';
+           SELECT match_all, nkeys, keys FROM pssc_guc_test_list('tags');
+           ROLLBACK;
+           SELECT match_all, nkeys, keys FROM pssc_guc_test_list('tags');
+           SET $P.exclude_tags = 'z';
+           SELECT match_all, nkeys, keys FROM pssc_guc_test_list('exclude_tags');
+           SELECT pssc_guc_test_vars()}),
+	qr/^(\d+)\nf\|2\|\{x,y\}\n(\d+)\nt\|0\|\{\}\nf\|2\|\{x,y\}\nf\|1\|\{z\}\n/,
+	'SET / SET LOCAL / rollback of tags and exclude_tags in a session');
+my ($tg0, $tg1) = sql(qq{SELECT pssc_guc_test_generation();
+                         SET $P.tags = 'x, y';
+                         SELECT pssc_guc_test_generation()}) =~ /^(\d+)\n(\d+)$/;
+cmp_ok($tg1, q{>}, $tg0, q{SET tags bumps the generation});
+like(sql(qq{SET $P.untagged = 'record'; SET $P.scan_window = '8kB'; SELECT pssc_guc_test_vars()}),
+	qr/(?=.*^untagged=record$)(?=.*^scan_window=8192$)/ms,
+	'SET untagged and scan_window update the C variables');
 
 # '*' handling.
 alter_and_reload("SET $P.tags = ' * '", "SET $P.exclude_tags = 'traceparent , x,traceparent'");

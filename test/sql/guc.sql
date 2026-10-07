@@ -36,6 +36,14 @@ SET pg_stat_statement_context.nested_tags = 'scan';
 SHOW pg_stat_statement_context.nested_tags;
 SET pg_stat_statement_context.nested_tags = 'none';
 SHOW pg_stat_statement_context.nested_tags;
+SET pg_stat_statement_context.scan_window = '4kB';
+SHOW pg_stat_statement_context.scan_window;
+SET pg_stat_statement_context.tags = 'a, b';
+SHOW pg_stat_statement_context.tags;
+SET pg_stat_statement_context.exclude_tags = 'c';
+SHOW pg_stat_statement_context.exclude_tags;
+SET pg_stat_statement_context.untagged = 'record';
+SHOW pg_stat_statement_context.untagged;
 
 -- Invalid values are rejected and the previous value stays.
 SET pg_stat_statement_context.track = 'bogus';
@@ -50,12 +58,20 @@ RESET pg_stat_statement_context.enabled;
 RESET pg_stat_statement_context.track;
 RESET pg_stat_statement_context.track_utility;
 RESET pg_stat_statement_context.nested_tags;
+RESET pg_stat_statement_context.scan_window;
+RESET pg_stat_statement_context.tags;
+RESET pg_stat_statement_context.exclude_tags;
+RESET pg_stat_statement_context.untagged;
 
 -- ---- a non-superuser cannot SET superuser GUCs ----
 SELECT current_setting('pg_stat_statement_context.enabled') AS enabled_before,
        current_setting('pg_stat_statement_context.track') AS track_before,
        current_setting('pg_stat_statement_context.track_utility') AS track_utility_before,
-       current_setting('pg_stat_statement_context.nested_tags') AS nested_tags_before
+       current_setting('pg_stat_statement_context.nested_tags') AS nested_tags_before,
+       current_setting('pg_stat_statement_context.scan_window') AS scan_window_before,
+       current_setting('pg_stat_statement_context.tags') AS tags_before,
+       current_setting('pg_stat_statement_context.exclude_tags') AS exclude_tags_before,
+       current_setting('pg_stat_statement_context.untagged') AS untagged_before
 \gset
 CREATE ROLE regress_pssc_nosuper;
 SET ROLE regress_pssc_nosuper;
@@ -63,21 +79,29 @@ SET pg_stat_statement_context.enabled = off;
 SET pg_stat_statement_context.track = 'all';
 SET pg_stat_statement_context.track_utility = off;
 SET pg_stat_statement_context.nested_tags = 'scan';
+SET pg_stat_statement_context.scan_window = '4kB';
+SET pg_stat_statement_context.tags = 'a';
+SET pg_stat_statement_context.exclude_tags = 'a';
+SET pg_stat_statement_context.untagged = 'record';
 SELECT set_config('pg_stat_statement_context.enabled', 'off', true);
+SELECT set_config('pg_stat_statement_context.tags', '*', true);
 -- Reading them is allowed, and nothing changed.
 SELECT current_setting('pg_stat_statement_context.enabled') = :'enabled_before' AS enabled_kept,
        current_setting('pg_stat_statement_context.track') = :'track_before' AS track_kept,
        current_setting('pg_stat_statement_context.track_utility') = :'track_utility_before' AS track_utility_kept,
-       current_setting('pg_stat_statement_context.nested_tags') = :'nested_tags_before' AS nested_tags_kept;
+       current_setting('pg_stat_statement_context.nested_tags') = :'nested_tags_before' AS nested_tags_kept,
+       current_setting('pg_stat_statement_context.scan_window') = :'scan_window_before' AS scan_window_kept,
+       current_setting('pg_stat_statement_context.tags') = :'tags_before' AS tags_kept,
+       current_setting('pg_stat_statement_context.exclude_tags') = :'exclude_tags_before' AS exclude_tags_kept,
+       current_setting('pg_stat_statement_context.untagged') = :'untagged_before' AS untagged_kept;
 RESET ROLE;
 DROP ROLE regress_pssc_nosuper;
 
 -- ---- sighup and postmaster GUCs cannot be SET in a session ----
-SET pg_stat_statement_context.scan_window = '4kB';
 SET pg_stat_statement_context.extractors = 'marginalia';
-SET pg_stat_statement_context.tags = 'a';
-SET pg_stat_statement_context.exclude_tags = 'a';
-SET pg_stat_statement_context.untagged = 'record';
+SET pg_stat_statement_context.normalize = '';
+SET pg_stat_statement_context.cardinality_cap = 1;
+SET pg_stat_statement_context.save = off;
 SET pg_stat_statement_context.max_entries = 1000;
 SET pg_stat_statement_context.bucket_count = 6;
 SET pg_stat_statement_context.bucket_interval = '60s';

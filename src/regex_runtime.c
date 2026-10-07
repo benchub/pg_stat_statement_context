@@ -3,9 +3,9 @@
  *		Regex extractor runtime: see regex_runtime.h.
  *
  * Memory. Each backend compiles a regex extractor's pattern the first time
- * the pipeline needs it after a config generation change
- * (pssc_guc_config_generation()), with the core engine (REG_ADVANCED, C
- * collation), into its own child of a long-lived context. The compiled
+ * the pipeline needs it after a regex generation change
+ * (pssc_guc_regex_generation(): extractors or normalize changed), with the
+ * core engine (REG_ADVANCED, C collation), into its own child of a long-lived context. The compiled
  * regexes of an older generation are released at the next pipeline run
  * (pssc_regex_release_stale(), called by pssc_extract_tags()) or hook call:
  * pg_regfree() first, then the child context is deleted. Both are needed:
@@ -112,13 +112,13 @@ release_slot(Slot *slot)
 }
 
 /*
- * Releases the compiled regexes of an older config generation. Never
+ * Releases the compiled regexes of an older regex generation. Never
  * throws.
  */
 void
 pssc_regex_release_stale(void)
 {
-	uint64		gen = pssc_guc_config_generation();
+	uint64		gen = pssc_guc_regex_generation();
 	int			i;
 
 	if (slots_valid && slots_generation == gen)

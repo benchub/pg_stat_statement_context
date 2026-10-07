@@ -240,7 +240,10 @@ or plan cache and can dangle.
 
 All configuration uses GUCs, so it can be set in `postgresql.conf`, with
 `ALTER SYSTEM`, and is reloadable on SIGHUP unless marked otherwise. Settings
-that size shared memory require a restart.
+that size shared memory require a restart. `superuser` settings can also be
+set per database, per role or per session (`ALTER DATABASE/ROLE ... SET`,
+`SET`, a function's `SET` clause) by a superuser or, on PG 15+, a role
+granted `SET` on them.
 
 ### 4.1 Core GUCs
 
@@ -259,10 +262,10 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.reclaim_worker` | `off` | postmaster | Start the background worker that reclaims dead entries on idle systems (§5.3, item 20261005-091225-34). Off: no worker is registered. |
 | `pg_stat_statement_context.reclaim_worker_interval` | `10s` | sighup | How often the reclaim worker wakes up (100 ms – 1 day, unit ms). |
 | `pg_stat_statement_context.save` | `on` | sighup | Save the store at a clean shutdown and load it at the next start (§5.5, item 20261005-091225-35), as `pg_stat_statements.save` (same default and context). Off: nothing is saved, and a saved file found at startup is discarded. |
-| `pg_stat_statement_context.scan_window` | `2kB` | sighup | Max bytes from the head/tail searched for comments (see §6.2). |
+| `pg_stat_statement_context.scan_window` | `2kB` | superuser | Max bytes from the head/tail searched for comments (see §6.2). |
 | `pg_stat_statement_context.extractors` | `'sqlcommenter, marginalia'` | sighup | Extractor DSL (§4.2). |
-| `pg_stat_statement_context.tags` | `'action, controller, job'` | sighup | Allowlist of tag keys to keep, applied after `rename`. Tags not listed are discarded. `'*'` keeps all tags (not recommended, see §6.1). |
-| `pg_stat_statement_context.exclude_tags` | `'traceparent, tracestate, request_id'` | sighup | Denylist (high-cardinality). Only relevant when `tags = '*'`. |
+| `pg_stat_statement_context.tags` | `'action, controller, job'` | superuser | Allowlist of tag keys to keep, applied after `rename`. Tags not listed are discarded. `'*'` keeps all tags (not recommended, see §6.1). |
+| `pg_stat_statement_context.exclude_tags` | `'traceparent, tracestate, request_id'` | superuser | Denylist (high-cardinality). Only relevant when `tags = '*'`. |
 | `pg_stat_statement_context.normalize` | `''` | sighup | Per-key value rewrite rules `key: 'pattern' => 'replacement', …` (item -41). Rules apply in order, each like `regexp_replace(v COLLATE "C", p, r, 'g')`. Patterns may not contain back-references; replacements may use `\1`–`\9`, `\&`, `\\`. Limits: at most 32 rules, 1 kB per pattern or replacement. Validated at SET/reload (§6.11 step 6). |
 | `pg_stat_statement_context.cardinality_cap` | `0` | sighup | Default cap on distinct values per kept key, counted per `cardinality_cap_scope` (item -32, §6.1). `0` = off; range 0..1000000. Once a key has had its cap of values, any other value is stored as JSON `null`. |
 | `pg_stat_statement_context.cardinality_cap_overrides` | `''` | sighup | Per-key caps `key:N[, key:N…]` that take precedence over `cardinality_cap` (the key is everything before the last `:`, matched after `rename`). `N = 0` exempts the key; an override applies even when the default is 0. |
@@ -270,13 +273,34 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.cardinality_cap_slots` | `16384` | postmaster | Value slots in the shared cap-tracking table (about 9 bytes each, plus key slots). Always allocated, so caps can be turned on by a reload. One table for all scopes: narrower scopes fill it faster. |
 | `pg_stat_statement_context.exemplar_keys` | `''` | postmaster | Keys whose most recent value is stored with each entry as an exemplar (item -33, §6.13), e.g. `'traceparent'`. Comma-separated, case-sensitive, at most 8 keys of at most 63 bytes, no `*`. Matched after `rename`, before the allowlist/denylist, so a key may be both in `exclude_tags` (not grouped by) and here. Empty (default): off, no memory. |
 | `pg_stat_statement_context.exemplar_memory` | `2MB` | postmaster | Shared memory for the exemplar values of all entries (range 0 – 2^31-1 kB, unit kB). Split evenly: each entry gets `exemplar_memory / max_entries` bytes and each key an equal share of that, minus 2 bytes of length, at most 256 bytes per value (`_info().exemplar_value_bytes`). Longer values are dropped and counted (§6.13). |
-| `pg_stat_statement_context.untagged` | `skip` | sighup | `skip` statements without tags (default, decided 2026-10-05, §11 Q1) / `record` them with an empty tag set. |
+| `pg_stat_statement_context.untagged` | `skip` | superuser | `skip` statements without tags (default, decided 2026-10-05, §11 Q1) / `record` them with an empty tag set. |
 
 The configuration lives in GUCs only; there is no separate config file
 (decided 2026-10-05, §11 Q3). To change it from SQL, use
 `ALTER SYSTEM SET pg_stat_statement_context.extractors = '...';` followed by
-`SELECT pg_reload_conf();`. This works for every `sighup` setting, including
-`extractors`, `tags`, and `exclude_tags`.
+`SELECT pg_reload_conf();`. This works for every `sighup` and `superuser`
+setting, including `extractors`, `tags`, and `exclude_tags`.
+
+`untagged`, `tags`, `exclude_tags` and `scan_window` are `superuser` rather
+than `sighup` (item 20261007-133120-1, decided 2026-10-07), so they can differ
+per database or role, e.g. `ALTER DATABASE canvas SET
+pg_stat_statement_context.untagged = 'record'`. Each backend reads them when
+it extracts tags, and entries are keyed by `dbid` and `userid`, so differing
+values never share an entry. Because SET LOCAL, a function's `SET` clause and
+a (sub)transaction abort can change `tags`/`exclude_tags` in the middle of a
+statement, nothing outside one extraction call keeps a pointer to their
+parsed lists: a frame's tag set and recap candidates (§6.1) are copies, and
+the GUC machinery frees a replaced list only when no GUC stack level refers
+to it. Inherited tags (`nested_tags = inherit`) and recaps are not
+re-filtered by a changed allowlist: they were filtered when the statement
+that supplied them was extracted. A change bumps the backend's config
+generation (the `appname`/`tags_override` caches), but not the regex
+generation, so compiled regexes are kept; only `extractors` and `normalize`
+changes recompile them. Parallel workers do not extract or record, and get
+the leader's values from PostgreSQL's GUC state. `extractors`, `normalize`
+and the cap settings stay `sighup` (mid-statement changes to compiled regexes
+and caps would need more work), as do the server-wide `save` and
+`reclaim_worker_interval`.
 
 ### 4.2 Extractor DSL
 
@@ -343,7 +367,8 @@ Format-specific parameters:
     holds only memory.
   - Cancel, timeout, shutdown, deadlock and serialization errors are re-thrown.
   - Other errors (e.g. OOM) disable the extractor for the backend: a compile
-    error until the next config change, counted in `regex_compile_failures`.
+    error until the next `extractors` or `normalize` change, counted in
+    `regex_compile_failures`.
     A match error simply yields no further pairs and is not counted.
 
   Compile time (item 20261006-021334-1): compiling a pattern (regex extractor
@@ -467,9 +492,10 @@ regex there must double its backslashes (`\\w`). `ALTER SYSTEM` writes the
 escaping for you.
 
 Compiled regexes are not part of `extra`, because GUC frees only the top-level
-block. Each backend compiles them lazily on first use after a generation change,
-into a private memory context that it owns, and frees the old ones with
-`pg_regfree`. Regex allocation uses `malloc` on PG14/15 and `palloc` on PG16+. If
+block. Each backend compiles them lazily on first use after a regex generation
+change (bumped only by `extractors` and `normalize`, not by `tags` or
+`exclude_tags`), into a private memory context that it owns, and frees the
+old ones with `pg_regfree`. Regex allocation uses `malloc` on PG14/15 and `palloc` on PG16+. If
 lazy compilation fails (for example, out of memory), that extractor is disabled
 for the backend and the failure is counted. The statement itself is not failed.
 
@@ -984,7 +1010,11 @@ uses the caps' configuration at its time (a `SIGHUP` between extraction and
 recap applies), but caps turned on after extraction don't apply to a frame
 extracted with caps off. Inherited tags are recapped for the child's role
 and a new `cands` stored with them, so a chain of definers recaps at each
-change of role.
+change of role. A recap runs only steps 8 and 9: it does not apply `tags` or
+`exclude_tags` again, which can have changed since extraction (they are
+`superuser` settings, §4.1, so a function's `SET` clause or `SET LOCAL` can
+change them mid-statement). The candidates were filtered when they were
+extracted and are a copy, so a recap never reads the parsed lists.
 
 ### 6.2 Long queries (e.g., 10k-element `IN` lists)
 Even a linear scan costs something on a 1 MB query string.
@@ -1200,7 +1230,7 @@ some server version, it is omitted on that version rather than exposed as
      at `max(value length, max_tag_value_len)` bytes. On a run-time failure
      the pair is dropped (fail closed) and counted in `normalize_failures`. A
      rule that fails to compile is disabled for the backend until the next
-     config change and counted in `regex_compile_failures`. The CPU and
+     `extractors` or `normalize` change and counted in `regex_compile_failures`. The CPU and
      compile limits are the regex extractor's (§4.2).
   7. truncate on a character boundary (`pg_mbcliplen`)
   8. per-key cardinality caps (item -32, §6.1): a value beyond its key's cap
@@ -1288,6 +1318,9 @@ some server version, it is omitted on that version rather than exposed as
   statement (16) and their total size (`scan_window`). The core regex engine
   already checks for interrupts, which allows cancellation but does not bound
   complexity.
+  `scan_window` can be set per database, role or session, but only by a
+  superuser or a role granted `SET` on it (PG 15+), so an ordinary role
+  cannot raise the bound for its own statements.
 
 ### 6.12 Deployment requirement
 The extension must be listed in `shared_preload_libraries`, **after**

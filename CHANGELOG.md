@@ -42,6 +42,10 @@ First release. SQL extension version `1.0`. Supports PostgreSQL 14, 15, 16,
   (`normalize`, e.g. `/users/\d+` → `/users/:id`), size limits (`max_tags`,
   `max_tag_value_len`, `max_tagset_bytes`), and the **`untagged` policy**
   (default `skip`; `record` keeps untagged statements with `{}`).
+  `tags`, `exclude_tags`, `untagged` and `scan_window` are `superuser`
+  settings, so they can also be set per database, per role or per session
+  (`ALTER DATABASE/ROLE ... SET`, `SET`, a function's `SET` clause) by a
+  superuser or, on PG 15+, a role granted `SET` on them.
 - **Per-key cardinality caps** (`cardinality_cap`,
   `cardinality_cap_overrides`, `cardinality_cap_slots`): values past a key's
   cap are recorded as JSON `null`. Caps are counted per (role, database) by

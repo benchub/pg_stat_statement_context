@@ -247,7 +247,7 @@ pattern from stalling queries:
   report no steal time to the guest, so nothing inside the VM can tell it
   apart. On a heavily overloaded host a normal pattern can therefore still
   be rejected by `ALTER SYSTEM` (try again) or disabled in a backend
-  until the next configuration change.
+  until the next `extractors` or `normalize` change.
 - The limit is per pattern. Compile times vary between machines and with
   load, so a pattern close to the limit may be accepted when it's set and
   still be stopped in some backends. Keep patterns well below the limit:
@@ -255,7 +255,7 @@ pattern from stalling queries:
 
 If a regex fails to compile in a backend at run time (out of memory, or
 over the compile time limit), that extractor is disabled in that backend
-until the next configuration change, and the failure is counted in
+until the next `extractors` or `normalize` change, and the failure is counted in
 `_info().regex_compile_failures`. The user's statement never fails. A
 query cancel, `statement_timeout`, `transaction_timeout`, recovery conflict
 or other interrupt that arrives during the compile is still handled as

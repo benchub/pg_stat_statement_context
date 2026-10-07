@@ -243,7 +243,7 @@ typedef struct PsscTagsetStats
 
 	/*
 	 * Regex extractors whose lazy per-backend compilation failed (each is
-	 * then disabled until the next config generation). Never touched by
+	 * then disabled until the next regex generation). Never touched by
 	 * pssc_tagset_build(); the regex runtime (src/regex_runtime.c) counts
 	 * them in the backend-local copy.
 	 */
