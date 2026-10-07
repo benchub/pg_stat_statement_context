@@ -460,7 +460,7 @@ SELECT jsonb_pretty(pg_stat_statement_context_extract(
 | `invalid_tags`, `dropped_tags`, `heuristic_scans`, `regex_compile_failures` | This call's contribution to the `_info()` counters of the same names. |
 | `normalized_tags` | Tags whose value the [`normalize`](configuration.md#normalize) rules changed. |
 | `normalize_failures` | Tags dropped because a `normalize` rule failed (or was disabled by a compile failure). |
-| `capped_tags` | Values shown as `null` because their key has reached its [cardinality cap](configuration.md#cardinality_cap). The function only looks at the caps: it never admits a value, so calling it doesn't use up any key's cap, and its count isn't added to `_info().capped_tags`. |
+| `capped_tags` | Values shown as `null` because their key has reached its [cardinality cap](configuration.md#cardinality_cap). The function only looks at the caps, in the caller's [scope](configuration.md#cardinality_cap_scope): it never admits a value, so calling it doesn't use up any key's cap, and its count isn't added to `_info().capped_tags`. |
 
 **Arguments.** `stmt_location` and `stmt_len` select one statement of a
 multi-statement string, in bytes, the way the parser reports it:

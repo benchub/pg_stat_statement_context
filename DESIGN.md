@@ -263,9 +263,10 @@ that size shared memory require a restart.
 | `pg_stat_statement_context.tags` | `'action, controller, job'` | sighup | Allowlist of tag keys to keep, applied after `rename`. Tags not listed are discarded. `'*'` keeps all tags (not recommended, see §6.1). |
 | `pg_stat_statement_context.exclude_tags` | `'traceparent, tracestate, request_id'` | sighup | Denylist (high-cardinality). Only relevant when `tags = '*'`. |
 | `pg_stat_statement_context.normalize` | `''` | sighup | Per-key value rewrite rules `key: 'pattern' => 'replacement', …` (item -41). Rules apply in order, each like `regexp_replace(v COLLATE "C", p, r, 'g')`. Patterns may not contain back-references; replacements may use `\1`–`\9`, `\&`, `\\`. Limits: at most 32 rules, 1 kB per pattern or replacement. Validated at SET/reload (§6.11 step 6). |
-| `pg_stat_statement_context.cardinality_cap` | `0` | sighup | Default cap on distinct values per kept key, counted server-wide (item -32, §6.1). `0` = off; range 0..1000000. Once a key has had its cap of values, any other value is stored as JSON `null`. |
+| `pg_stat_statement_context.cardinality_cap` | `0` | sighup | Default cap on distinct values per kept key, counted per `cardinality_cap_scope` (item -32, §6.1). `0` = off; range 0..1000000. Once a key has had its cap of values, any other value is stored as JSON `null`. |
 | `pg_stat_statement_context.cardinality_cap_overrides` | `''` | sighup | Per-key caps `key:N[, key:N…]` that take precedence over `cardinality_cap` (the key is everything before the last `:`, matched after `rename`). `N = 0` exempts the key; an override applies even when the default is 0. |
-| `pg_stat_statement_context.cardinality_cap_slots` | `16384` | postmaster | Value slots in the shared cap-tracking table (about 9 bytes each, plus key slots). Always allocated, so caps can be turned on by a reload. |
+| `pg_stat_statement_context.cardinality_cap_scope` | `'role'` | postmaster | What the caps count per (item 20261007-070036-1, §6.1, §6.11): `role` = per (userid, dbid), the pgss entry key; `database` = per dbid; `server` = server-wide. `database` and `server` let roles observe and use up each other's caps. |
+| `pg_stat_statement_context.cardinality_cap_slots` | `16384` | postmaster | Value slots in the shared cap-tracking table (about 9 bytes each, plus key slots). Always allocated, so caps can be turned on by a reload. One table for all scopes: narrower scopes fill it faster. |
 | `pg_stat_statement_context.exemplar_keys` | `''` | postmaster | Keys whose most recent value is stored with each entry as an exemplar (item -33, §6.13), e.g. `'traceparent'`. Comma-separated, case-sensitive, at most 8 keys of at most 63 bytes, no `*`. Matched after `rename`, before the allowlist/denylist, so a key may be both in `exclude_tags` (not grouped by) and here. Empty (default): off, no memory. |
 | `pg_stat_statement_context.exemplar_memory` | `2MB` | postmaster | Shared memory for the exemplar values of all entries (range 0 – 2^31-1 kB, unit kB). Split evenly: each entry gets `exemplar_memory / max_entries` bytes and each key an equal share of that, minus 2 bytes of length, at most 256 bytes per value (`_info().exemplar_value_bytes`). Longer values are dropped and counted (§6.13). |
 | `pg_stat_statement_context.untagged` | `skip` | sighup | `skip` statements without tags (default, decided 2026-10-05, §11 Q1) / `record` them with an empty tag set. |
@@ -878,7 +879,7 @@ normalization rules (`normalize`, item -41), and per-key cardinality caps
 
 **Cardinality caps** (item -32, landed 2026-10-06): `cardinality_cap` and
 `cardinality_cap_overrides` (§4.1) bound the distinct values per key, counted
-globally (not per bucket or `queryid`). Values beyond the cap collapse to JSON
+per `cardinality_cap_scope` (not per bucket or `queryid`). Values beyond the cap collapse to JSON
 `null`, which cannot collide with a real value because a client can only send
 strings; the statements still count, in one `null` entry per query and
 remaining tags. The tracking table is a separate lock-free shared-memory area:
@@ -898,6 +899,45 @@ as well as `capped_tags`. Known narrow races: a value another backend is
 inserting at the same moment can briefly collapse, and two backends inserting
 the same value can collapse a third. The count never exceeds the cap except
 through fingerprint false positives.
+
+**Cap scope** (item 20261007-070036-1, decided 2026-10-07 after the security
+reviews): a server-wide cap is a cross-role membership oracle (at the cap, a
+value another role already sent stays a string while an unseen one becomes
+`null`, visible in the sender's own rows) and lets any role use up everyone's
+cap. `cardinality_cap_scope` (postmaster) therefore selects the scope, default
+`role`: the key hash is seeded with a hash of (userid, dbid) (`role`) or of
+dbid alone (`database`), keyed with a 64-bit secret; `server` uses seed 0, the
+earlier unkeyed hash. The value hash is seeded with the key hash, so a key's
+count word, its admitted values, and their slots and fingerprints are all per
+scope. The secret (in the table header, from `pg_strong_random()`) is drawn
+at startup and again by every `_reset()`, which writes it before publishing
+the new generation; admissions read it after the generation, and one that
+raced a reset finds the generation changed before any write and restarts.
+Without the secret, slot positions would follow from public OIDs: a role
+could fill the probe window after another scope's candidate value with
+values of its own (under its own cap, in a sparse table) and learn from one
+more value whether the candidate's slot is taken. Under `server` this probe
+still works, which is acceptable there since `server` shares the admitted
+sets anyway. userid and dbid are `GetUserId()` and `MyDatabaseId` when the
+tags are extracted, which is what the frame records at creation (§3.3); the
+debug function peeks in the caller's scope. The table and its size
+(`cardinality_cap_slots`, one shared limit like `pg_stat_statements.max`) do
+not change: scoping only fills it faster (each scope takes its own key slot
+and up to the cap of value slots), so busy multi-tenant servers may need more
+slots. A (nearly) full table collapses new values of every scope to `null`,
+observable by any role: the accepted residual of a shared limit, as with
+`pg_stat_statements.max`. `_reset()` empties every scope.
+
+Residual (identity at extraction): the scope's role is taken when the tags are
+extracted (`ExecutorStart`), but the recorded userid is refreshed at
+`ExecutorEnd` (executor.c), and nested statements under `nested_tags =
+inherit` copy their caller's already-capped tags (context.c). So a cursor
+opened under role A and finished under role B (`SET ROLE`) is capped under A
+and recorded under B; a `SECURITY DEFINER` child inherits the caller's cap
+decisions and records them under the definer; and a cursor a definer's
+function opens and the caller fetches shows the definer's cap decisions in
+the caller's rows. Exploiting these needs membership in both roles or a
+function whose owner controls the tag text; a follow-up item tracks them.
 
 ### 6.2 Long queries (e.g., 10k-element `IN` lists)
 Even a linear scan costs something on a 1 MB query string.
@@ -1121,7 +1161,18 @@ some server version, it is omitted on that version rather than exposed as
      produce this) and output as JSON `null`. A `null` counts as 2 bytes toward
      `max_tagset_bytes`. Only tags that step 9 keeps are admitted to the cap,
      so a dropped tag never uses up cap space; a capped value still counts as
-     "produced" for the extractor chain.
+     "produced" for the extractor chain. Caps are counted per
+     `cardinality_cap_scope`, by default per (role, database), so whether a
+     value collapses depends only on the role's own values in that database
+     (and on the fill of the shared table): it is not an oracle for other roles' tag values, and other roles cannot
+     use up its caps. `database` and `server` scopes share caps between roles
+     (and, for `server`, databases), which reintroduces both cross-role
+     observability (membership of a value in another role's admitted set) and
+     poisoning; use them only when the roles sharing a scope trust each other.
+     Under the scoped modes, slot positions are keyed with a secret, so a
+     role can't aim its own values at another scope's slots; what stays
+     observable is a (nearly) full shared table, and the identity residual
+     of §6.1 (cursors finished under another role, `SECURITY DEFINER`).
   9. sort and serialize within `max_tags` and `max_tagset_bytes`, using greedy
      fill (decided 2026-10-05):
      - Tags are considered in priority order: allowlist order, or sorted-key
@@ -1179,7 +1230,8 @@ some server version, it is omitted on that version rather than exposed as
   on every version, which on PG14 is slightly stricter than pgss there
   (`is_member_of_role` also admitted NOINHERIT members). The activity view
   and the `exemplars` column (§6.13) use the same rule: `exemplars` is `NULL`
-  exactly when `tags` is.
+  exactly when `tags` is. The cardinality caps keep to this only under the
+  default `cardinality_cap_scope = role` (step 8 above).
 - Regex patterns are superuser-only (GUC context). An input bound alone is not
   a CPU bound. v1 therefore also rejects back-references, caps the pattern
   length and capture count (§4.2), and caps the number of comments examined per

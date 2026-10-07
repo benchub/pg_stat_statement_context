@@ -29,6 +29,7 @@
 
 #include "common/hashfn.h"
 #include "mb/pg_wchar.h"
+#include "miscadmin.h"
 #include "parser/parser.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -356,8 +357,11 @@ extract_tags(const char *s, size_t start, size_t end, char *buf,
 		env.arg = (void *) pssc_guc_normalize();
 		env.normalize = env_normalize;
 	}
-	/* caps apply after the cached appname/override passes (steps 1-7) */
-	env.cap = pssc_cap_hook(peek_caps);
+	/*
+	 * caps apply after the cached appname/override passes (steps 1-7), in
+	 * the scope of the role and database the frame records (context.c)
+	 */
+	env.cap = pssc_cap_hook(peek_caps, GetUserId(), MyDatabaseId);
 	/* only when the store has exemplar slots (and the caller wants them) */
 	env.exemplar_keys = NULL;
 	limits.exemplar_value_len = 0;

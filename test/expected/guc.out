@@ -19,6 +19,7 @@ pg_stat_statement_context.bucket_count|Sets the number of time buckets kept for 
 pg_stat_statement_context.bucket_interval|Sets the width of each time bucket.|integer|300|postmaster|s|1|86400|
 pg_stat_statement_context.cardinality_cap|Sets the maximum number of distinct values of each tag key.|integer|0|sighup||0|1000000|
 pg_stat_statement_context.cardinality_cap_overrides|Sets per-key caps on the number of distinct tag values.|string||sighup||||
+pg_stat_statement_context.cardinality_cap_scope|Selects what the cardinality caps count distinct values per.|enum|role|postmaster||||{server,database,role}
 pg_stat_statement_context.cardinality_cap_slots|Sets the number of distinct (key, value) pairs the cardinality caps can track.|integer|16384|postmaster||256|67108864|
 pg_stat_statement_context.enabled|Enables collection of statement statistics per tag set.|bool|on|superuser||||
 pg_stat_statement_context.exclude_tags|Sets the tag keys to discard when tags is "*".|string|traceparent, tracestate, request_id|sighup||||
@@ -40,7 +41,7 @@ pg_stat_statement_context.tags_override|Sets tags that override the tags of SQL 
 pg_stat_statement_context.track|Selects which statements are tracked.|enum|top|superuser||||{none,top,all}
 pg_stat_statement_context.track_utility|Selects whether utility commands are tracked.|bool|on|superuser||||
 pg_stat_statement_context.untagged|Selects whether statements without tags are recorded.|enum|skip|sighup||||{skip,record}
-(25 rows)
+(26 rows)
 \pset format aligned
 SELECT count(*) AS gucs,
        count(*) FILTER (WHERE short_desc IS NOT NULL AND short_desc <> '') AS described
@@ -48,7 +49,7 @@ SELECT count(*) AS gucs,
  WHERE name LIKE 'pg\_stat\_statement\_context.%';
  gucs | described 
 ------+-----------
-   25 |        25
+   26 |        26
 (1 row)
 
 -- ---- superuser GUCs: a superuser can SET them ----

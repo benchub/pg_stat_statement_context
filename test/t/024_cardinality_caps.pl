@@ -1,7 +1,8 @@
 # Per-key cardinality caps (DESIGN.md §6.11 step 8; backlog
 # 20261005-091225-32): pg_stat_statement_context.cardinality_cap bounds the
-# number of distinct values of each allowed key, counted globally (not per
-# bucket or queryid) since the last _reset(); values beyond the cap collapse
+# number of distinct values of each allowed key, counted per (role,
+# database) by default (cardinality_cap_scope; 030_cap_scope.pl) but not per
+# bucket or queryid, since the last _reset(); values beyond the cap collapse
 # to JSON null before the entry's key is built. cardinality_cap_overrides
 # sets per-key caps ("key:N, ..."; N = 0 exempts a key) that take
 # precedence over the global default, and cardinality_cap_slots sizes the
@@ -88,6 +89,7 @@ sub info { return sql("SELECT $_[0] FROM ${P}_info()"); }
 is( sql("SELECT string_agg(name || '=' || setting || '/' || context, ' ' ORDER BY name COLLATE \"C\")"
 		  . " FROM pg_settings WHERE name LIKE '$P.cardinality%'"),
 	"$P.cardinality_cap=0/sighup $P.cardinality_cap_overrides=/sighup "
+	  . "$P.cardinality_cap_scope=role/postmaster "
 	  . "$P.cardinality_cap_slots=16384/postmaster",
 	'GUCs: names, defaults (caps off) and contexts');
 

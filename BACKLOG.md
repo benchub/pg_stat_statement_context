@@ -50,7 +50,9 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
-| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32 | no | ready |
+| 20261007-070036-1 | Scope cardinality caps per (role, database) (security) | none | no | ready |
+| 20261007-070036-2 | Apply cardinality caps under the identity that records the tags | 20261007-070036-1 | no | blocked-on-deps |
+| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 | no | blocked-on-deps |
 | 20261006-220356-1 | Flaky TAP 017: utility time parity with pgss under assert builds | none | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
@@ -180,9 +182,52 @@ dependencies and is not shown.
 - Benchmarks in `docs/benchmarks.md` were measured at 22f9e0f, before -33/-34/-35 (all off by default or off the hot path); not re-run.
 - **Remaining (owner):** push `main`, wait for CI to be green, tag `v1.0.0`, create the GitHub release from `docs/release-notes/v1.0.0.md`, then run `scripts/backlog-complete.py 20261005-091225-29`.
 
-**Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32
+**Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 (security fix, must land before the tag; the release matrix must be rerun after it)
 **Open questions:** none
+**Status:** blocked-on-deps
+
+### 20261007-070036-1: Scope cardinality caps per (role, database) (security)
+
+**Description:** Found by the 2026-10-07 security reviews (GPT 6 Astra finding 1, MEDIUM; Opus 5.5 P1, LOW). The cardinality-cap table (`src/cardcap.c`, §6.1) is server-wide: `cap_check()` hashes only (key, value). Two problems follow:
+- **Membership oracle.** Once a key is at its cap, a value already admitted by another role stays a string while an unseen value becomes JSON `null`. Any role can therefore send a candidate value in its own statement comment and read its own row (the activity view, or the store) to learn whether another role or database already sent that value. This breaks §6.11's promise that tag visibility is "at least as strict as pgss".
+- **Poisoning.** Any role can use up a key's cap, so every other role's values become `null` until a superuser runs `_reset()`.
+
+Fix (decided by the owner 2026-10-07): add a postmaster GUC `pg_stat_statement_context.cardinality_cap_scope`, an enum with values `'server' | 'database' | 'role'` and default **`'role'`**:
+- `role` mixes (userid, dbid) into the key and value hashes, so both the admitted set and the per-key counts are kept per (role, database). This matches pgss's entry key.
+- `database` mixes only dbid.
+- `server` keeps today's behaviour.
+
+Use the same userid/dbid the store records for the entry. The table size stays `cardinality_cap_slots` (a single shared global limit, like `pgss.max`), so the layout of shared memory does not change. Scoping only makes the table fill faster, so document that busy multi-tenant servers may need more slots. When the table is full, values become `null`, as now. The `--1.0` SQL does not change. Land this before the v1.0.0 tag: update DESIGN.md (§6.1 and the GUC table, plus a §6.11 note), README, CHANGELOG and `docs/release-notes/v1.0.0.md`.
+
+**Acceptance criteria:**
+- A TAP test with two roles and `cardinality_cap = 1`, under the default scope: role B's first value is kept (not `null`) after role A filled the cap, and B can't tell whether A's value was admitted (the same candidate value gives the same result whether or not A sent it).
+- Same isolation across two databases for the same role.
+- With `cardinality_cap_scope = 'database'`, two roles in one database share the cap, and two databases do not.
+- With `'server'`, the current server-wide behaviour, including the existing cap tests, is unchanged.
+- The GUC is a postmaster GUC, rejects invalid values, and shows in `pg_settings`.
+- The full suite passes on PG 14–18, and `scripts/check-frozen-sql.sh` passes.
+
+**Depends on:** none
+**Open questions:** none (scope toggle and default `role` decided 2026-10-07)
 **Status:** ready
+
+### 20261007-070036-2: Apply cardinality caps under the identity that records the tags
+
+**Description:** Found by the round-1 review of 20261007-070036-1 (gpt-6.1-sol). Caps are applied under `GetUserId()`/`MyDatabaseId` at extraction (`src/extract.c`), but the identity that records the tags can differ:
+- An executor frame refreshes its userid at `ExecutorEnd` (`src/executor.c` ~174-179). A cursor opened under role A and closed under role B is therefore capped against A's scope and recorded under B. B can end up with more distinct values than its cap (e.g. cap 1: `a1` admitted for A, `b1` for B; the cursor records `a1` under B).
+- A `SECURITY DEFINER` child inherits the caller's already-capped tags without calling the cap hook (`src/context.c` ~185-205) and records them under the definer's userid.
+- With `nested_tags = scan`, a cursor created by a definer and then fetched or closed by the caller can show the definer's cap decisions in the caller's rows.
+
+Each case needs membership in both roles, or a function whose author controls the tag text. So the impact is limited to inaccurate cap accounting plus a narrow decision leak between roles that already share a trust boundary. It is documented as a residual in DESIGN.md §6.1/§6.11. Fix: keep the uncapped normalized tags, and the scope they were capped under, on the frame. Re-apply the caps for the receiving identity when tags cross roles (inheritance, activity publication, recording). Keep the existing pgss-compatible end-time userid semantics.
+
+**Acceptance criteria:**
+- Regression tests for a cursor that changes role (opened under A, closed under B, cap 1) and for `SECURITY DEFINER` inheritance and returned cursors. Every recorded tag set obeys the cap of the identity it is recorded under.
+- No measurable hot-path regression when roles don't change (one identity comparison).
+- Full suite passes on PG 14-18.
+
+**Depends on:** 20261007-070036-1
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ### 20261006-220356-1: Flaky TAP 017: utility time parity with pgss under assert builds
 

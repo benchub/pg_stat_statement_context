@@ -61,6 +61,7 @@
 typedef struct CapShared
 {
 	pg_atomic_uint64 seq;		/* resets + 1, | SEQ_CLEARING while clearing */
+	pg_atomic_uint64 secret;	/* hash key of scoped caps (scope_seed()) */
 	LWLock	   *lock;			/* serializes pssc_cap_reset() */
 	uint32		nvalues;		/* value slots */
 	uint32		nkeys;			/* key slots (two words each) */
@@ -91,9 +92,21 @@ typedef struct CapOverrides
 int			pssc_cardinality_cap = 0;
 char	   *pssc_cardinality_cap_overrides = NULL;
 int			pssc_cardinality_cap_slots = PSSC_CAP_SLOTS_DEFAULT;
+int			pssc_cardinality_cap_scope = PSSC_CAP_SCOPE_ROLE;
+
+static const struct config_enum_entry cap_scope_options[] = {
+	{"server", PSSC_CAP_SCOPE_SERVER, false},
+	{"database", PSSC_CAP_SCOPE_DATABASE, false},
+	{"role", PSSC_CAP_SCOPE_ROLE, false},
+	{NULL, 0, false}
+};
 
 static const CapOverrides *cur_overrides = NULL;
 static CapShared *cap_shared = NULL;
+
+/* The role and database of the current hook's scope. */
+static Oid	cap_scope_userid = InvalidOid;
+static Oid	cap_scope_dbid = InvalidOid;
 
 static pssc_shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -363,6 +376,17 @@ pssc_cap_define_gucs(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomEnumVariable(PSSC_GUC_PREFIX ".cardinality_cap_scope",
+							 "Selects what the cardinality caps count distinct values per.",
+							 "role: per role and database (as pg_stat_statements entries); "
+							 "database: per database; server: across the whole server.",
+							 &pssc_cardinality_cap_scope,
+							 PSSC_CAP_SCOPE_ROLE,
+							 cap_scope_options,
+							 PGC_POSTMASTER,
+							 0,
+							 NULL, NULL, NULL);
 }
 
 /* ---------------- shared table ---------------- */
@@ -390,6 +414,22 @@ cap_shmem_request(void)
 	RequestNamedLWLockTranche(PSSC_CAP_LWLOCK_TRANCHE, 1);
 }
 
+/*
+ * A fresh random hash key for scoped caps (scope_seed()), drawn at startup
+ * and by every _reset().
+ */
+static uint64
+new_secret(void)
+{
+	uint64		secret;
+
+	if (!pg_strong_random(&secret, sizeof(secret)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("could not generate a random key for the cardinality caps")));
+	return secret;
+}
+
 static void
 cap_shmem_startup(void)
 {
@@ -410,6 +450,7 @@ cap_shmem_startup(void)
 		sh->nvalues = (uint32) pssc_cardinality_cap_slots;
 		sh->nkeys = nkeys_for(pssc_cardinality_cap_slots);
 		pg_atomic_init_u64(&sh->seq, 1);
+		pg_atomic_init_u64(&sh->secret, new_secret());
 		sh->lock = &(GetNamedLWLockTranche(PSSC_CAP_LWLOCK_TRANCHE))->lock;
 		nwords = (Size) sh->nvalues + 2 * (Size) sh->nkeys;
 		for (Size i = 0; i < nwords; i++)
@@ -469,9 +510,11 @@ pssc_cap_reset(void)
 {
 	CapShared  *sh = cap_shared;
 	uint64		next;
+	uint64		secret;
 
 	if (sh == NULL)
 		return;
+	secret = new_secret();
 	LWLockAcquire(sh->lock, LW_EXCLUSIVE);
 	next = pg_atomic_read_u64(&sh->seq) + 1;
 	if (gen_of(next) == 1)
@@ -499,6 +542,15 @@ pssc_cap_reset(void)
 			pg_atomic_write_u64(&sh->words[i], 0);
 		pg_memory_barrier();
 	}
+
+	/*
+	 * Rekey before publishing the new generation (pairs with cap_check()'s
+	 * barrier after reading seq): an admission that sees the new generation
+	 * hashes with the new key. One that still sees the old generation may
+	 * hash with either key, but it finds seq changed before any write.
+	 */
+	pg_atomic_write_u64(&sh->secret, secret);
+	pg_write_barrier();
 	pg_atomic_write_u64(&sh->seq, next);
 	LWLockRelease(sh->lock);
 }
@@ -731,6 +783,62 @@ cap_check_gen(CapShared *sh, uint64 seq, int cap, uint64 kh, uint64 vh,
 	return PSSC_CAP_NULL_FULL;
 }
 
+/*
+ * The key-hash seed of the scope of (userid, dbid): 0 under the server scope
+ * (the unkeyed hash of a server-wide cap), else a nonzero hash of the
+ * scope's ids keyed with the table's secret. The value hash is seeded with
+ * the key hash, so a key's count, its admitted values and their slots and
+ * fingerprints are all per scope, and the slots of a scoped value can't be
+ * computed from its (public) role and database OIDs: otherwise a role could
+ * fill the probe window after another scope's candidate value with values
+ * of its own, and tell from one more value whether that slot is taken.
+ */
+static uint64
+scope_seed(CapShared *sh, Oid userid, Oid dbid)
+{
+	Oid			ids[2];
+	uint64		seed;
+
+	switch (pssc_cardinality_cap_scope)
+	{
+		case PSSC_CAP_SCOPE_SERVER:
+			return 0;
+		case PSSC_CAP_SCOPE_DATABASE:
+			ids[0] = InvalidOid;
+			break;
+		default:
+			ids[0] = userid;
+			break;
+	}
+	ids[1] = dbid;
+	seed = hash_bytes_extended((const unsigned char *) ids, sizeof(ids),
+							   pg_atomic_read_u64(&sh->secret));
+	return seed != 0 ? seed : 1;
+}
+
+static void
+cap_hashes(CapShared *sh, const char *key, size_t klen, const char *val,
+		   size_t vlen, Oid userid, Oid dbid, uint64 *kh, uint64 *vh)
+{
+	*kh = hash_bytes_extended((const unsigned char *) key, (int) klen,
+							  scope_seed(sh, userid, dbid));
+	*vh = hash_bytes_extended((const unsigned char *) val, (int) vlen, *kh);
+}
+
+int32
+pssc_cap_test_slot(const char *key, size_t klen, const char *val,
+				   size_t vlen, Oid userid, Oid dbid)
+{
+	CapShared  *sh = cap_shared;
+	uint64		kh,
+				vh;
+
+	if (sh == NULL)
+		return -1;
+	cap_hashes(sh, key, klen, val, vlen, userid, dbid, &kh, &vh);
+	return (int32) (vh % sh->nvalues);
+}
+
 /* Bound on restarts after concurrent _reset()s (each one is a reset). */
 #define STALE_RETRIES	4
 
@@ -749,8 +857,6 @@ cap_check(const char *key, size_t klen, const char *val, size_t vlen,
 	if (cap <= 0)
 		return PSSC_CAP_KEEP;
 
-	kh = hash_bytes_extended((const unsigned char *) key, (int) klen, 0);
-	vh = hash_bytes_extended((const unsigned char *) val, (int) vlen, kh);
 	for (int attempt = 0; attempt < STALE_RETRIES; attempt++)
 	{
 		bool		stale;
@@ -766,6 +872,8 @@ cap_check(const char *key, size_t klen, const char *val, size_t vlen,
 		 * seq with a slot's pre-clear contents.
 		 */
 		pg_read_barrier();
+		cap_hashes(sh, key, klen, val, vlen, cap_scope_userid, cap_scope_dbid,
+				   &kh, &vh);
 		r = cap_check_gen(sh, seq, cap, kh, vh, admit, &stale);
 		if (!stale)
 			return r;
@@ -789,12 +897,14 @@ cap_peek_fn(void *arg, const char *key, size_t klen, const char *val,
 }
 
 PsscCapFn
-pssc_cap_hook(bool peek)
+pssc_cap_hook(bool peek, Oid userid, Oid dbid)
 {
 	if (cap_shared == NULL)
 		return NULL;
 	if (pssc_cardinality_cap <= 0 &&
 		(cur_overrides == NULL || !cur_overrides->any_cap))
 		return NULL;
+	cap_scope_userid = userid;
+	cap_scope_dbid = dbid;
 	return peek ? cap_peek_fn : cap_admit_fn;
 }

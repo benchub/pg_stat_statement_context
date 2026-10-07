@@ -171,3 +171,9 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 -- release_file exists (at most two minutes).
 CREATE FUNCTION pssc_store_test_stall_next_cap_clear(release_file text) RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- The first value slot (probe start) of (key, value) in the cap scope of
+-- (userid, dbid) under the current cardinality_cap_scope and table key;
+-- -1 if the table is not attached (test/t/030_cap_scope.pl).
+CREATE FUNCTION pssc_store_test_cap_slot(key text, value text, userid oid, dbid oid) RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

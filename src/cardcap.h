@@ -5,8 +5,13 @@
  *		values admitted per key that backs the pipeline's env->cap hook.
  *
  * Each allowed key may take at most its cap of distinct values, counted
- * globally (across buckets, queryids, users and databases) since the last
- * _reset() or server start; further values collapse to JSON null. The cap
+ * across buckets and queryids since the last _reset() or server start, per
+ * (role, database), per database or server-wide (cardinality_cap_scope);
+ * further values collapse to JSON null. The scope is mixed into the key
+ * hash (and so into the value hash), so both the admitted values and the
+ * per-key counts are kept per scope in the one shared table. Scoped hashes
+ * are keyed with a random secret (drawn at startup and by every _reset()),
+ * so their slots can't be predicted from the role and database. The cap
  * of a key is its entry in cardinality_cap_overrides, else cardinality_cap;
  * 0 means no cap. With no cap anywhere (the default) the hook is not
  * installed and nothing is tracked.
@@ -43,11 +48,20 @@
 #define PSSC_CAP_SLOTS_DEFAULT	16384
 #define PSSC_CAP_MAX_OVERRIDES	1024
 
+/* cardinality_cap_scope: what the admitted values and counts are kept per */
+typedef enum PsscCapScope
+{
+	PSSC_CAP_SCOPE_SERVER,		/* one set per key for the whole server */
+	PSSC_CAP_SCOPE_DATABASE,	/* per (database, key) */
+	PSSC_CAP_SCOPE_ROLE			/* per (role, database, key), as pgss entries */
+} PsscCapScope;
+
 extern PGDLLEXPORT int pssc_cardinality_cap;
 extern PGDLLEXPORT char *pssc_cardinality_cap_overrides;	/* raw text */
 extern PGDLLEXPORT int pssc_cardinality_cap_slots;
+extern PGDLLEXPORT int pssc_cardinality_cap_scope;	/* PsscCapScope */
 
-/* Defines the three GUCs; called from pssc_guc_define(). */
+/* Defines the four GUCs; called from pssc_guc_define(). */
 extern void pssc_cap_define_gucs(void);
 
 /* Requests and attaches the shared table; called from _PG_init. */
@@ -55,9 +69,12 @@ extern void pssc_cap_init(void);
 
 /*
  * The env->cap hook for this backend's configuration, or NULL when no key
- * has a cap. With peek, the hook never admits (the debug function).
+ * has a cap. With peek, the hook never admits (the debug function). The
+ * hook checks values in the scope (cardinality_cap_scope) of userid and
+ * dbid, which must be those the entry is recorded under; it stays valid
+ * until the next call.
  */
-extern PsscCapFn pssc_cap_hook(bool peek);
+extern PsscCapFn pssc_cap_hook(bool peek, Oid userid, Oid dbid);
 
 /* Empties every key's set of distinct values (_reset()). */
 extern PGDLLEXPORT void pssc_cap_reset(void);
@@ -74,5 +91,14 @@ extern PGDLLEXPORT Size pssc_cap_shmem_bytes(void);
 extern PGDLLEXPORT void pssc_cap_test_near_wrap(void);
 extern PGDLLEXPORT void pssc_cap_set_reset_test_hook(void (*fn) (void *),
 													 void *arg);
+
+/*
+ * TEST-ONLY (030_cap_scope.pl): the first value slot of (key, value) in the
+ * scope of (userid, dbid), or -1 without the table.
+ */
+/* The first value slot of (key, value) in the scope of (userid, dbid). */
+extern PGDLLEXPORT int32 pssc_cap_test_slot(const char *key, size_t klen,
+											const char *val, size_t vlen,
+											Oid userid, Oid dbid);
 
 #endif							/* PSSC_CARDCAP_H */

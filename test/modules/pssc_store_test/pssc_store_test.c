@@ -650,3 +650,18 @@ pssc_store_test_stall_next_cap_clear(PG_FUNCTION_ARGS)
 	((set_cap_hook_fn) main_sym("pssc_cap_set_reset_test_hook")) (stall_cap_clear_hook, NULL);
 	PG_RETURN_VOID();
 }
+
+typedef int32 (*cap_slot_fn) (const char *, size_t, const char *, size_t, Oid, Oid);
+
+PG_FUNCTION_INFO_V1(pssc_store_test_cap_slot);
+Datum
+pssc_store_test_cap_slot(PG_FUNCTION_ARGS)
+{
+	text	   *key = PG_GETARG_TEXT_PP(0);
+	text	   *val = PG_GETARG_TEXT_PP(1);
+
+	PG_RETURN_INT32(((cap_slot_fn) main_sym("pssc_cap_test_slot"))
+					(VARDATA_ANY(key), VARSIZE_ANY_EXHDR(key),
+					 VARDATA_ANY(val), VARSIZE_ANY_EXHDR(val),
+					 PG_GETARG_OID(2), PG_GETARG_OID(3)));
+}

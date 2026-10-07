@@ -127,7 +127,7 @@ is( vars(), join("\n",
 	'C variables hold the §4.1 defaults (enums map to the right constants)');
 is( sql(qq{SELECT count(*), count(*) FILTER (WHERE source = 'default' AND setting = boot_val AND NOT pending_restart)
               FROM pg_settings WHERE name LIKE '$P.%'}),
-	'25|25', 'all 25 GUCs are defined and at their defaults');
+	'26|26', 'all 26 GUCs are defined and at their defaults');
 is(show('bucket_interval'), '5min', 'bucket_interval default shown with its unit');
 is(show('scan_window'), '2kB', 'scan_window default shown with its unit');
 is(list('tags'), 'f|3|{action,controller,job}', 'default tags parsed');

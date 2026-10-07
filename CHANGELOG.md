@@ -44,7 +44,12 @@ First release. SQL extension version `1.0`. Supports PostgreSQL 14, 15, 16,
   (default `skip`; `record` keeps untagged statements with `{}`).
 - **Per-key cardinality caps** (`cardinality_cap`,
   `cardinality_cap_overrides`, `cardinality_cap_slots`): values past a key's
-  cap are recorded as JSON `null`.
+  cap are recorded as JSON `null`. Caps are counted per (role, database) by
+  default (`cardinality_cap_scope = role`), so a role can neither use up
+  another role's caps nor learn from its own rows whether another role sent
+  a value (scoped slot positions are keyed with a random secret, redrawn by
+  `_reset()`); `database` and `server` share caps more widely and bring
+  both risks back.
 - **Rolling time buckets:** a fixed-size shared-memory store
   (`max_entries`) where each entry holds a ring of `bucket_count` buckets of
   `bucket_interval` (default 12 × 5 min), rolled over lazily with a lock-free

@@ -40,6 +40,7 @@ The GUCs exist only when the library is in `shared_preload_libraries`.
 | [`tags_override`](#tags_override) | string | `''` | `key='value'` pairs | user |
 | [`cardinality_cap`](#cardinality_cap) | integer | `0` (off) | 0 – 1000000 | sighup |
 | [`cardinality_cap_overrides`](#cardinality_cap_overrides) | string | `''` | `key:N` list | sighup |
+| [`cardinality_cap_scope`](#cardinality_cap_scope) | enum | `role` | `role`, `database`, `server` | postmaster |
 | [`cardinality_cap_slots`](#cardinality_cap_slots) | integer | `16384` | 256 – 67108864 | postmaster |
 | [`exemplar_keys`](#exemplar_keys) | string | `''` (off) | key list, at most 8 | postmaster |
 | [`exemplar_memory`](#exemplar_memory) | integer (kB) | `2048` (`2MB`) | 0 – 2147483647 kB | postmaster |
@@ -390,8 +391,10 @@ a bug, or a client sending random values (see
 pg_stat_statement_context.cardinality_cap = 100
 ```
 
-- **Counted server-wide, per key.** Values are counted across all
-  databases, users, queries and buckets. A key's first N distinct values
+- **Counted per role and database, per key** (by default; see
+  [`cardinality_cap_scope`](#cardinality_cap_scope)). Values are counted
+  across all queries and buckets, separately for each (role, database), as
+  pg_stat_statements keys its entries. A key's first N distinct values
   (in the order statements bring them) are **admitted**; any other value is
   recorded as JSON `null`, so all its statements share one entry per query
   and other tags. Admitted values stay admitted: a value isn't forgotten
@@ -445,6 +448,65 @@ final (renamed) key. `N` is 0 – 1000000. A malformed list (an entry without
 rejected and the previous value stays in effect. Overrides work without a
 default cap (`cardinality_cap = 0`): then only the listed keys are capped.
 
+### `cardinality_cap_scope`
+
+What the [cardinality caps](#cardinality_cap) count distinct values per.
+Takes effect at server start.
+
+- **`role`** (the default): per (role, database), the key of
+  pg_stat_statements entries. Each role has its own cap for each key in each
+  database, and its own set of admitted values. The role is the current
+  user when the statement's tags are extracted, at `ExecutorStart`.
+- **`database`**: per database, shared by all roles in it.
+- **`server`**: one cap per key for the whole server.
+
+A key's cap is the same number in every scope (`cardinality_cap = 100`
+under `role` allows 100 values per role and database).
+
+`database` and `server` share caps between roles, which has two security
+consequences:
+
+- **Membership oracle.** Once a key is at its cap, a value that another
+  role (or, under `server`, another database) already sent stays a string,
+  while a new one becomes `null`. Any role that can read its own rows can
+  therefore send a candidate value and learn whether someone else sent it.
+  Under `server` a role can also probe a value without filling the key's
+  cap: slot positions follow from the value alone, so it can fill the slots
+  after the candidate's with values of its own and see whether one more
+  value still finds room.
+- **Poisoning.** Any role can use up a key's cap, so every other role's new
+  values become `null` until a `_reset()`.
+
+Use them only when all the roles sharing a scope trust each other.
+
+Under `role` (and between databases under `database`), the caps and
+admitted values of other scopes don't affect a role's values, and the
+positions of values in the shared table are keyed with a random secret
+drawn at startup and by every `_reset()`, so a role can't aim its own values
+at another scope's. What remains shared is the table's size: all scopes
+share the one table sized by
+[`cardinality_cap_slots`](#cardinality_cap_slots), and narrower scopes
+admit more distinct (key, value) pairs in total and use more key slots.
+When the table is (nearly) full, new values of every scope become `null`,
+which any role can observe; like `pg_stat_statements.max`, it's a shared
+limit, so size it for all roles and databases.
+
+Two exceptions follow from the role being taken when the tags are
+extracted, which can differ from the role the entry is recorded under:
+
+- A cursor opened under one role and run to completion under another
+  (`SET ROLE` in between) is capped under the first and recorded under the
+  second.
+- Nested statements that inherit the caller's tags
+  ([`nested_tags = inherit`](#nested_tags)), as in a `SECURITY DEFINER`
+  function, keep the caller's cap decisions but are recorded under the
+  definer. Conversely, a cursor that a `SECURITY DEFINER` function opens
+  and the caller then fetches from is capped under the definer but recorded
+  in the caller's rows.
+
+Either way, observing one role's cap decisions from another needs
+membership in both roles, or a function whose owner controls the tag text.
+
 ### `cardinality_cap_slots`
 
 The number of distinct (key, value) pairs the caps can track, server-wide,
@@ -457,7 +519,11 @@ maximum of 2^26 slots).
 
 Size it above the sum of the caps of the keys you expect, with headroom
 (the table is an open-addressing hash table that slows down and fills
-early when nearly full). When a new value finds no room (or a new key finds
+early when nearly full). Under the default
+[`cardinality_cap_scope = role`](#cardinality_cap_scope), each (role,
+database) that sends a key takes up to that key's cap of slots and one key
+slot of its own, so on a server with many roles or databases, size it for
+the sum over all of them. When a new value finds no room (or a new key finds
 no key slot), the value is recorded as `null`, as if over its cap, and
 counted in both `_info().capped_tags` and `_info().cap_table_full`: the
 caps fail closed. `pg_stat_statement_context_reset()` empties the table.
