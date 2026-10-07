@@ -1381,6 +1381,24 @@ Verified locally on macOS (arm64, source builds, `docker/run-tests.sh`): with `.
 **Open questions:** none
 **Status:** done
 
+### 20261007-095213-1: 017: the stall rerun must not erase first-run non-timing failures
+
+**Description:** Split from 20261006-220356-1 (its round-2 review finding, gpt-6.1-sol, not fixed within the 2-round limit). In `test/t/017_lifecycle.pl`, `compare()` reruns a configuration's workload once if the first pgss-parity comparison failed only on utility time and passed the coverage checks. Other per-configuration invariants are asserted after `compare()` returns, on state the rerun replaces:
+- the `utility_missing_queryid` counter in the wrong-load-order case (the callback around line 1121 overwrites `$m0`);
+- the lifecycle and tag-attribution checks;
+- the presence checks for differing settings.
+
+So a first-run failure in one of them, together with a utility stall, is erased when the rerun passes. The reviewer showed it in memory: complete coverage, a utility excess, and a first-run counter of 999 where 5 was expected. Everything passed after the rerun. A deterministic bug fails again on the rerun, so only a non-deterministic bug that coincides with a utility stall could be hidden.
+
+**Acceptance criteria:**
+- Each configuration's non-timing invariants are evaluated on the first run before any reset. The workload is retried only if they all pass; otherwise the first run's failures are reported.
+- A scratch stub demonstrates it: a wrong first-run counter plus a utility excess fails and is not retried.
+- 017 still passes repeated `--assert 16` runs under load; the full suite passes on PG 14-18.
+
+**Depends on:** 20261006-220356-1
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
