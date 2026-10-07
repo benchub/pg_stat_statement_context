@@ -52,8 +52,7 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261007-064749-2 | 006: calibrate the retry-cleanup expiry from engine time, not client round trip | 20261007-064749-1 | no | ready |
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 | no | ready |
-| 20261006-220356-1 | Flaky TAP 017: utility time parity with pgss under assert builds | none | no | ready |
-| 20261007-095213-1 | 017: the stall rerun must not erase first-run non-timing failures | 20261006-220356-1 | no | blocked-on-deps |
+| 20261007-095213-1 | 017: the stall rerun must not erase first-run non-timing failures | 20261006-220356-1 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -200,18 +199,6 @@ Split from 20261007-064749-1 (round-2 review finding, not fixed within 2 rounds)
 **Open questions:** none
 **Status:** ready
 
-### 20261006-220356-1: Flaky TAP 017: utility time parity with pgss under assert builds
-
-**Description:** Found during 20261005-091225-29 (release matrix, `scripts/docker-test.sh --assert 16`, PG 16.15). `test/t/017_lifecycle.pl` check 80, "track = all, track_utility = on (both): per-(userid, dbid, queryid, toplevel) calls and total_exec_time equal pgss's", failed once: `utility time 5.647375 vs pgss's 0.108292 (allowed difference 2.00108292)` for `RELEASE SAVEPOINT s2` (ours=1, pgss=1). It passed on rerun and in every other cell. Our `ProcessUtility` hook wraps pgss's, so a scheduling stall between the two timers lands in our time only; the 2 ms per-call slack (`PSSC_TEST_UTILITY_SLACK_MS`) is not enough on a loaded laptop Docker VM. Make the check robust without hiding real timing bugs (e.g. retry the workload once on a utility-time-only mismatch, or compare against a bound that tolerates rare single-call stalls while still failing on systematic differences). The failing log was `tmp/release-clone/tmp/logs/assert-16-flake.log` (scratch, may be gone).
-
-**Acceptance criteria:**
-- The check still fails if our utility timing is systematically wrong (demonstrated with a deliberate fault in a scratch copy).
-- 017 passes 10 of 10 runs of `--assert 16` (or under an equivalent documented load recipe).
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
-
 ### 20261007-095213-1: 017: the stall rerun must not erase first-run non-timing failures
 
 **Description:** Split from 20261006-220356-1 (its round-2 review finding, gpt-6.1-sol, not fixed within the 2-round limit). In `test/t/017_lifecycle.pl`, `compare()` reruns a configuration's workload once if the first pgss-parity comparison failed only on utility time and passed the coverage checks. Other per-configuration invariants are asserted after `compare()` returns, on state the rerun replaces:
@@ -228,7 +215,7 @@ So a first-run failure in one of them, together with a utility stall, is erased 
 
 **Depends on:** 20261006-220356-1
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ---
 

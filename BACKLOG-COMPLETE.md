@@ -1369,6 +1369,18 @@ Verified locally on macOS (arm64, source builds, `docker/run-tests.sh`): with `.
 **Open questions:** none
 **Status:** done
 
+### 20261006-220356-1: Flaky TAP 017: utility time parity with pgss under assert builds
+
+**Description:** Found during 20261005-091225-29 (release matrix, `scripts/docker-test.sh --assert 16`, PG 16.15). `test/t/017_lifecycle.pl` check 80, "track = all, track_utility = on (both): per-(userid, dbid, queryid, toplevel) calls and total_exec_time equal pgss's", failed once: `utility time 5.647375 vs pgss's 0.108292 (allowed difference 2.00108292)` for `RELEASE SAVEPOINT s2` (ours=1, pgss=1). It passed on rerun and in every other cell. Our `ProcessUtility` hook wraps pgss's, so a scheduling stall between the two timers lands in our time only; the 2 ms per-call slack (`PSSC_TEST_UTILITY_SLACK_MS`) is not enough on a loaded laptop Docker VM. Make the check robust without hiding real timing bugs (e.g. retry the workload once on a utility-time-only mismatch, or compare against a bound that tolerates rare single-call stalls while still failing on systematic differences). The failing log was `tmp/release-clone/tmp/logs/assert-16-flake.log` (scratch, may be gone).
+
+**Acceptance criteria:**
+- The check still fails if our utility timing is systematically wrong (demonstrated with a deliberate fault in a scratch copy).
+- 017 passes 10 of 10 runs of `--assert 16` (or under an equivalent documented load recipe).
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
