@@ -10,7 +10,9 @@
 # Usage: scripts/docker-test.sh [--assert|--valgrind] <major>[.<minor>]
 ARG PG_MAJOR=15
 FROM postgres:${PG_MAJOR}
-ARG PG_VERSION
+# Not PG_VERSION: the base image sets ENV PG_VERSION (e.g. 17.11-1.pgdg13+2),
+# which overrides a same-named ARG under the legacy (non-BuildKit) builder.
+ARG PG_SOURCE_VERSION
 ARG PG_FLAVOR=release
 # bison and flex: PG17+ needs them even when building from a release tarball.
 RUN apt-get update \
@@ -19,6 +21,6 @@ RUN apt-get update \
       $([ "$PG_FLAVOR" = valgrind ] && echo valgrind) \
  && rm -rf /var/lib/apt/lists/*
 COPY build-postgres.sh /usr/local/bin/build-postgres.sh
-RUN : "${PG_VERSION:?PG_VERSION build-arg is required}" \
- && build-postgres.sh "$PG_VERSION" /usr/local/pgsql "$PG_FLAVOR"
+RUN : "${PG_SOURCE_VERSION:?PG_SOURCE_VERSION build-arg is required}" \
+ && build-postgres.sh "$PG_SOURCE_VERSION" /usr/local/pgsql "$PG_FLAVOR"
 ENV PATH=/usr/local/pgsql/bin:$PATH

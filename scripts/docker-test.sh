@@ -74,7 +74,7 @@ mkdir -p "$OUT"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "building $IMAGE (PostgreSQL $PG_RELEASE from source, $MODE)" >&2
 	docker build -q -f "$ROOT/docker/Dockerfile.source" \
-		--build-arg "PG_MAJOR=${PG_MAJOR}" --build-arg "PG_VERSION=${PG_RELEASE}" \
+		--build-arg "PG_MAJOR=${PG_MAJOR}" --build-arg "PG_SOURCE_VERSION=${PG_RELEASE}" \
 		--build-arg "PG_FLAVOR=${MODE}" -t "$IMAGE" "$ROOT/docker" >/dev/null
 fi
 docker run --rm -v "$ROOT:/src:ro" -v "$OUT:/out" -e "PSSC_TEST_MODE=${MODE}" \
