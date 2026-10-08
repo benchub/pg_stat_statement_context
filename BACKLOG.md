@@ -61,6 +61,8 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
+| 20261008-092913-1 | Warn at startup when pg_stat_monitor is loaded after this extension | 20261008-065635-7 | no | blocked-on-deps |
+| 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | blocked-on-deps |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -392,6 +394,30 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 **Open questions:** none
 **Status:** blocked-on-deps
 
+
+### 20261008-092913-1: Warn at startup when pg_stat_monitor is loaded after this extension
+
+**Description:** Item 20261008-065635-7 found that pg_stat_monitor, like pg_stat_statements, sets the utility statement's queryId to zero before passing it down the hook chain. If `pg_stat_statement_context` comes before pg_stat_monitor in `shared_preload_libraries`, this extension loses utility statements: they are counted in `utility_missing_queryid` instead of recorded. The working order is `pg_stat_statements, pg_stat_monitor, pg_stat_statement_context`. `pssc_load_order_wrong()` in `src/utility.c` only checks for pg_stat_statements. Extend it, and its startup WARNING, to cover pg_stat_monitor too, and update the load-order passages in README.md and `docs/maintaining.md`.
+
+**Acceptance criteria:**
+- The unit or TAP tests for `pssc_load_order_wrong()` cover both libraries, both orders, quoting/whitespace variants and the absence of each library. They fail before the change.
+- A TAP test, skipped unless pg_stat_monitor is installed (and required when it is listed in `PSSC_REQUIRE_MODULES`), checks that the warning appears in the server log for the wrong order and not for the right order.
+
+**Depends on:** 20261008-065635-7
+**Open questions:** none
+**Status:** blocked-on-deps
+
+### 20261008-092913-2: Isolate Docker test image tags per worktree
+
+**Description:** `scripts/docker-test.sh` tags images as `pg_stat_statement_context-test:pg<major>` for every checkout. When builders work in parallel worktrees (CLAUDE.md §7), one worktree's image build can replace another's between its build and its `docker run`. A test run could then exercise a different branch's Dockerfile or module list. Item 20261008-065635-7 saw this: the shared tags lost their module list file after another worktree rebuilt them. Make image tags unique per checkout, for example by adding a short hash of the checkout path or of the Dockerfile inputs. Keep CI behaviour unchanged, and provide a way to prune stale images.
+
+**Acceptance criteria:**
+- Two worktrees with different Dockerfiles can build and run the same major at the same time, and each run uses its own image. Test this with a script check that derives the tag for two paths and asserts they differ, plus a manual parallel run recorded in the item.
+- `docs/` or `scripts/` usage text explains the tag scheme and the prune command.
+
+**Depends on:** 20261008-065635-3 (both edit `scripts/docker-test.sh`)
+**Open questions:** none
+**Status:** blocked-on-deps
 
 ---
 
