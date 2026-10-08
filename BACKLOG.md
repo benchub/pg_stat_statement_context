@@ -51,12 +51,12 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
-| 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
 | 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | ready |
 | 20261008-120000-1 | Make timing-sensitive TAP checks robust under heavy load | 20261008-065635-6, 20261008-065635-9 | no | ready |
 | 20261008-121828-1 | 038: verify pgbench writers are really alive, and check their exit status | 20261008-065635-6 | no | ready |
+| 20261008-125932-1 | make smoke: no false overcount when rerun after bucket expiry | 20261008-065635-12 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -220,18 +220,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - Long-statement scans: measure and document only; no new byte-budget GUC.
 - Per-key caps don't bound tag-set combinations: document it and export the health counters; no new combination-budget feature.
 
-### 20261008-065635-12: Managed-server-safe smoke test target
-
-**Description:** HYG-5. `make installcheck` runs the regression suite, which changes server settings with `ALTER SYSTEM` and then resets them (`test/sql/include/config.sql` about lines 11–17), wiping operator values. 26 of the 32 TAP tests need test-only modules. Neither can be pointed at a provisioned managed instance. Add a `make smoke` (or `installcheck-smoke`) target: it connects to an existing server using the libpq environment, runs as a NOSUPERUSER role with privileges like `rds_superuser`, and changes no global settings. It checks that the library is preloaded, that `CREATE EXTENSION` worked (or creates it if allowed), that `_extract()` behaves (if executable), that tagged statements under the server's current extractor configuration are recorded and visible, and that `_info()` and the counters function work. Add a clear warning in the Makefile and in the README development section that `installcheck` resets global settings and is for disposable clusters only.
-
-**Acceptance criteria:**
-- `make smoke` passes in Docker against a server preloaded with the default configuration, run as a NOSUPERUSER role, and it is exercised in CI. It works whether or not the role may call `_extract()`.
-- A check in the test shows that `pg_file_settings`/`postgresql.auto.conf` is unchanged after the run.
-
-**Depends on:** 20261008-065635-2
-**Open questions:** none
-**Status:** ready
-
 ### 20261008-065635-13: Benchmark requalification on the release commit
 
 **Description:** TST-1, TST-2, TST-11, PERF-1, PERF-2, PERF-4, PERF-5 and PERF-11. The numbers in `docs/benchmarks.md` were measured at 22f9e0f, before 19 later commits touched `src/`. They come from a noisy M1 laptop running Docker, and they don't cover prepared statements, writes, high client counts, concurrent readers, multi-entry stores, or long statements. Per the owner's decision (2026-10-08), make the benchmark suite reproducible and complete, run it locally in Docker with clear caveats, and leave the dedicated-hardware runs to the owner.
@@ -320,6 +308,26 @@ Fix:
 - 038 passes unmutated on PG 14–18, testing and release builds.
 
 **Depends on:** 20261008-065635-6
+**Open questions:** none
+**Status:** ready
+
+### 20261008-125932-1: make smoke: no false overcount when rerun after bucket expiry
+
+**Description:** Left over from the round-2 review of 20261008-065635-12.
+- `test/smoke/smoke.sql` takes its baseline by summing `calls_total` from the views.
+- The views hide expired entries that haven't been reclaimed yet. A later write to such an entry keeps its old lifetime counters and makes it visible again (`src/stats_fn.c` hides it, `src/store.c` updates it, and `025_exporter_surface.pl` pins this behavior).
+- So when the smoke test runs again after its entries' buckets have expired, with no reclaim in between, the baseline is 0. The reappearing entry then adds its old calls to each delta, and the check fails with "expected exactly 3" on a healthy server.
+- This is likely for periodic checks, because the reclaim worker is disabled by default.
+
+Fix:
+- While holding the advisory lock, prime both probe entries before taking the baseline, so that recognized entries stay visible during the measurement. Alternatively, measure in a way that dead entries can't disturb.
+- Update the docs (docs/managed-services.md) and the tests to account for the extra warm-up calls.
+
+**Acceptance criteria:**
+- A new 042 case reruns the smoke test after its buckets expire, with no reclaim in between (use the testing build's debug clock or a short bucket width). It fails before the fix and passes after.
+- The existing 042 cases and `docker/run-tests.sh`'s smoke step still pass on PG 14–18.
+
+**Depends on:** 20261008-065635-12
 **Open questions:** none
 **Status:** ready
 

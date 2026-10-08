@@ -1667,6 +1667,18 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-12: Managed-server-safe smoke test target
+
+**Description:** HYG-5. `make installcheck` runs the regression suite, which changes server settings with `ALTER SYSTEM` and then resets them (`test/sql/include/config.sql` about lines 11–17), wiping operator values. 26 of the 32 TAP tests need test-only modules. Neither can be pointed at a provisioned managed instance. Add a `make smoke` (or `installcheck-smoke`) target: it connects to an existing server using the libpq environment, runs as a NOSUPERUSER role with privileges like `rds_superuser`, and changes no global settings. It checks that the library is preloaded, that `CREATE EXTENSION` worked (or creates it if allowed), that `_extract()` behaves (if executable), that tagged statements under the server's current extractor configuration are recorded and visible, and that `_info()` and the counters function work. Add a clear warning in the Makefile and in the README development section that `installcheck` resets global settings and is for disposable clusters only.
+
+**Acceptance criteria:**
+- `make smoke` passes in Docker against a server preloaded with the default configuration, run as a NOSUPERUSER role, and it is exercised in CI. It works whether or not the role may call `_extract()`.
+- A check in the test shows that `pg_file_settings`/`postgresql.auto.conf` is unchanged after the run.
+
+**Depends on:** 20261008-065635-2
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
