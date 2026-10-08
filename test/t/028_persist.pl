@@ -299,7 +299,22 @@ is(sql("SELECT context FROM pg_settings WHERE name = '$P.save'"), 'sighup',
 # ----------------------------------- version mismatches and corruption
 # Header layout (src/store.c, PsscDumpHeader): magic uint32 at 0, format
 # version uint32 at 4, PostgreSQL major uint32 at 8, extension version
-# char[20] at 12.
+# char[20] at 12; 176 bytes in all. The first record (PsscDumpRecord)
+# follows it: queryid int64 at +8, calls_total int64 at +24. The file ends
+# with its pg_crc32c (4 bytes).
+my $DUMP_HDR = 176;
+
+# Reads the int64 at $offset of the stopped server's dump file.
+sub dump_int64
+{
+	my ($offset) = @_;
+	open my $fh, '<:raw', $DUMP or die "open $DUMP: $!";
+	seek($fh, $offset, 0) or die "seek: $!";
+	read($fh, my $b, 8) == 8 or die "read: $!";
+	close $fh;
+	return unpack('q', $b);
+}
+
 {
 	my @cases = (
 		[ 'format version', sub { patch_dump(4, pack('L', 0xdead)) },
@@ -310,7 +325,7 @@ is(sql("SELECT context FROM pg_settings WHERE name = '$P.save'"), 'sighup',
 			qr/discarding saved statistics in ".*": written by a different version/ ],
 		[ 'bad magic number', sub { patch_dump(0, pack('L', 0x12345678)) },
 			qr/ignoring invalid data in file ".*$P\.stat"/ ],
-		[ 'a flipped byte (checksum)', sub {
+		[ 'a flipped byte mid-file', sub {
 			my $size = -s $DUMP;
 			open my $fh, '+<:raw', $DUMP or die;
 			seek($fh, int($size / 2), 0);
@@ -318,6 +333,22 @@ is(sql("SELECT context FROM pg_settings WHERE name = '$P.save'"), 'sighup',
 			seek($fh, int($size / 2), 0);
 			print $fh chr(ord($c) ^ 0x01);
 			close $fh;
+		}, qr/ignoring invalid data in file ".*$P\.stat"/ ],
+		# Only the checksum catches these two: the record stays well formed.
+		[ 'a flipped bit in the checksum', sub {
+			my $off = (-s $DUMP) - 4;
+			open my $fh, '+<:raw', $DUMP or die;
+			seek($fh, $off, 0);
+			read($fh, my $c, 1);
+			seek($fh, $off, 0);
+			print $fh chr(ord($c) ^ 0x01);
+			close $fh;
+		}, qr/ignoring invalid data in file ".*$P\.stat"/ ],
+		[ 'a changed calls_total in a record', sub {
+			my $q = dump_int64($DUMP_HDR + 8);
+			ok($q == 5001 || $q == 5002, "the first record is a recorded entry (queryid $q)");
+			is(dump_int64($DUMP_HDR + 24), 1, 'its calls_total is 1');
+			patch_dump($DUMP_HDR + 24, pack('q', 2));
 		}, qr/ignoring invalid data in file ".*$P\.stat"/ ],
 		[ 'a truncated file', sub { truncate($DUMP, (-s $DUMP) - 10) or die },
 			qr/(ignoring invalid data in|could not read) file ".*$P\.stat"/ ],

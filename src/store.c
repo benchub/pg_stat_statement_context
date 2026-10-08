@@ -1950,6 +1950,11 @@ typedef struct PsscDumpRecord
 	uint8		pad[5];
 } PsscDumpRecord;
 
+/* test/t/028_persist.pl patches the first record's calls_total */
+StaticAssertDecl(sizeof(PsscDumpHeader) == 176, "dump header layout");
+StaticAssertDecl(offsetof(PsscDumpRecord, queryid) == 8, "dump record layout");
+StaticAssertDecl(offsetof(PsscDumpRecord, calls_total) == 24, "dump record layout");
+
 /*
  * Whether pg_control says the cluster shut down cleanly: every child has
  * exited and the checkpointer wrote a shutdown checkpoint, so no process
