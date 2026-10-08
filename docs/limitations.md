@@ -49,6 +49,16 @@ Rows, buffers, WAL, I/O timing, JIT, min/max/mean/stddev and planning time are n
 
 The statistics live in shared memory. With [`save`](configuration.md#save) on (the default) they are saved at a clean shutdown and loaded at the next start, but they are lost after a crash or an immediate shutdown, and when `bucket_interval`, `bucket_count` or the extension version changes. Exemplars are never saved. The history covers only the last `bucket_count × bucket_interval`.
 
+## Replicas and failover
+
+Each server keeps its own statistics in its own shared memory, and nothing about them is written to WAL. A streaming (hot) standby records the read-only statements that run on it in its own store. The primary's statistics never appear on a standby, and a standby's never appear on the primary, so to see a whole cluster you query every instance (for example one exporter per instance, see [integrations](integrations/README.md)). `pg_stat_statement_context_reset()` and `pg_stat_statement_context_info()` act on the instance you are connected to.
+
+Set the library in `shared_preload_libraries`, and the GUCs, on every instance. A base backup copies `postgresql.conf` and `postgresql.auto.conf` as they were at backup time, but later changes to them are not replicated. Per-database and per-role settings (`ALTER DATABASE ... SET`, `ALTER ROLE ... SET`) are stored in the catalogs, so they do reach the standbys. `CREATE EXTENSION` is run on the primary only, and its objects reach the standbys through WAL; on an instance without the library preloaded, the functions and views fail with "must be loaded via shared_preload_libraries".
+
+[`save`](configuration.md#save) works on a standby as on a primary: a clean (smart or fast) standby restart saves its statistics and loads them again, and an immediate shutdown or a crash discards them.
+
+On failover, a promoted standby keeps the statistics it had in memory, which cover only the statements that ran on it while it was a standby, and keeps recording as the new primary. The old primary's statistics stay on the old primary: they are not carried over to the new one, and they are lost if that instance is rebuilt or does not shut down cleanly. Clients and dashboards that follow the primary will therefore see the counters start from the standby's own history after a failover.
+
 ## Visibility and PII
 
 Tag values come from clients and can contain personal data. Other roles' `tags` and `queryid` are hidden unless the caller has the privileges of `pg_read_all_stats`, but anyone with those privileges sees every tag value. Don't put personal data in comments, and keep it out of the `tags` allowlist. See [Visibility and privacy](sql-interface.md#visibility-and-privacy).
