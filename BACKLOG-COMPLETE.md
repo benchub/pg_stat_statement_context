@@ -1746,6 +1746,25 @@ Fix:
 **Open questions:** none
 **Status:** done
 
+### 20261008-150452-1: Test module: never discard a foreign SIGPROF in the CPU-time expiry injection
+
+**Description:** Left over from the round-2 review of 20261008-120000-1. It affects only the testing build's `test/modules/pssc_extract_test`, not the release library.
+- The CPU-time expiry injection used by 006 saves and restores the previous SIGPROF handler and `ITIMER_PROF` timer. On restore, it briefly sets SIGPROF to `SIG_IGN` to discard any SIGPROF still pending from the injection.
+- If SIGPROF was already blocked and pending before arming, that foreign signal is discarded too. The reviewer reproduced this on macOS.
+- There is also a window: the previous timer keeps running until after the handler is replaced, so a foreign expiry can be mistaken for the injection.
+
+Fix:
+- Stop and save the previous timer before replacing the handler.
+- If a SIGPROF is already pending, or SIGPROF is already blocked, at arming time, refuse to arm (an ERROR or a skip), rather than risk discarding foreign state.
+
+**Acceptance criteria:**
+- A new probe case in 006 makes SIGPROF blocked and pending before an injection. It fails before the fix, and after the fix the foreign signal is still delivered to the original handler (or the arm is refused with a clear error).
+- 006 passes on `--assert 14` and PG18.
+
+**Depends on:** 20261008-120000-1
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
