@@ -235,6 +235,8 @@ The file is not used (each case is logged, and the server starts with an empty s
 
 How many bytes at the start or end of a long statement are searched for comments. Statements no longer than `scan_window` are always lexed exactly. It also bounds the total comment bytes examined per statement. See [Where comments are found](extractors.md#where-comments-are-found). It accepts byte units, e.g. `'4kB'`. A superuser can set it per database, per role or per session.
 
+**Cost on long statements.** With the default `position = append`, a long statement costs one scan of its last `scan_window` bytes, whatever its length; if the client sends it without a trailing `;`, PostgreSQL reports no statement length, so a `strlen` over the whole text comes first. `position = any`, and a `scan_window` that covers the whole statement, lex every byte, so their cost grows with the statement's length. Keep `append` (or `prepend`) and the default window for workloads with long statements such as large `IN` lists, unless comments can sit in the middle of statements. There is no separate byte budget. The measured costs on a 59 kB statement and more tuning advice are in [Long statements: scan costs and tuning](benchmarks.md#long-statements-scan-costs-and-tuning).
+
 ### `tags`
 
 The allowlist: a comma-separated list of tag keys to keep. It is applied **after** `rename`, so it must name the renamed key. Keys are case-sensitive, at most 63 bytes, and may not contain whitespace or `*`; at most 1024 entries. Tags whose key isn't listed are discarded. The list order is the tag priority used by `max_tags` and `max_tagset_bytes`. An empty list keeps no tags at all.

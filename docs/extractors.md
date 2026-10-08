@@ -31,6 +31,9 @@ SELECT pg_stat_statement_context_extract(
 - `prepend` looks only at the first `scan_window` bytes and stays exact.
 - `append` looks only at the last `scan_window` bytes. It cannot know the lexical state at the start of that window, so this path is **heuristic**: it walks backwards from the closing `*/` to the matching `/*`. A comment that crosses the window start yields no tags. Rarely, a string literal ending in `*/`, or a `--` line comment that began before the window, can make text that isn't a real comment look like one. Each use of this path is counted in `_info().heuristic_scans`.
 - `any` always does a full forward scan of the statement, so its cost grows with the statement length.
+- Without a trailing `;`, PostgreSQL reports no statement length, so `append` first runs `strlen` over the whole text to find its end.
+
+See [Long statements: scan costs and tuning](benchmarks.md#long-statements-scan-costs-and-tuning) for the measured costs.
 
 At most 16 comments, and at most `scan_window` bytes of comment text, are examined per statement.
 

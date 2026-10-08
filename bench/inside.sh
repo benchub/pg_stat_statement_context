@@ -11,7 +11,7 @@
 # reads) and summarized by bench/analyze.py; any failed check exits non-zero.
 #
 # Environment (bench/run.sh sets them from its options):
-#   BENCH_BLOCKS=8 BENCH_DURATION=12 BENCH_WARMUP=3  blocks, seconds per run
+#   BENCH_BLOCKS=10 BENCH_DURATION=15 BENCH_WARMUP=3 blocks, seconds per run
 #   BENCH_SEED=1                                     plan order seed
 #   BENCH_ONLY=<regex>                               scenarios to run
 #   BENCH_HIGH_CLIENTS=0                             1: add the 256-client scenarios
@@ -33,6 +33,7 @@
 # used outside this container during a run (VM busy time minus this cgroup's
 # usage_usec) is measured and recorded per run as foreign_cores.
 set -euo pipefail
+trap 'echo "FAIL: bench/inside.sh line $LINENO: $BASH_COMMAND (exit $?)" >&2' ERR
 
 SRC=${PSSC_SRC:-/src}
 OUT=${PSSC_OUT:-/out}
@@ -41,8 +42,8 @@ DATA=$WORK/data
 LOGS=$WORK/logs
 SCRIPTS=$WORK/scripts
 SOCK=/var/run/postgresql
-BLOCKS=${BENCH_BLOCKS:-8}
-DURATION=${BENCH_DURATION:-12}
+BLOCKS=${BENCH_BLOCKS:-10}
+DURATION=${BENCH_DURATION:-15}
 WARMUP=${BENCH_WARMUP:-3}
 SEED=${BENCH_SEED:-1}
 ONLY=${BENCH_ONLY:-}
@@ -121,7 +122,8 @@ server_ticks() {
 	local pm
 	pm=$(head -n 1 "$DATA/postmaster.pid")
 	# comm is "(postgres)": no spaces, so the fields are fixed (proc(5))
-	cat /proc/[0-9]*/stat 2>/dev/null | awk -v pm="$pm" '
+	# processes may exit between the glob and the read: cat then fails
+	{ cat /proc/[0-9]*/stat 2>/dev/null || true; } | awk -v pm="$pm" '
 		$1 == pm { s += $14 + $15 + $16 + $17 }
 		$4 == pm { s += $14 + $15 }
 		END { print s + 0 }'
@@ -130,7 +132,8 @@ server_ticks() {
 wait_backends() {
 	local i
 	for i in $(seq 1 100); do
-		grep -l -s -a '\[local\]' /proc/[0-9]*/cmdline >/dev/null 2>&1 || return 0
+		# -q: a match wins over the errors of processes that exited meanwhile
+		grep -q -s -a '\[local\]' /proc/[0-9]*/cmdline 2>/dev/null || return 0
 		sleep 0.05
 	done
 	echo "  warning: client backends still alive after 5 s" >&2

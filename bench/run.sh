@@ -6,20 +6,20 @@
 #                [--dry-run] [--save [--label L]] [--allow-dirty]
 #
 #   --major N       PostgreSQL major (PGDG image; default 18)
-#   --blocks B      blocks (pairs): each runs every configuration once (default 8)
-#   --duration S    seconds per measured run (default 12); --warmup S (default 3)
+#   --blocks B      blocks (pairs): each runs every configuration once (default 10)
+#   --duration S    seconds per measured run (default 15); --warmup S (default 3)
 #   --seed X        seed of the run order (default: random, recorded)
 #   --only REGEX    only the scenarios whose name matches (e.g. '^inlist-')
 #   --high-clients  add the opt-in 256-client scenarios (ro and rw, simple)
 #   --cpuset CPUS   docker run --cpuset-cpus (dedicated hosts; see bench/README.md)
 #   --keep-logs     keep gzipped per-transaction pgbench logs in the output dir
-#   --dry-run       self-check: every scenario, 2 blocks of 2 s runs (~25 min)
+#   --dry-run       self-check: every scenario, 2 blocks of 2 s runs (~5 min)
 #   --save          copy the raw results to bench/results/<date>-<label>/
 #                   (refused for --dry-run and for uncommitted extension code)
 #   --label L       host label for --save (default: derived from the CPU)
 #
-# The default campaign is 50 configurations x 8 blocks x (12 s + 3 s warmup +
-# ~8 s restart, checks and analysis), about 2.5 hours. It uses the image of
+# The default campaign is 50 configurations x 10 blocks x (15 s + 3 s warmup +
+# ~1 s restart, checks and analysis), about 2.6 hours. It uses the image of
 # scripts/docker-test.sh N (this checkout's pg_stat_statement_context-test:pgN-<hash>),
 # and one --rm container: the server and pgbench talk over the Unix socket and
 # are pinned to their own CPUs. Output: tmp/bench-pgN[-dry]/ (report.md,
@@ -30,7 +30,7 @@
 set -euo pipefail
 
 usage() { sed -n '4,20p' "$0" >&2; exit 2; }
-MAJOR=18 BLOCKS=8 DURATION=12 WARMUP=3 SEED= ONLY= HIGH=0 KEEP=0 DRY=0 SAVE=0 LABEL= DIRTY_OK=0 CPUSET=
+MAJOR=18 BLOCKS=10 DURATION=15 WARMUP=3 SEED= ONLY= HIGH=0 KEEP=0 DRY=0 SAVE=0 LABEL= DIRTY_OK=0 CPUSET=
 while [ $# -gt 0 ]; do
 	case $1 in
 	--major) MAJOR=${2:?}; shift ;;

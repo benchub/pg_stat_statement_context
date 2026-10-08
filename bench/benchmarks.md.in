@@ -1,0 +1,105 @@
+# Benchmarks
+
+What pg_stat_statement_context costs on top of `pg_stat_statements` alone, measured with pgbench. This page is **generated**: `bench/analyze.py doc` fills in the results from the raw data committed under [`bench/results/`](../bench/results/), and the prose comes from [`bench/benchmarks.md.in`](../bench/benchmarks.md.in). How to run the suite, and how to run it on dedicated hardware, is in [`bench/README.md`](../bench/README.md).
+
+**Read this first.** The only campaign so far ran in a **Docker Desktop VM on a laptop (Apple M1 Max, macOS)**. That is not production hardware: the VM's vCPUs float across performance and efficiency cores, and the host's scheduler, power management and other processes add noise that nothing inside the VM can see. Treat the results as relative costs on that machine, read their confidence intervals, and don't quote the absolute TPS or latency. Dedicated Linux x86 and Graviton runs are left to the maintainers ([instructions](../bench/README.md#dedicated-hardware)); their results will appear here when they are committed.
+
+## Summary
+
+{{summary}}
+
+## Scenarios
+
+Each **scenario** is one pgbench script, protocol and client count. In it, each **configuration** is compared with a baseline that preloads only `pg_stat_statements` and runs the same script. *N* is the number of CPUs the server is pinned to (5 in the local campaign).
+
+| Scenario | What it runs | Configurations (baseline first) |
+|---|---|---|
+| `ro-{simple,prepared}-c{1,N,4N}` | `SELECT abalance FROM pgbench_accounts WHERE aid = :aid` (the `pgbench -S` statement) with an appended 190-byte sqlcommenter comment (six tags, two of them in the default allowlist), simple or prepared protocol, 1, N or 4N clients | `pgss`; `ext` (this extension, defaults) |
+| `rw-{simple,prepared}-c{1,N,4N}` | the pgbench TPC-B-like transaction (`BEGIN`, three `UPDATE`s, a `SELECT`, an `INSERT`, `END`), each of the 5 statements with that comment | `pgss`; `ext` |
+| `ro-simple-cN` (extra) | as above | `plain-pgss` and `plain-ext` (the statement **without** a comment: the untagged path, `untagged = skip`); `ext-regex-normalize` (a `regex` extractor merged with sqlcommenter and a `normalize` rule, `/users/42` → `/users/:id`); `ext-store5k` (the store holds 5,000 other entries before the run); `ext-reader15s` and `ext-reader1s` (the [postgres_exporter recipe](integrations/postgres_exporter/)'s three queries every 15 s or every 1 s, each from a new connection, during the run); `ext-1s-buckets` (`bucket_interval = 1s`: a bucket rollover every second) |
+| `ro-prepared-cN`, `rw-simple-cN` (extra) | as above | `plain-pgss`, `plain-ext`, `ext-regex-normalize` |
+| `nested-simple-cN` | a PL/pgSQL function with two nested loops that runs 16 commented inner `SELECT`s, called from a commented top-level `SELECT` (17 statements per transaction) | `pgss`, `ext` (`track = top`); `pgss-all` (`pg_stat_statements.track = all`), `ext-all-inherit` and `ext-all-scan` (also this extension's `track = all`, with `nested_tags = inherit` or `scan`) |
+| `inlist-simple-cN` | a 10,000-element `IN` list (59 kB) with the comment at the end; `inlist` ends with `;` (the server gets the statement's length), `inlist0` does not (`stmt_len = 0`, so a `strlen` finds the end) | `inlist-pgss`, `inlist-ext` (`position = append`: heuristic tail scan), `inlist-ext-any` (`position = any`: a full exact scan); and the same three for `inlist0` |
+| `evict-simple-cN` | the `ro` statement, but with a random `controller` value: a new tag set on almost every transaction, so the store evicts continuously | `pgss`; `ext-max10000` (`max_entries = 10000`) |
+| `ro-simple-c256`, `rw-simple-c256` | opt-in (`--high-clients`) | `pgss`; `ext` |
+
+Every run is checked, and the run fails if a check fails: the preload list, that pgss and this extension counted every statement (and the extension recorded the expected tags, including the normalized `route` and the regex's `driver`), that nested statements were attributed as configured, which scan path the IN lists took (`_info().heuristic_scans`), that eviction and bucket rollovers happened, that the store held 5,000 extra entries, and that the reader read rows. The **Validation** table of each campaign shows the values.
+
+## Method
+
+- **One container, Unix socket.** The server and pgbench run in one `docker run --rm` container and talk over the Unix socket. The server is pinned with `taskset` to the first half of the container's CPUs and pgbench to the next 30%. The rest stay idle for the OS and the reader.
+- **Release build.** A plain `make`, without `PSSC_TESTING`, as packaged.
+- **Server.** `shared_buffers = 1GB`, `autovacuum = off`, `jit = off`, `synchronous_commit = off`, `max_wal_size = 8GB`, `checkpoint_timeout = 30min`, pgbench scale 10 (prewarmed with `pg_prewarm`). Both extensions use their defaults unless a configuration says otherwise (`pg_stat_statements.max = 5000`, `track = top`; this extension: `extractors = 'sqlcommenter, marginalia'`, `tags = action, controller, job`, `scan_window = 2kB`, `max_entries = 10000`, 12 × 5 min buckets). `env-container.txt` in each results directory lists every setting.
+- **One run.** Restart the server, prewarm, (for `rw`) truncate `pgbench_history` and `VACUUM`, warm up with the same script, reset both extensions' statistics, then run pgbench for the measured duration with `--log`.
+- **Blocks.** A block runs every configuration once. Within a block, the scenarios come in a random order, and so do the configurations within a scenario; the seed is recorded. A configuration and its baseline from the same block form a **pair**, so slow drift over the campaign affects both sides of a pair alike, and the random order keeps a fixed position from favoring either side.
+- **Server CPU per statement.** The CPU time (user + system) of the postmaster and all its children during the measured run, from `/proc/<pid>/stat` (including the children that exited, through the postmaster's `cutime`/`cstime`), divided by the transactions, and by the statements per transaction (1 for `ro`, 7 for `rw` including `BEGIN`/`END`, 17 for `nested`). This is the most direct measure of what the extension adds: it counts the work and ignores the time a backend waits. It includes pgss's and PostgreSQL's own work, and the reader's queries in the reader configurations.
+- **Latency.** p50, p95 and p99 of transaction latency, nearest-rank over every transaction of the run, from pgbench's per-transaction log. Only the per-run summaries are kept, not the logs.
+- **Statistics.** For each pair, the difference (configuration − baseline) of the CPU per statement, and the log ratio of TPS and of each latency percentile. The tables show the **mean over the pairs and its 95% confidence interval** (Student t with n − 1 degrees of freedom); ratios are shown as percentages (exp(mean log ratio) − 1). The verdict says *costlier* or *cheaper* when the interval excludes zero, and *not resolved* when it includes zero. Then its upper end is the largest overhead the data is consistent with, not a measurement of it. These intervals assume the pairs are independent and roughly normal. With a few pairs, one bad block widens them a lot; the raw per-run values are in `runs.jsonl`.
+- **Interference.** The container sees the VM-wide `/proc/stat`. For each run, the CPU time used outside the container (VM busy time minus the container cgroup's usage) is recorded. A run where it exceeds 0.75 cores is repeated, up to 3 attempts. Before the campaign, `docker ps` must show no other containers; `campaign.json` records the check. Pauses of the macOS host or of the VM are not visible from inside and remain as noise.
+- **Bucket boundaries.** Buckets start at multiples of the interval since 2000-01-01, so with 1 s buckets every whole second is a boundary. A transaction is *near* a boundary when its execution overlaps ±5 ms of a whole second. Every configuration is analyzed on the same grid; the ones without 1 s buckets are controls.
+
+### What the data can and cannot bound
+
+- A *costlier* or *cheaper* verdict means the effect is real on this host, within its interval. A *not resolved* verdict bounds the effect only by the interval's upper end, on this host.
+- Nothing here bounds the overhead on other hardware: a different CPU, cache size, memory latency or kernel changes both the absolute costs and the ratio. The CPU per statement is the more portable number, as it does not depend on how saturated the server is.
+- The `ro` statements are cheap, cached point selects: the worst case for relative overhead. Statements that do real work see proportionally less.
+- Latency percentiles in a VM include host pauses. A p99 difference smaller than the run-to-run spread of the baseline is not resolved even when the interval excludes zero by a little.
+- Not measured: `untagged = record`, `prepend` mode, the `marginalia` and `appname` extractors on their own, `cardinality_cap` (see the microbenchmark below), exemplars, `reclaim_worker`, very large `max_entries`, network latency between client and server, and PostgreSQL majors other than the one each campaign names (run `bench/run.sh --major N` for those).
+
+## Long statements: scan costs and tuning
+
+The extension finds comments by lexing the statement's text (no extra parse). For a statement of *L* bytes, with the default `scan_window = 2kB`:
+
+| Case | Bytes examined | Notes |
+|---|---|---|
+| *L* ≤ `scan_window` | all *L*, once | always exact |
+| `position = prepend` | the first `scan_window` | exact |
+| `position = append` (default), the statement ends with `;` or is one of several in a string | the last `scan_window` | heuristic: walks back from the last `*/` (counted in `_info().heuristic_scans`; see [Where comments are found](extractors.md#where-comments-are-found)) |
+| `position = append`, no trailing `;` | the last `scan_window`, **after a `strlen` of the statement** | the server reports `stmt_len = 0` ("to the end of the string"), so the end is found with `strlen`, which reads all *L* bytes. `strlen` is fast (vectorized), so this is small next to parsing |
+| `position = any` | all *L* bytes, lexed one by one | exact, and grows linearly with *L* |
+| a larger `scan_window` | up to `scan_window` bytes | a window ≥ *L* makes the scan exact, at the cost of `any` |
+
+The `inlist` scenarios measure these cases on a 59 kB statement. Parsing and planning a 10,000-element `IN` list costs milliseconds in PostgreSQL itself, so the extension's share is small even with `any`; the measured cost per statement is in the results below.
+
+Tuning:
+
+- Keep the default `position = append` (or use `prepend` if your driver prepends comments) for workloads with long statements. Use `position = any` only if comments can appear in the middle of statements.
+- Leave `scan_window` at 2 kB unless comments are longer, or sit further from the end, than that. Raising it to cover whole long statements buys exactness at the cost of `any`.
+- If `_info().heuristic_scans` grows and you want exact attribution of long statements, compare the cost of `any` below with your statements' execution time before switching.
+- There is no separate byte budget: `scan_window` is the knob.
+
+The same guidance is in [configuration.md](configuration.md#scan_window).
+
+## Microbenchmarks of single features
+
+These were measured with test-only SQL functions (`make PSSC_TESTING=1`) when the features were added, and have not been re-run since. They resolve costs of a few nanoseconds, which pgbench cannot.
+
+### Activity view
+
+Measured at commit `23d9382` (PG 18.6, Docker on the same M1, `max_connections = 100`, so 136 slots). The [activity view](sql-interface.md#pg_stat_statement_context_activity) adds a lock-free write to the backend's shared slot at the start and at the end of each top-level statement. `pssc_context_test_activity_bench(loops, tags_bytes)` (in `test/modules/pssc_context_test`) times one publish plus one set-idle, the pair a statement causes, and a read of all slots:
+
+| Tag set size | Writer, per pair | Reader, all 136 slots |
+|---:|---:|---:|
+| 0 B | 5.6 ns | ~0.5–0.6 µs |
+| 30 B (typical) | 5.9 ns | |
+| 190 B | 44 ns | |
+| 512 B (`max_tagset_bytes`) | 110 ns | |
+
+A `SELECT` publishes at `ExecutorRun` and again at `ExecutorFinish`, so it makes two pairs: about 12 ns per statement with typical tags. Reading the view from SQL (one client, 9 backends): `SELECT count(*) FROM pg_stat_statement_context_activity` takes 0.077 ms, `pg_stat_activity` 0.289 ms, and the join of both 0.355 ms.
+
+### Cardinality caps
+
+Measured at commit `002dda0` (PG 18.6, Docker on the same M1). With a [cardinality cap](configuration.md#cardinality_cap), each kept tag costs a lookup in a shared, lock-free hash table. 200,000 calls of [`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract) on `SELECT 1 /*action='show',controller='users'*/` (2 kept tags) in a PL/pgSQL loop; median of 5 alternating rounds per case:
+
+| Case | ns per call | vs caps off |
+|---|---:|---:|
+| caps off (`cardinality_cap = 0`: no check at all) | 3244 | |
+| both values admitted (steady state) | 3305 | +61 ns (≈ 30 ns per tag) |
+| `controller` over its cap (collapses to `null`) | 3282 | +38 ns |
+| table full (`cardinality_cap_slots = 256`, 64 probes per tag) | 3463 | +144 ns (vs 3319 off in the same run) |
+
+Earlier pgbench A/B runs of both features, in the previous version of this page, were too noisy to resolve these costs; they are superseded by the campaigns below.
+
+## Results
+
+{{campaigns}}
