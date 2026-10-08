@@ -57,7 +57,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
-| 20261008-092913-1 | Warn at startup when pg_stat_monitor is loaded after this extension | 20261008-065635-7 | no | ready |
 | 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | ready |
 | 20261008-092913-3 | Qualify the cardinality bounds for caps lowered or enabled after collection | 20261008-065635-11 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
@@ -323,18 +322,6 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 **Open questions:** none
 **Status:** blocked-on-deps
 
-
-### 20261008-092913-1: Warn at startup when pg_stat_monitor is loaded after this extension
-
-**Description:** Item 20261008-065635-7 found that pg_stat_monitor, like pg_stat_statements, sets the utility statement's queryId to zero before passing it down the hook chain. If `pg_stat_statement_context` comes before pg_stat_monitor in `shared_preload_libraries`, this extension loses utility statements: they are counted in `utility_missing_queryid` instead of recorded. The working order is `pg_stat_statements, pg_stat_monitor, pg_stat_statement_context`. `pssc_load_order_wrong()` in `src/utility.c` only checks for pg_stat_statements. Extend it, and its startup WARNING, to cover pg_stat_monitor too, and update the load-order passages in README.md and `docs/maintaining.md`.
-
-**Acceptance criteria:**
-- The unit or TAP tests for `pssc_load_order_wrong()` cover both libraries, both orders, quoting/whitespace variants and the absence of each library. They fail before the change.
-- A TAP test, skipped unless pg_stat_monitor is installed (and required when it is listed in `PSSC_REQUIRE_MODULES`), checks that the warning appears in the server log for the wrong order and not for the right order.
-
-**Depends on:** 20261008-065635-7
-**Open questions:** none
-**Status:** ready
 
 ### 20261008-092913-2: Isolate Docker test image tags per worktree
 

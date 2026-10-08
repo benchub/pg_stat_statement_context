@@ -1581,6 +1581,18 @@ The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes
 **Open questions:** none
 **Status:** done
 
+### 20261008-092913-1: Warn at startup when pg_stat_monitor is loaded after this extension
+
+**Description:** Item 20261008-065635-7 found that pg_stat_monitor, like pg_stat_statements, sets the utility statement's queryId to zero before passing it down the hook chain. If `pg_stat_statement_context` comes before pg_stat_monitor in `shared_preload_libraries`, this extension loses utility statements: they are counted in `utility_missing_queryid` instead of recorded. The working order is `pg_stat_statements, pg_stat_monitor, pg_stat_statement_context`. `pssc_load_order_wrong()` in `src/utility.c` only checks for pg_stat_statements. Extend it, and its startup WARNING, to cover pg_stat_monitor too, and update the load-order passages in README.md and `docs/maintaining.md`.
+
+**Acceptance criteria:**
+- The unit or TAP tests for `pssc_load_order_wrong()` cover both libraries, both orders, quoting/whitespace variants and the absence of each library. They fail before the change.
+- A TAP test, skipped unless pg_stat_monitor is installed (and required when it is listed in `PSSC_REQUIRE_MODULES`), checks that the warning appears in the server log for the wrong order and not for the right order.
+
+**Depends on:** 20261008-065635-7
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
