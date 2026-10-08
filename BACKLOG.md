@@ -51,7 +51,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
-| 20261008-065635-1 | Regex compile deadline without signal-handler interception | none | no | ready |
 | 20261008-065635-3 | Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation | none | no | ready |
 | 20261008-065635-5 | Broader memory-checker coverage | none | no | ready |
 | 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | blocked-on-deps |
@@ -218,24 +217,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - `_info()`: keep `oldest_bucket` exact, but bound the retry and add a cheap counters-only function for scrapers.
 - Long-statement scans: measure and document only; no new byte-budget GUC.
 - Per-key caps don't bound tag-set combinations: document it and export the health counters; no new combination-budget feature.
-
-### 20261008-065635-1: Regex compile deadline without signal-handler interception
-
-**Description:** `src/regex_runtime.c` (`compile_deadline_arm`/`_disarm`, about lines 190–330, plus the callers about 400–460) bounds regex compile time. It registers a `USER_TIMEOUT` whose handler sets `QueryCancelPending` and `InterruptPending`. Because that fakes a cancel, it also temporarily replaces the backend's SIGINT and SIGUSR1 handlers with wrappers to tell a "foreign" (genuine) cancel apart from its own, and then clears `QueryCancelPending` by hand. RDS reviewers (SEC-2, HYG-1) flagged the handler replacement and the hand-managed interrupt state as fragile, version-sensitive and unusual next to other extensions. Rework it so that core's signal handlers are never replaced and `QueryCancelPending` is never written:
-- Preferred approach, which the builder must verify on PG 14–18: the deadline handler sets only a private `deadline_fired` flag plus `InterruptPending = true`. PostgreSQL's regex engine polls `INTERRUPTS_PENDING_CONDITION()` (`CANCEL_REQUESTED` in `regcustom.h`) and returns `REG_CANCEL`. After the compile returns, if `deadline_fired` is set, treat the result as a timeout. Then call `CHECK_FOR_INTERRUPTS()` (or leave `InterruptPending` set), so that any genuine cancel, timeout or recovery conflict that arrived meanwhile is processed by core as usual. Confirm that a leftover `InterruptPending` with nothing else pending is harmless.
-- If that turns out to be impossible on some supported version, document exactly why in the code and DESIGN.md, and narrow the current mechanism as much as possible.
-- Also tighten the broad `PG_TRY`/`PG_CATCH` catch-and-continue sites (about lines 623–654, 813–837, 1040–1061; SEC-1). Write down the invariant: the protected code touches only private memory in a scratch context and holds no locks, buffers or resource-owner resources. Rethrow anything outside a short, explicit allowlist of SQLSTATEs (e.g. out of memory, invalid regular expression, program limit exceeded), or justify the policy. Do not add a subtransaction per match.
-
-**Acceptance criteria:**
-- Only test code (if any) calls `sigaction` or writes `QueryCancelPending` in `src/`.
-- The existing regex timeout and cancel tests (test/t/006_regex.pl, 017_lifecycle.pl, etc.) still pass. A new or updated TAP test shows that each of these still behaves correctly during and right after a compile that hits the deadline: a genuine `pg_cancel_backend()`, `statement_timeout`, and (where testable) a recovery-conflict cancel.
-- A pathological pattern is still stopped by the deadline, the backend stays usable, and `regex_compile_failures` counts it.
-- The catch policy is documented in the code. The tests fail if the rework is reverted to swallowing a non-allowlisted error.
-- DESIGN.md and docs/extractors.md (about line 137) are updated if behavior or wording changes. The PG 14–18 matrix passes.
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
 
 ### 20261008-065635-3: Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation
 
