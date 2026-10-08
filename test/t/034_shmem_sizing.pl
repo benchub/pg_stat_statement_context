@@ -12,6 +12,8 @@
 #   - the activity array, which _info() does not report, matches the
 #     documented formula (MaxBackends from the documented per-version sum)
 #     exactly, as pg_shmem_allocations shows it;
+#   - scripts/shmem-sizing.pl gives the same estimate from the same
+#     settings, MaxBackends included (non-default max_connections);
 #   - the extension has no other named allocations, and the sources make
 #     exactly the three shared-memory requests the formula covers.
 # The table of totals in docs/configuration.md must equal the module's
@@ -100,14 +102,14 @@ for my $c (@combos)
 		exemplar_keys => $nkeys,
 		exemplar_memory_kb => $g{"$P.exemplar_memory"},
 		cardinality_cap_slots => $g{"$P.cardinality_cap_slots"},
-		max_backends => PsscShmemSizing::max_backends(
-			$major,
-			max_connections => $g{max_connections},
-			autovacuum_workers => $av,
-			max_worker_processes => $g{max_worker_processes},
-			max_wal_senders => $g{max_wal_senders}),
+		pg_version => $major,
+		max_connections => $g{max_connections},
+		autovacuum_workers => $av,
+		max_worker_processes => $g{max_worker_processes},
+		max_wal_senders => $g{max_wal_senders},
 	);
-	my $est = PsscShmemSizing::estimate(%s);
+	my $est = PsscShmemSizing::estimate_settings(%s);
+	$s{max_backends} = $est->{max_backends};
 
 	my ($shmem, $cap, $ex) = split /\|/, $node->safe_psql('postgres',
 		"SELECT shmem_bytes, cap_shmem_bytes, exemplar_shmem_bytes FROM ${P}_info()");
@@ -126,10 +128,45 @@ for my $c (@combos)
 		"$c->{name}: cap table allocation");
 	is($alloc{"$P activity"}, $est->{activity},
 		"$c->{name}: activity allocation (MaxBackends $s{max_backends})");
+	# The CLI gives the same estimate from the same settings.
+	my %cli = map { /^(\w+)\s+(\d+)$/ ? ($1 => $2) : () } split /\n/,
+	  run_cli(map { "$_=$s{$_}" } grep { $_ ne 'max_backends' } sort keys %s);
+	is($cli{activity}, $alloc{"$P activity"},
+		"$c->{name}: scripts/shmem-sizing.pl activity (max_connections $s{max_connections})");
+	is($cli{store}, $est->{store}, "$c->{name}: scripts/shmem-sizing.pl store");
 	is_deeply([ sort keys %alloc ],
 		[ sort ($P, "$P activity", "$P cardinality caps", "$P hash") ],
 		"$c->{name}: no other named allocations");
 	$node->stop;
+}
+
+# Output of scripts/shmem-sizing.pl with the given arguments.
+sub run_cli
+{
+	my $out = `$^X $ROOT/scripts/shmem-sizing.pl @_`;
+	die "scripts/shmem-sizing.pl @_ failed\n" if $?;
+	return $out;
+}
+
+# max_connections drives MaxBackends in the estimate (unless max_backends is
+# given), and the docs table's max_connections row uses it.
+{
+	my $d = PsscShmemSizing::estimate_settings();
+	my $big = PsscShmemSizing::estimate_settings(max_connections => 5000);
+	is($big->{max_backends}, $d->{max_backends} + 4900,
+		'max_connections = 5000 adds 4900 to MaxBackends');
+	is($big->{activity} - $d->{activity}, 4900 * 552,
+		'max_connections = 5000 adds 4900 activity slots');
+	is(PsscShmemSizing::estimate_settings(max_connections => 5000,
+			max_backends => 7)->{max_backends}, 7,
+		'an explicit max_backends takes precedence');
+	like(run_cli('max_connections=5000'), qr/^activity\s+$big->{activity}$/m,
+		'scripts/shmem-sizing.pl max_connections=5000');
+	like(PsscShmemSizing::docs_table(),
+		qr/^\| `max_connections = 5000` \|(?:[^|]*\|){3} ${\PsscShmemSizing::commify($big->{activity})} /m,
+		'the docs table row for max_connections = 5000 uses MaxBackends 5036');
+	ok(!eval { PsscShmemSizing::estimate_settings(bogus => 1); 1 },
+		'unknown settings are rejected');
 }
 
 # Every shared-memory request is one the formula covers.

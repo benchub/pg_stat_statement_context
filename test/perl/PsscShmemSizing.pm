@@ -149,8 +149,35 @@ our %DEFAULTS = (
 	exemplar_keys => 0,
 	exemplar_memory_kb => 2048,
 	cardinality_cap_slots => 16384,
+	pg_version => 18,
 	max_connections => 100,
+	max_worker_processes => 8,
+	max_wal_senders => 10,
 );
+
+# The settings estimate_settings() accepts.
+our @SETTINGS = (keys %DEFAULTS, qw(autovacuum_workers max_backends));
+
+# estimate() from settings as the server has them: %DEFAULTS for those not
+# given, and MaxBackends from max_connections and the worker settings of
+# pg_version (autovacuum_workers defaults to autovacuum_max_workers = 3
+# before PG 18, autovacuum_worker_slots = 16 from PG 18), unless
+# max_backends is given.
+sub estimate_settings
+{
+	my %s = (%DEFAULTS, @_);
+	for my $k (keys %s)
+	{
+		die "unknown setting $k\n" unless grep { $_ eq $k } @SETTINGS;
+	}
+	$s{autovacuum_workers} //= $s{pg_version} >= 18 ? 16 : 3;
+	$s{max_backends} //= max_backends($s{pg_version},
+		map { $_ => $s{$_} }
+		  qw(max_connections autovacuum_workers max_worker_processes max_wal_senders));
+	my $e = estimate(%s);
+	$e->{max_backends} = $s{max_backends};
+	return $e;
+}
 
 # Rows of the docs table: label and the settings that differ from the
 # defaults.
@@ -190,13 +217,7 @@ sub docs_table
 	for my $row (@ROWS)
 	{
 		my ($label, $over) = @$row;
-		my %s = (%DEFAULTS, %$over);
-		$s{max_backends} = max_backends(18,
-			max_connections => $s{max_connections},
-			autovacuum_workers => 16,
-			max_worker_processes => 8,
-			max_wal_senders => 10);
-		my $e = estimate(%s);
+		my $e = estimate_settings(%$over);
 		$out .= '| ' . join(' | ', $label,
 			map { fmt($e->{$_}) } qw(store exemplar cap activity total)) . " |\n";
 	}

@@ -6,8 +6,10 @@
 #   scripts/shmem-sizing.pl name=value ...
 #       estimate for one combination; names: max_entries max_tagset_bytes
 #       bucket_count exemplar_keys (number of keys) exemplar_memory_kb
-#       cardinality_cap_slots max_backends (default 136: max_connections 100
-#       on PG 18)
+#       cardinality_cap_slots, and for MaxBackends pg_version (default 18)
+#       max_connections autovacuum_workers (autovacuum_max_workers, or
+#       autovacuum_worker_slots on PG 18) max_worker_processes
+#       max_wal_senders, or max_backends directly; others at their defaults
 # The formula is in test/perl/PsscShmemSizing.pm; test/t/034_shmem_sizing.pl
 # checks it against the server and the docs table against this output.
 use strict;
@@ -45,15 +47,17 @@ if ($mode eq '--update' || $mode eq '--check')
 
 if (@ARGV)
 {
-	my %s = (%PsscShmemSizing::DEFAULTS, max_backends => 136);
+	my %s;
 	for (@ARGV)
 	{
 		my ($k, $v) = /^(\w+)=(\d+)$/ or die "usage: $0 [--update|--check|name=value ...]\n";
-		die "unknown setting $k\n" unless exists $s{$k};
+		die "unknown setting $k\n"
+		  unless grep { $_ eq $k } @PsscShmemSizing::SETTINGS;
 		$s{$k} = $v;
 	}
-	my $r = PsscShmemSizing::estimate(%s);
-	printf "%-10s %12d\n", $_, $r->{$_} for qw(store exemplar cap activity total);
+	my $r = PsscShmemSizing::estimate_settings(%s);
+	printf "%-12s %12d\n", $_, $r->{$_}
+	  for qw(max_backends store exemplar cap activity total);
 	exit 0;
 }
 

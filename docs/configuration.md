@@ -386,7 +386,7 @@ activity   = 16 + MaxBackends × align8(36 + max_tagset_bytes)
 - **Rounding.** `cap` and `activity` are exact, and so is `exemplar_shmem_bytes`. The 240- and 848-byte headers can change by a few bytes between versions, so `store` is exact to within 256 bytes. `test/t/034_shmem_sizing.pl` checks all of this against the server.
 - **Rule of thumb.** Each entry costs about `align8(24 + max_tagset_bytes) + 88 + 24 × bucket_count + exemplar` bytes, plus 8 per hash bucket (`pow2(max_entries)` of them), plus about 3 kB. So `max_tagset_bytes` dominates at the default 12 buckets, and `bucket_count` dominates for long histories (288 buckets take 6,912 bytes per entry).
 
-`scripts/shmem-sizing.pl name=value ...` (e.g. `scripts/shmem-sizing.pl max_entries=50000 bucket_count=288 max_backends=136`) evaluates the formula for other settings.
+`scripts/shmem-sizing.pl name=value ...` (e.g. `scripts/shmem-sizing.pl max_entries=50000 bucket_count=288 max_connections=500 pg_version=17`) evaluates the formula for other settings; it computes MaxBackends from `max_connections`, `autovacuum_workers`, `max_worker_processes`, `max_wal_senders` and `pg_version` (default 18), or takes `max_backends=N` directly.
 
 ### Totals for representative settings
 
