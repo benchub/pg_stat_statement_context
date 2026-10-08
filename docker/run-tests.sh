@@ -106,12 +106,14 @@ step "version-guard check"
 scripts/check-version-guards.sh --self-test >/dev/null || fail "version-guard self-test"
 scripts/check-version-guards.sh || fail "version-guard check"
 
-step "upper version guard (src/compat.h rejects PostgreSQL 19+)"
-as_pg scripts/check-compat-guard.sh || fail "compat.h version-guard check"
-
 step "frozen SQL check"
 scripts/check-frozen-sql.sh --self-test >/dev/null || fail "frozen-sql self-test"
 scripts/check-frozen-sql.sh || fail "frozen-sql check"
+# The checks above ran as root and may have left scratch files in tmp/.
+if [ "$(id -u)" = 0 ]; then chown -R postgres:postgres "$BUILD"; fi
+
+step "upper version guard (src/compat.h rejects PostgreSQL 19+)"
+as_pg scripts/check-compat-guard.sh || fail "compat.h version-guard check"
 
 step "unit tests (src/scan.c lexer + statement scans, src/pairs.c parsers, src/tagset.c pipeline, src/counters.c slot + fuzz entry points, ASan/UBSan)"
 as_pg make unittest || fail "unit tests"
@@ -233,7 +235,8 @@ else
 	as_pg make clean >/dev/null
 	as_pg make PG_CFLAGS="-Werror" || fail "make (release)"
 	make install || fail "make install (release)"
-	lib=$(ls "$BUILD/$EXT".so "$BUILD/$EXT".dylib 2>/dev/null | head -n1)
+	lib=
+	for f in "$BUILD/$EXT".so "$BUILD/$EXT".dylib; do [ -e "$f" ] && lib=$f; done
 	[ -n "$lib" ] || fail "no $EXT library in $BUILD"
 	as_pg scripts/check-release-exports.sh --lib "$lib" || fail "installed library is not a release build"
 
