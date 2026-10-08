@@ -1653,6 +1653,20 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-6: Discriminating checksum test and concurrent-reader consistency tests
+
+**Description:** TST-5 and TST-6.
+- `028_persist.pl` about lines 310–318 flips a byte in the middle of the dump. Other validation catches that before the CRC check, so deleting the CRC check (`src/store.c` about line 2272) still passes. Add cases that only the CRC can catch: flip a byte in the checksum itself, and change a counter value inside an entry record so the record stays structurally valid.
+- No test reads the activity view or the stats SRFs while writers run concurrently. Add a TAP stress test: several pgbench clients or background psql sessions run tagged writes while a reader repeatedly checks invariants that hold under concurrency. Examples: in the activity view, each row's tags come from a single publish (have each writer use tags that encode one value twice, and check that the two match); in the SRF, with no expiry (long `bucket_interval`), each entry's `sum(calls)` over live buckets equals `calls_total`. Note: that equality is not a general invariant after expiry.
+- Check (and state in the commit) that the reader tests fail under the reviewer's mutations: removing the activity change-counter retry loop (`src/activity.c` about lines 283–307), and removing the entry spinlock in the snapshot (`src/store.c` about lines 1246–1249). If a mutation can't be detected reliably without being flaky, use deterministic test hooks, or document why.
+
+**Acceptance criteria:**
+- The CRC-deletion mutation makes 028 fail. The new concurrency test passes reliably: run it 20 times on PG 18 with no failures. Each listed mutation is caught, or the commit explains why it can't be.
+
+**Depends on:** 20261008-065635-3 (both touch the persistence loader and its tests)
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

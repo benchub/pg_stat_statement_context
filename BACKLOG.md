@@ -51,13 +51,12 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
-| 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | ready |
 | 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
 | 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | ready |
-| 20261008-120000-1 | Make timing-sensitive TAP checks robust under heavy load | 20261008-065635-6, 20261008-065635-9 | no | blocked-on-deps |
-| 20261008-121828-1 | 038: verify pgbench writers are really alive, and check their exit status | 20261008-065635-6 | no | blocked-on-deps |
+| 20261008-120000-1 | Make timing-sensitive TAP checks robust under heavy load | 20261008-065635-6, 20261008-065635-9 | no | ready |
+| 20261008-121828-1 | 038: verify pgbench writers are really alive, and check their exit status | 20261008-065635-6 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -221,20 +220,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - Long-statement scans: measure and document only; no new byte-budget GUC.
 - Per-key caps don't bound tag-set combinations: document it and export the health counters; no new combination-budget feature.
 
-### 20261008-065635-6: Discriminating checksum test and concurrent-reader consistency tests
-
-**Description:** TST-5 and TST-6.
-- `028_persist.pl` about lines 310–318 flips a byte in the middle of the dump. Other validation catches that before the CRC check, so deleting the CRC check (`src/store.c` about line 2272) still passes. Add cases that only the CRC can catch: flip a byte in the checksum itself, and change a counter value inside an entry record so the record stays structurally valid.
-- No test reads the activity view or the stats SRFs while writers run concurrently. Add a TAP stress test: several pgbench clients or background psql sessions run tagged writes while a reader repeatedly checks invariants that hold under concurrency. Examples: in the activity view, each row's tags come from a single publish (have each writer use tags that encode one value twice, and check that the two match); in the SRF, with no expiry (long `bucket_interval`), each entry's `sum(calls)` over live buckets equals `calls_total`. Note: that equality is not a general invariant after expiry.
-- Check (and state in the commit) that the reader tests fail under the reviewer's mutations: removing the activity change-counter retry loop (`src/activity.c` about lines 283–307), and removing the entry spinlock in the snapshot (`src/store.c` about lines 1246–1249). If a mutation can't be detected reliably without being flaky, use deterministic test hooks, or document why.
-
-**Acceptance criteria:**
-- The CRC-deletion mutation makes 028 fail. The new concurrency test passes reliably: run it 20 times on PG 18 with no failures. Each listed mutation is caught, or the commit explains why it can't be.
-
-**Depends on:** 20261008-065635-3 (both touch the persistence loader and its tests)
-**Open questions:** none
-**Status:** ready
-
 ### 20261008-065635-12: Managed-server-safe smoke test target
 
 **Description:** HYG-5. `make installcheck` runs the regression suite, which changes server settings with `ALTER SYSTEM` and then resets them (`test/sql/include/config.sql` about lines 11–17), wiping operator values. 26 of the 32 TAP tests need test-only modules. Neither can be pointed at a provisioned managed instance. Add a `make smoke` (or `installcheck-smoke`) target: it connects to an existing server using the libpq environment, runs as a NOSUPERUSER role with privileges like `rds_superuser`, and changes no global settings. It checks that the library is preloaded, that `CREATE EXTENSION` worked (or creates it if allowed), that `_extract()` behaves (if executable), that tagged statements under the server's current extractor configuration are recorded and visible, and that `_info()` and the counters function work. Add a clear warning in the Makefile and in the README development section that `installcheck` resets global settings and is for disposable clusters only.
@@ -316,7 +301,7 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 
 **Depends on:** 20261008-065635-6, 20261008-065635-9
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261008-121828-1: 038: verify pgbench writers are really alive, and check their exit status
 
@@ -336,7 +321,7 @@ Fix:
 
 **Depends on:** 20261008-065635-6
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ---
 
