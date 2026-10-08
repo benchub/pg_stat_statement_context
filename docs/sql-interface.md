@@ -8,13 +8,13 @@
 | [`pg_stat_statement_context(showtags, merge_buckets)`](#pg_stat_statement_contextshowtags-merge_buckets) | set-returning function behind both views | `PUBLIC` |
 | [`pg_stat_statement_context_activity`](#pg_stat_statement_context_activity) | view, current tags of each backend (join `pg_stat_activity` on `pid`); `pg_stat_statement_context_activity()` is the function behind it | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context_counters()`](#pg_stat_statement_context_counters) | the store and diagnostic counters of `_info()` without its table scan: cheap, for scrapers | `PUBLIC` |
-| [`pg_stat_statement_context_extract(query, stmt_location, stmt_len)`](#pg_stat_statement_context_extract) | debug: show the tags extracted from a statement | superuser only |
+| [`pg_stat_statement_context_extract(query, stmt_location, stmt_len)`](#pg_stat_statement_context_extract) | debug: show the tags extracted from a statement | `EXECUTE` revoked from `PUBLIC` |
 | [`pg_stat_statement_context_info()`](#pg_stat_statement_context_info) | store and diagnostic counters | `PUBLIC` |
 | [`pg_stat_statement_context_last_bucket`](#pg_stat_statement_context_last_bucket) | view, one row per entry, last closed bucket only; `pg_stat_statement_context_last_bucket(showtags)` is the function behind it | `SELECT` granted to `PUBLIC` |
-| [`pg_stat_statement_context_reset()`](#pg_stat_statement_context_reset) | clears all statistics | superuser only |
+| [`pg_stat_statement_context_reset()`](#pg_stat_statement_context_reset) | clears all statistics | `EXECUTE` revoked from `PUBLIC` |
 | [`pg_stat_statement_context_totals`](#the-views) | view, one row per entry, live buckets summed | `SELECT` granted to `PUBLIC` |
 
-A superuser can `GRANT EXECUTE` on the restricted functions to other roles. The views and functions work only when the library is in `shared_preload_libraries`; otherwise they fail with `pg_stat_statement_context must be loaded via "shared_preload_libraries"`.
+The restricted functions can be called by superusers, by their owner (the role that ran `CREATE EXTENSION` in the database) and by roles granted `EXECUTE`; the owner or a superuser can `GRANT EXECUTE` on them to other roles (see [Managed services](managed-services.md#privileges) for setups without a superuser). The views and functions work only when the library is in `shared_preload_libraries`; otherwise they fail with `pg_stat_statement_context must be loaded via "shared_preload_libraries"`.
 
 Statistics are cluster-wide: every database's statements are collected, and the views show all of them (filter on `dbid` if needed), as in `pg_stat_statements`.
 
@@ -268,7 +268,7 @@ Finding `oldest_bucket` scans every entry under the store's shared lock; [`_coun
 SELECT pg_stat_statement_context_reset();
 ```
 
-Removes every entry, zeroes every counter of `_info()` and sets `stats_reset`. It also forgets the values admitted by the [cardinality caps](configuration.md#cardinality_cap), so every key can take its cap of distinct values again. Statements still running in other sessions are recorded after the reset when they finish. Superuser-only by default; to delegate it:
+Removes every entry, zeroes every counter of `_info()` and sets `stats_reset`. It also forgets the values admitted by the [cardinality caps](configuration.md#cardinality_cap), so every key can take its cap of distinct values again. Statements still running in other sessions are recorded after the reset when they finish. By default only superusers and the extension's owner (the role that ran `CREATE EXTENSION`) can call it; to delegate it:
 
 ```sql
 GRANT EXECUTE ON FUNCTION pg_stat_statement_context_reset() TO monitoring;   -- an existing role
@@ -336,7 +336,7 @@ SELECT pg_stat_statement_context_extract('SELECT 1; SELECT 2; /*controller:x*/',
 
 **Notes.**
 
-- It is **superuser-only by default**, because it runs the regex engine on arbitrary input (CPU cost) and reveals the extractor configuration. A superuser may `GRANT EXECUTE ON FUNCTION pg_stat_statement_context_extract(text, int, int) TO ...`.
+- `EXECUTE` is **revoked from `PUBLIC`**, because it runs the regex engine on arbitrary input (CPU cost) and reveals the extractor configuration. Superusers and the extension's owner (the role that ran `CREATE EXTENSION`) can call it, and may `GRANT EXECUTE ON FUNCTION pg_stat_statement_context_extract(text, int, int) TO ...`.
 - It works when `enabled = off`, but needs the library preloaded.
 - It doesn't change the statistics or `_info()` counters, except `regex_compile_failures`: a regex compile failure disables the extractor (or `normalize` rule) in the calling backend and is counted, as it would be in the hooks.
 - For a single statement, or the first statement of a string, its result is the same as the hooks'. For a later statement that starts more than `scan_window` bytes into a multi-statement string, the hooks may see leading comments that this function doesn't (on PostgreSQL 18).

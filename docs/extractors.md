@@ -2,7 +2,7 @@
 
 This page describes how the extension finds comments in a statement, how the `pg_stat_statement_context.extractors` setting (the *extractor DSL*) turns them into tags, and how to keep the number of distinct tag sets under control. The [`appname`](#appname) extractor derives tags from `application_name` instead, for clients that can't add comments.
 
-Use `pg_stat_statement_context_extract()` (superuser-only by default, see [the SQL interface](sql-interface.md#pg_stat_statement_context_extract)) to check what the current configuration extracts from a statement. All examples on this page use it.
+Use `pg_stat_statement_context_extract()` (by default only superusers and the extension's owner can call it, see [the SQL interface](sql-interface.md#pg_stat_statement_context_extract)) to check what the current configuration extracts from a statement. All examples on this page use it.
 
 ## Where comments are found
 

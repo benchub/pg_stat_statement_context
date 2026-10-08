@@ -1,11 +1,6 @@
 # Configuration
 
-All configuration uses GUCs (server settings). There is no separate configuration file. Settings can be put in `postgresql.conf` or set with `ALTER SYSTEM`. What else is possible depends on each GUC's context:
-
-- `postmaster`: server-wide, and takes effect only after a restart.
-- `sighup`: server-wide, and takes effect after a reload (`SELECT pg_reload_conf()`). It can't be set per role, per database or per session, so PostgreSQL rejects `ALTER DATABASE ... SET` and `ALTER ROLE ... SET` with "cannot be changed now". `tags`, `exclude_tags`, `untagged` and `scan_window` are `superuser`, so they can be set per database or per role (see [Changing the configuration from SQL](#changing-the-configuration-from-sql)).
-- `superuser`: can also be set per role, per database or per session, but only by a superuser (or a role granted `SET` on it, PG 15+).
-- `user`: can also be set per role, per database or per session, by any user.
+All configuration uses GUCs (server settings). There is no separate configuration file. Settings can be put in `postgresql.conf` or set with `ALTER SYSTEM` (on a managed service, in the provider's parameter groups: see [Managed services](managed-services.md)). What else is possible, and when a change takes effect, depends on each GUC's [context](#guc-contexts).
 
 All of them are visible in `pg_settings`:
 
@@ -49,12 +44,18 @@ The GUCs exist only when the library is in `shared_preload_libraries`.
 | [`track_utility`](#track_utility) | bool | `on` | | superuser |
 | [`untagged`](#untagged) | enum | `skip` | `skip`, `record` | superuser |
 
-Every name has the prefix `pg_stat_statement_context.`. The contexts mean:
+Every name has the prefix `pg_stat_statement_context.`.
 
-- **postmaster**: these size shared memory or fix the bucket layout; changing them needs a server restart.
-- **sighup**: set in `postgresql.conf` or with `ALTER SYSTEM`, and applied on reload (`SELECT pg_reload_conf();` or `pg_ctl reload`).
-- **superuser**: can be changed by a superuser at any time, including per session (`SET`), per role or per database (`ALTER ROLE/DATABASE ... SET`), and in `postgresql.conf` with a reload.
+### GUC contexts
+
+The context (the last column above, and `pg_settings.context`) says how a change is applied and who may make it:
+
+- **postmaster**: these size shared memory or fix the bucket layout. Set in `postgresql.conf` or with `ALTER SYSTEM`; a change needs a server restart.
+- **sighup**: server-wide. Set in `postgresql.conf` or with `ALTER SYSTEM`, and applied on reload (`SELECT pg_reload_conf();` or `pg_ctl reload`). They can't be set per role, per database or per session: PostgreSQL rejects `SET`, `ALTER ROLE ... SET` and `ALTER DATABASE ... SET` with "cannot be changed now".
+- **superuser**: set like `sighup` settings, and also per session (`SET`), per role or per database (`ALTER ROLE/DATABASE ... SET`), but only by a superuser or (PostgreSQL 15+) a role granted `SET` on the parameter. This is why `tags`, `exclude_tags`, `untagged` and `scan_window` can differ between databases and roles (see [Changing the configuration from SQL](#changing-the-configuration-from-sql)).
 - **user**: any user can change it, with `SET`, `SET LOCAL`, a function's `SET` clause or connection options, as well as per role or per database.
+
+What each context means on a managed service, where the administrator is not a superuser, is in [Managed services](managed-services.md#settings).
 
 ### `bucket_count`
 

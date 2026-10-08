@@ -113,7 +113,7 @@ The first two statements use different comment formats but produce the same tag 
  2800308901962295548 | t        | {"action": "index", "controller": "admin"} |     1 |        0.003375
 ```
 
-To see which tags the current configuration would extract from a statement, without running it, a superuser can call the debug function:
+To see which tags the current configuration would extract from a statement, without running it, a superuser or the role that created the extension can call the debug function (others need `GRANT EXECUTE`):
 
 ```sql
 SELECT pg_stat_statement_context_extract(
@@ -129,6 +129,7 @@ SELECT pg_stat_statement_context_extract(
 | [docs/sql-interface.md](docs/sql-interface.md) | The views (including `_last_bucket`, the last closed bucket), `pg_stat_statement_context()`, the `_activity` view (current tags per backend), `_info()`, `_counters()`, `_reset()`, `_extract()`, the join to `pg_stat_statements`, nested statements and `toplevel`, visibility, encodings. |
 | [docs/limitations.md](docs/limitations.md) | Prepared statements, scanner caveats, PG14/15 utility query IDs, failed statements, statistics across restarts, [replicas and failover](docs/limitations.md#replicas-and-failover) (per-instance histories), PII, managed providers. |
 | [docs/integrations/](docs/integrations/README.md) | Recipes for postgres_exporter, sql_exporter and the OpenTelemetry Collector, a Grafana dashboard, a monitoring role, and the metric semantics (gauges, `toplevel`, cardinality). |
+| [docs/managed-services.md](docs/managed-services.md) | Running without superuser on a managed service: what each GUC's context means with parameter groups, raw parameter-group values for the DSL settings, who can call `_reset()`/`_extract()` and read the views, and a SQL-only troubleshooting checklist. |
 | [docs/benchmarks.md](docs/benchmarks.md) | pgbench overhead and latency measurements against pg_stat_statements alone: the method, results for PG 18 and PG 14, findings (bucket boundaries, IN lists, eviction), and how to re-run them. |
 
 ## Testing

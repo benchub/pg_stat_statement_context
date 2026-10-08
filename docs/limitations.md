@@ -65,7 +65,7 @@ Tag values come from clients and can contain personal data. Other roles' `tags` 
 
 ## Deployment
 
-The library must be in `shared_preload_libraries` (after `pg_stat_statements`), so enabling it requires a server restart. Managed PostgreSQL providers (Amazon RDS, Google Cloud SQL, Azure, ...) only allow extensions on their allowlists; until a provider adds this one, it can't be used there.
+The library must be in `shared_preload_libraries` (after `pg_stat_statements`), so enabling it requires a server restart. Managed PostgreSQL providers (Amazon RDS, Google Cloud SQL, Azure, ...) only allow extensions on their allowlists; until a provider adds this one, it can't be used there. Where it is available, see [Managed services](managed-services.md) for privileges, parameter groups and troubleshooting without a superuser.
 
 ## Not in v1
 
