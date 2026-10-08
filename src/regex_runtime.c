@@ -336,6 +336,30 @@ drop_coalesced_sigint(void)
 	return sigwait(&set, &sig) == 0;
 }
 
+/*
+ * CopyErrorData() of the error being handled, or NULL if that fails (out of
+ * memory): then both errors are still on the error stack, to be flushed.
+ */
+static ErrorData *
+copy_error_guarded(MemoryContext cxt, int test_phase, int test_index)
+{
+	ErrorData  *volatile edata = NULL;
+
+	PG_TRY();
+	{
+		if (test_phase >= 0 && pssc_regex_test_hook != NULL)
+			(void) pssc_regex_test_hook(PSSC_REGEX_TEST_COMPILE_CATCH, test_index);
+		edata = CopyErrorData();
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(cxt);
+		edata = NULL;
+	}
+	PG_END_TRY();
+	return edata;
+}
+
 void
 pssc_regex_test_expire_in(int ms)
 {
@@ -420,6 +444,7 @@ compile_attempt(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
 	if (!held_off && compile_deadline_arm(limit))
 	{
 		volatile bool aborted = false;
+		volatile bool settled = false;	/* a swallowable error, settled */
 
 		*timed = true;
 		PG_TRY();
@@ -428,6 +453,14 @@ compile_attempt(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
 		}
 		PG_CATCH();
 		{
+			/*
+			 * SIGINT is blocked until unblock_sigint(), which every way out
+			 * of here takes first: nothing before it may throw (PG_TRY does
+			 * not restore the signal mask). The one step that allocates,
+			 * copying the error, is guarded itself.
+			 */
+			int			code;
+
 			MemoryContextSwitchTo(oldcxt);
 			compile_deadline_stop();
 			if (!deadline_fired)
@@ -435,9 +468,19 @@ compile_attempt(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
 				unblock_sigint();
 				PG_RE_THROW();
 			}
-			if (geterrcode() == ERRCODE_QUERY_CANCELED && !QueryCancelPending)
+			code = geterrcode();
+			if (!QueryCancelPending)
 			{
-				/* raised by ProcessInterrupts(), which consumed the flag */
+				/*
+				 * The deadline's cancel was consumed by ProcessInterrupts():
+				 * raised as this error if it is a cancel, else merged into
+				 * it (a PG14-16 recovery conflict).
+				 */
+				if (code != ERRCODE_QUERY_CANCELED)
+				{
+					unblock_sigint();
+					PG_RE_THROW();
+				}
 				if (!sigint_held())
 				{
 					/* the deadline's cancel alone */
@@ -453,27 +496,60 @@ compile_attempt(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
 					unblock_sigint();
 					PG_RE_THROW();
 				}
+				else
+				{
+					/* a timeout fell due since: core raises it instead */
+					FlushErrorState();
+					InterruptHoldoffCount = save_holdoff;
+					QueryCancelHoldoffCount = save_cancel_holdoff;
+					unblock_sigint();
+					CHECK_FOR_INTERRUPTS();
+					InterruptPending = true;
+					aborted = true;
+				}
 			}
-			if (!aborted)
+			else if (sigint_held())
 			{
 				/*
-				 * Some other error, or a cancel error that does not name a
-				 * timeout that fell due meanwhile. The deadline's cancel may
-				 * still be pending, so settle it before re-throwing; a
-				 * genuine interrupt it raises takes precedence.
+				 * A genuine cancel came too: it stays pending, merged with
+				 * the deadline's, and is raised (or discarded with this
+				 * error at top level) as usual.
 				 */
-				ErrorData  *edata = CopyErrorData();
+				unblock_sigint();
+				PG_RE_THROW();
+			}
+			else
+			{
+				/*
+				 * The deadline's cancel is still pending (or, on PG14-16, a
+				 * recovery conflict's), behind an error the engine raised
+				 * meanwhile: settle it, so it neither cancels the statement
+				 * later nor is lost, then go on with the error. One the
+				 * callers swallow anyway is not kept.
+				 */
+				ErrorData  *edata = NULL;
 
+				if (!may_swallow(code))
+					edata = copy_error_guarded(oldcxt, test_phase, test_index);
 				FlushErrorState();
 				InterruptHoldoffCount = save_holdoff;
 				QueryCancelHoldoffCount = save_cancel_holdoff;
 				compile_deadline_settle(save_holdoff, save_cancel_holdoff);
-				ReThrowError(edata);
+				if (edata != NULL)
+					ReThrowError(edata);
+				if (!may_swallow(code))
+					ereport(ERROR,
+							(errcode(code),
+							 errmsg("unexpected error while compiling a regular expression"),
+							 errdetail("The error could not be reported: out of memory.")));
+				settled = true;
 			}
 		}
 		PG_END_TRY();
 		if (aborted)
 			return PSSC_REGEX_COMPILE_TOO_SLOW;
+		if (settled)
+			return REG_ESPACE;
 		compile_deadline_stop();
 		if (!deadline_fired)
 		{

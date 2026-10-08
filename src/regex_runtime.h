@@ -109,6 +109,12 @@ extern uint64 pssc_regex_transient_failures(void);
 #define PSSC_REGEX_TEST_NORM_COMPILE	4
 #define PSSC_REGEX_TEST_NORM_EXEC		5
 #define PSSC_REGEX_TEST_CHECK	6	/* check hook test compile; index -1 */
+/*
+ * Called (with the *COMPILE or CHECK phase's index) by a compile attempt
+ * handling an error after its limit fired, right before the one step there
+ * that allocates (and so can fail); it may throw, as that step can.
+ */
+#define PSSC_REGEX_TEST_COMPILE_CATCH	7
 typedef int (*PsscRegexTestHook) (int phase, int index);
 extern PGDLLEXPORT PsscRegexTestHook pssc_regex_test_hook;
 

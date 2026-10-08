@@ -302,7 +302,9 @@ typedef enum InjectAction
 	INJ_EXPIREAFTER,			/* the limit expires once the engine has returned */
 	INJ_LIMIT,					/* throw ERRCODE_PROGRAM_LIMIT_EXCEEDED */
 	INJ_REGERR,					/* throw ERRCODE_INVALID_REGULAR_EXPRESSION */
-	INJ_SELFINT					/* a real SIGINT, then let the engine run */
+	INJ_SELFINT,				/* a real SIGINT, then let the engine run */
+	INJ_LATEERROR,				/* deadline, then an internal error, no CFI */
+	INJ_LATEINTERROR			/* deadline, a real SIGINT, an internal error */
 } InjectAction;
 
 static int	inj_phase = -1;
@@ -462,11 +464,32 @@ busy_past_limit(bool race)
 
 static int	inject_action(void);
 
+/*
+ * PSSC_REGEX_TEST_COMPILE_CATCH: throw out of memory this many more times
+ * (-1: always); pssc_extract_test_regex_catch_oom().
+ */
+static int	inj_catch_oom = 0;
+static int	inj_catch_fired = 0;
+
 static int
 inject_hook(int phase, int index)
 {
 	int			rc = REG_OKAY;
 
+	if (phase == PSSC_REGEX_TEST_COMPILE_CATCH)
+	{
+		if (inj_catch_oom != 0)
+		{
+			if (inj_catch_oom > 0)
+				inj_catch_oom--;
+			inj_catch_fired++;
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("out of memory"),
+					 errdetail("pssc_extract_test injected failure while handling an error.")));
+		}
+		return REG_OKAY;
+	}
 	if (phase != inj_phase || (inj_index >= 0 && index != inj_index))
 		return REG_OKAY;
 	inj_attempts++;
@@ -632,6 +655,14 @@ inject_action(void)
 		case INJ_SELFINT:
 			kill(MyProcPid, SIGINT);
 			return REG_OKAY;
+		case INJ_LATEERROR:
+		case INJ_LATEINTERROR:
+			for (int i = 0; i < 6000 && !QueryCancelPending; i++)
+				pg_usleep(10000L);
+			if (inj_action == INJ_LATEINTERROR)
+				kill(MyProcPid, SIGINT);
+			elog(ERROR, "pssc_extract_test injected internal error");
+			break;
 	}
 	return REG_OKAY;
 }
@@ -656,7 +687,8 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 		[INJ_LATEREGINT] = "lateregint", [INJ_LATEWAIT] = "latewait",
 		[INJ_LATECONFLICT] = "lateconflict", [INJ_LATEREGCONFLICT] = "lateregconflict",
 		[INJ_EXPIRE] = "expire", [INJ_EXPIREAFTER] = "expireafter",
-		[INJ_LIMIT] = "limit", [INJ_REGERR] = "regerr", [INJ_SELFINT] = "selfint"
+		[INJ_LIMIT] = "limit", [INJ_REGERR] = "regerr", [INJ_SELFINT] = "selfint",
+		[INJ_LATEERROR] = "lateerror", [INJ_LATEINTERROR] = "lateinterror",
 	};
 	int			a = -1;
 
@@ -753,6 +785,22 @@ pssc_extract_test_regex_expire_ms(PG_FUNCTION_ARGS)
 		elog(ERROR, "the expiry must be at least 1 ms");
 	inj_expire_ms = PG_GETARG_INT32(0);
 	PG_RETURN_INT32(old);
+}
+
+/*
+ * Makes the next count steps of a compile attempt's error handling that
+ * allocate (PSSC_REGEX_TEST_COMPILE_CATCH) fail with out of memory, while
+ * an injection is set. Returns how many failed since the previous call.
+ */
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_catch_oom);
+Datum
+pssc_extract_test_regex_catch_oom(PG_FUNCTION_ARGS)
+{
+	int			fired = inj_catch_fired;
+
+	inj_catch_oom = PG_GETARG_INT32(0);
+	inj_catch_fired = 0;
+	PG_RETURN_INT32(fired);
 }
 
 PG_FUNCTION_INFO_V1(pssc_extract_test_regex_compile_limit);

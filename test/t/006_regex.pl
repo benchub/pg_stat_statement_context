@@ -393,6 +393,34 @@ for my $c ([ 'regcancel', 'SELECT 1', qr/canceling statement due to user request
 # ---------------------------------------------------------------------------
 my $LIMIT_MS = 100;
 my $BOUND_S = 10;	# generous: without the limit these take 50-60 s
+
+# statement_timeout and pg_cancel_backend() (both delivered by SIGINT) cancel
+# a statement of session $s promptly.
+sub interrupts_work
+{
+	my ($s, $what) = @_;
+	my $t0 = time;
+	my (undef, $err) = sq_err($s, "SET statement_timeout = '200ms'; SELECT pg_sleep(10)");
+	my $dt = time - $t0;
+	like($err, qr/ERROR:  canceling statement due to statement timeout/,
+		"statement_timeout $what: honored");
+	cmp_ok($dt, '<', $BOUND_S, "statement_timeout $what: promptly (${dt}s)");
+	sq($s, 'RESET statement_timeout');
+	my $pid = sq($s, 'SELECT pg_backend_pid()');
+	$s->{in} .= "SELECT pg_sleep(10);\n";
+	$s->{h}->pump_nb;
+	$node->poll_query_until('postgres',
+		"SELECT count(*) = 1 FROM pg_stat_activity WHERE pid = $pid AND state = 'active' "
+		  . "AND query LIKE '%pg_sleep(10)%'")
+	  or die 'pg_sleep did not start';
+	$t0 = time;
+	$node->safe_psql('postgres', "SELECT pg_cancel_backend($pid)");
+	(undef, $err) = sq_err($s, 'SELECT 42');
+	$dt = time - $t0;
+	like($err, qr/ERROR:  canceling statement due to user request/,
+		"pg_cancel_backend $what: honored");
+	cmp_ok($dt, '<', $BOUND_S, "pg_cancel_backend $what: promptly (${dt}s)");
+}
 for my $action (qw(sleep regsleep))
 {
 	my $s = session_open();
@@ -577,6 +605,52 @@ for my $action (qw(lateconflict lateregconflict))
 	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', "recovery conflict after the compile time limit ($action): nothing left pending");
 	session_close($s);
 }
+# An error other than the limit's cancel, raised once the limit fired but
+# before the engine noticed it, propagates and leaves no cancel of the
+# limit's behind (an application that catches the error goes on); a genuine
+# cancel that came too is still delivered. Also when handling the error
+# fails for lack of memory (item 20261008-065635-1 review): the error is
+# not swallowed, and SIGINT is not left blocked.
+for my $c ([ 'lateerror', 0 ], [ 'lateerror', 1 ], [ 'lateinterror', 0 ], [ 'lateinterror', 1 ])
+{
+	my ($action, $oom) = @$c;
+	my $what = "error after the compile time limit fired ($action, catch oom $oom)";
+	my $s = session_open();
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, '$action', 1)");
+	sq($s, "SELECT pssc_extract_test_regex_catch_oom($oom)");
+	my $t0 = time;
+	my (undef, $err) = sq_err($s, "DO \$\$BEGIN BEGIN PERFORM * FROM pssc_extract_test($Q); "
+		  . "EXCEPTION WHEN others THEN RAISE NOTICE 'caught % %', SQLSTATE, SQLERRM; END; "
+		  . "PERFORM pg_sleep(0.2); RAISE NOTICE 'went on'; END\$\$");
+	my $dt = time - $t0;
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "$what: injected");
+	if ($action eq 'lateerror')
+	{
+		like($err, $oom ? qr/NOTICE:  caught XX000 / : qr/NOTICE:  caught XX000 pssc_extract_test injected internal error/,
+			"$what: the error propagates");
+		like($err, qr/NOTICE:  went on/, "$what: no cancel left pending");
+		unlike($err, qr/ERROR:/, "$what: no cancel left pending (no error)");
+	}
+	else
+	{
+		# the genuine cancel may strike as soon as the handler runs
+		like($err, qr/ERROR:  canceling statement due to user request/, "$what: the genuine cancel is delivered");
+		unlike($err, qr/went on/, "$what: the genuine cancel is delivered (the block stops)");
+		# at top level, the error is reported (the cancel came during it)
+		sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, '$action', 1)");
+		(undef, $err) = sq_err($s, ex_sql($Q));
+		like($err, qr/ERROR:  pssc_extract_test injected internal error/, "$what: the error propagates");
+	}
+	cmp_ok($dt, '<', $BOUND_S, "$what: promptly (${dt}s)");
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', -1, 'none')");
+	is(sq($s, 'SELECT pssc_extract_test_regex_catch_oom(0)'), $action eq 'lateerror' ? $oom : 0,
+		"$what: the allocating step " . ($action eq 'lateerror' && $oom ? 'failed' : 'was not needed'));
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', "$what: nothing left pending");
+	interrupts_work($s, "after an $what");
+	my $r = sex($s, $Q);
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o,service=s 0', "$what: not disabled, not counted");
+	session_close($s);
+}
 SKIP:
 {
 	skip 'transaction_timeout needs PostgreSQL 17+', 2
@@ -672,25 +746,7 @@ my $HUGE = q{((?:(?:$)|\Zda|(?<!1)|\S){0,255})};
 	is("$r->{tags} $r->{regex_fail}", 'a=x 1',
 		'interrupted compiles were not failures; the next one is stopped by the limit and counted');
 
-	(undef, $err) = sq_err($s, "SET statement_timeout = '200ms'; SELECT pg_sleep(30)");
-	like($err, qr/ERROR:  canceling statement due to statement timeout/,
-		'statement_timeout after a compile stopped by the limit: honored');
-	sq($s, 'RESET statement_timeout');
-	my $pid = sq($s, 'SELECT pg_backend_pid()');
-	$s->{in} .= "SELECT pg_sleep(30);
-";
-	$s->{h}->pump_nb;
-	$node->poll_query_until('postgres',
-		"SELECT count(*) = 1 FROM pg_stat_activity WHERE pid = $pid AND state = 'active' "
-		  . "AND query LIKE '%pg_sleep(30)%'")
-	  or die 'pg_sleep did not start';
-	$t0 = time;
-	$node->safe_psql('postgres', "SELECT pg_cancel_backend($pid)");
-	(undef, $err) = sq_err($s, 'SELECT 42');
-	$dt = time - $t0;
-	like($err, qr/ERROR:  canceling statement due to user request/,
-		'pg_cancel_backend after a compile stopped by the limit: honored');
-	cmp_ok($dt, '<', $BOUND_S, "pg_cancel_backend after a compile stopped by the limit: promptly (${dt}s)");
+	interrupts_work($s, 'after a compile stopped by the limit');
 	is(sq($s, 'SELECT 42'), 42, 'after a compile stopped by the limit: session healthy');
 	session_close($s);
 }

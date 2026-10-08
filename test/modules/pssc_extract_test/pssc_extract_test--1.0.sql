@@ -125,6 +125,12 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_extract_test_regex_expire_ms(ms int) RETURNS int
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- Fail the next count allocating steps of a compile attempt's error
+-- handling after its limit fired (-1: all); returns how many failed since
+-- the previous call.
+CREATE FUNCTION pssc_extract_test_regex_catch_oom(count int) RETURNS int
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
 -- Backend-local regex runtime bookkeeping (pssc_regex_debug_stats).
 CREATE FUNCTION pssc_extract_test_regex_stats(OUT compiles bigint, OUT frees bigint,
                                               OUT live int, OUT failed int)
