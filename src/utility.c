@@ -45,6 +45,7 @@
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
 #include "nodes/parsenodes.h"
@@ -268,6 +269,17 @@ pssc_utility_init(void)
 #define PGSS_LIBRARY_NAME "pg_stat_statements"
 
 /*
+ * The libraries that clear the queryId of utility statements before they
+ * chain, so must be loaded before this extension, in their working order
+ * (pg_stat_monitor documents that it follows pg_stat_statements). Indexed
+ * by bit number of the PSSC_LOAD_ORDER_* flags (utility.h).
+ */
+static const char *const zeroing_libraries[] = {
+	PGSS_LIBRARY_NAME,			/* PSSC_LOAD_ORDER_PGSS */
+	"pg_stat_monitor",			/* PSSC_LOAD_ORDER_PGSM */
+};
+
+/*
  * Does a shared_preload_libraries entry name the library "name"?  Entries
  * are matched by basename without a shared-library suffix, so
  * "$libdir/pg_stat_statements" and "pg_stat_statements.so" both match
@@ -304,24 +316,32 @@ library_entry_is(const char *entry, const char *name)
 }
 
 /*
- * pg_stat_statements must be loaded before this extension: the library
- * loaded last installs the outermost ProcessUtility hook, so with pgss after
- * us its hook runs first and zeroes the utility's queryId before ours sees
- * it (DESIGN.md §3.2, §6.12).
+ * pg_stat_statements and pg_stat_monitor must be loaded before this
+ * extension: the library loaded last installs the outermost ProcessUtility
+ * hook, so with one of them after us its hook runs first and zeroes the
+ * utility's queryId before ours sees it (DESIGN.md §3.2, §6.12).
  *
- * The list is split like the postmaster's load_libraries() does. Only the
- * first entry of each library counts, because a library is loaded (and its
- * hooks installed) once.
+ * Returns the PSSC_LOAD_ORDER_* flags of the libraries listed after this
+ * extension, and sets *listed (if not NULL) to the flags of those listed at
+ * all. The list is split like the postmaster's load_libraries() does. Only
+ * the first entry of each library counts, because a library is loaded (and
+ * its hooks installed) once.
  */
-bool
-pssc_load_order_wrong(const char *spl)
+int
+pssc_load_order_wrong(const char *spl, int *listed)
 {
 	char	   *rawstring;
 	List	   *elemlist;
 	ListCell   *lc;
 	int			pos = 0;
 	int			self_pos = -1;
-	int			pgss_pos = -1;
+	int			lib_pos[lengthof(zeroing_libraries)];
+	int			wrong = 0;
+
+	if (listed)
+		*listed = 0;
+	for (int i = 0; i < lengthof(lib_pos); i++)
+		lib_pos[i] = -1;
 
 	rawstring = pstrdup(spl);
 	if (!SplitDirectoriesString(rawstring, ',', &elemlist))
@@ -329,7 +349,7 @@ pssc_load_order_wrong(const char *spl)
 		/* The postmaster already rejected an unparsable list. */
 		list_free_deep(elemlist);
 		pfree(rawstring);
-		return false;
+		return 0;
 	}
 
 	foreach(lc, elemlist)
@@ -338,19 +358,40 @@ pssc_load_order_wrong(const char *spl)
 
 		if (self_pos < 0 && library_entry_is(entry, PSSC_LIBRARY_NAME))
 			self_pos = pos;
-		else if (pgss_pos < 0 && library_entry_is(entry, PGSS_LIBRARY_NAME))
-			pgss_pos = pos;
+		else
+		{
+			for (int i = 0; i < lengthof(zeroing_libraries); i++)
+			{
+				if (lib_pos[i] < 0 &&
+					library_entry_is(entry, zeroing_libraries[i]))
+				{
+					lib_pos[i] = pos;
+					break;
+				}
+			}
+		}
 		pos++;
 	}
 	list_free_deep(elemlist);
 	pfree(rawstring);
 
-	return self_pos >= 0 && pgss_pos > self_pos;
+	for (int i = 0; i < lengthof(zeroing_libraries); i++)
+	{
+		if (lib_pos[i] < 0)
+			continue;
+		if (listed)
+			*listed |= 1 << i;
+		if (self_pos >= 0 && lib_pos[i] > self_pos)
+			wrong |= 1 << i;
+	}
+	return wrong;
 }
 
 /*
- * A WARNING only: utility tracking stays enabled, and utilities pgss zeroed
- * are counted in utility_missing_queryid.
+ * One WARNING per library listed after this extension. A WARNING only:
+ * utility tracking stays enabled, and utilities that library zeroed are
+ * counted in utility_missing_queryid. The HINT gives the working order of
+ * the libraries that are listed.
  *
  * Only the postmaster (or a single-user backend) warns: on EXEC_BACKEND
  * platforms every child re-runs process_shared_preload_libraries(), and
@@ -359,15 +400,33 @@ pssc_load_order_wrong(const char *spl)
 void
 pssc_utility_check_load_order(void)
 {
+	int			listed;
+	int			wrong;
+	StringInfoData order;
+
 	if (IsUnderPostmaster || shared_preload_libraries_string == NULL)
 		return;
-	if (pssc_load_order_wrong(shared_preload_libraries_string))
+	wrong = pssc_load_order_wrong(shared_preload_libraries_string, &listed);
+	if (wrong == 0)
+		return;
+
+	initStringInfo(&order);
+	for (int i = 0; i < lengthof(zeroing_libraries); i++)
+		if (listed & (1 << i))
+			appendStringInfo(&order, "%s, ", zeroing_libraries[i]);
+	appendStringInfoString(&order, PSSC_LIBRARY_NAME);
+
+	for (int i = 0; i < lengthof(zeroing_libraries); i++)
+	{
+		if (!(wrong & (1 << i)))
+			continue;
 		ereport(WARNING,
 				(errmsg("%s is loaded after %s in shared_preload_libraries",
-						PGSS_LIBRARY_NAME, PSSC_LIBRARY_NAME),
+						zeroing_libraries[i], PSSC_LIBRARY_NAME),
 				 errdetail("In this order the ProcessUtility hook of %s runs first and clears the query identifier of utility statements, so they are not recorded; they are counted in utility_missing_queryid instead.",
-						   PGSS_LIBRARY_NAME),
-				 errhint("Set shared_preload_libraries = '%s, %s' (%s first) and restart the server.",
-						 PGSS_LIBRARY_NAME, PSSC_LIBRARY_NAME,
-						 PGSS_LIBRARY_NAME)));
+						   zeroing_libraries[i]),
+				 errhint("Set shared_preload_libraries = '%s' and restart the server.",
+						 order.data)));
+	}
+	pfree(order.data);
 }

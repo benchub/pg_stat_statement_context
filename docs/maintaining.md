@@ -42,7 +42,7 @@ On PG14–16, `src/utility.c: pgss_utility_settings` (through `loaded_guc`) read
 
 A placeholder (pgss not loaded) falls back to this extension's own settings. If pgss renames either GUC or changes its values, `pgss_utility_settings` silently falls back. Test 012 (differing settings, both orders) catches that.
 
-`src/utility.c: pssc_load_order_wrong` reads `shared_preload_libraries` and looks for the library name `pg_stat_statements` (`PGSS_LIBRARY_NAME`).
+`src/utility.c: pssc_load_order_wrong` reads `shared_preload_libraries` and looks for the library names `pg_stat_statements` (`PGSS_LIBRARY_NAME`) and `pg_stat_monitor` (`zeroing_libraries`).
 
 ### 1.4 Query IDs
 
@@ -52,7 +52,7 @@ A placeholder (pgss not loaded) falls back to this extension's own settings. If 
 | queryId 0 is never recorded. A tracked utility that arrives with queryId 0 is counted in `_info().utility_missing_queryid`. | `pssc_ProcessUtility` (`frame->queryId == 0`), `pssc_store_count_utility_missing_queryid` (`src/store.c`) | `pgss_store` returns at once when `queryId == 0`, on PG14–18. pgss records a utility under the queryId core gave it, which `pgss_ProcessUtility` saved (`saved_queryId`) before zeroing `pstmt->queryId`. |
 | Core computes utility queryIds, not pgss. On PG14/15 the queryId is a hash of the statement text, comments included, so each tag set gives a different queryId. On PG16+ it is a parse-tree jumble that ignores comments, so the same utility shares one queryId across tag sets and untagged runs. | Nothing to do; documented in `docs/limitations.md` | core `src/backend/utils/misc/queryjumble.c` (`JumbleQuery` → `compute_utility_query_id`, PG14/15) / `src/backend/nodes/queryjumblefuncs.c` (PG16+) |
 | The queryId is an `int64` on PG18 and a `uint64` on PG14–17. It is stored as `int64`. | `src/store.h` `PsscEntryKey.queryid`, `src/context.h` `PsscFrame.queryId` | PG18 `pgss_store(..., int64 queryId, ...)`; PG14–17 `uint64` |
-| Load order: because pgss zeroes the queryId before chaining, pgss must be listed **before** this extension in `shared_preload_libraries`. A WARNING at startup reports the wrong order. | `src/utility.c`: `pssc_load_order_wrong`, `pssc_utility_check_load_order`; test 014 | `pgss_ProcessUtility` (the comment "Force utility statements to get queryId zero") |
+| Load order: because pgss zeroes the queryId before chaining, pgss must be listed **before** this extension in `shared_preload_libraries`. A WARNING at startup reports the wrong order (also for pg_stat_monitor, §4). | `src/utility.c`: `pssc_load_order_wrong`, `pssc_utility_check_load_order`; tests 014, 041 | `pgss_ProcessUtility` (the comment "Force utility statements to get queryId zero") |
 
 ### 1.5 Executor timing
 
@@ -99,7 +99,7 @@ Reproduce a cell locally with `scripts/docker-test.sh 14.6` (or `15.0`, ...).
 | auto_explain | contrib, every harness server (`docker/build-postgres.sh` installs it for source builds) | `log_analyze` plans for each top-level and nested statement |
 | pgaudit | PGDG package `postgresql-N-pgaudit` (`docker/Dockerfile`) | one `AUDIT:` line per statement and nested statement |
 | pg_hint_plan | PGDG package `postgresql-N-pg-hint-plan` | `/*+ SeqScan(t) */` changes the plan and is reported as used, also with sqlcommenter and marginalia tag comments in the same statement; the hint comment produces no tags |
-| pg_stat_monitor | not in PGDG apt, so skipped in the images; checked by hand against 2.4.0 built from source | `calls` match this extension's |
+| pg_stat_monitor | not in PGDG apt, so skipped in the images; checked by hand against 2.4.0 built from source (036 and 041) | `calls` match this extension's |
 
 036 uses no TEST-ONLY module or hook, so `docker/run-tests.sh` runs it against both the testing build (`make PSSC_TESTING=1`) and the release build ([DESIGN.md §9](../DESIGN.md#9-testing-strategy)), with the same `PSSC_REQUIRE_MODULES`. A module that isn't installed is skipped, and the skip is reported on stderr. `docker/Dockerfile` writes the modules it installed to `/usr/local/share/pssc-test-modules`, and `docker/run-tests.sh` passes them in `PSSC_REQUIRE_MODULES`. A listed module that is missing makes the test fail rather than skip.
 
@@ -109,6 +109,6 @@ Reproduce a cell locally with `scripts/docker-test.sh 14.6` (or `15.0`, ...).
 shared_preload_libraries = 'pg_stat_statements, pg_stat_monitor, pg_stat_statement_context'
 ```
 
-In that order pgss sits inside pg_stat_monitor and records no utilities. That is pg_stat_monitor's doing and happens without this extension too. 036 pins both orders. The load-order WARNING (`pssc_load_order_wrong`) only knows about pgss.
+In that order pgss sits inside pg_stat_monitor and records no utilities. That is pg_stat_monitor's doing and happens without this extension too. 036 pins both orders. The load-order WARNING (`pssc_load_order_wrong`) also reports pg_stat_monitor listed after this extension; `test/t/041_load_order_pgsm.pl` checks it in the server log and, like 036, is skipped unless pg_stat_monitor is installed (and fails if `PSSC_REQUIRE_MODULES` lists it). 014 checks the matcher for pg_stat_monitor without it. If pg_stat_monitor stops zeroing utility queryIds, drop it from `zeroing_libraries`.
 
 When a new release of any of these extensions changes its hooks, re-run 036 against it.

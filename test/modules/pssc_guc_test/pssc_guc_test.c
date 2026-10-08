@@ -50,6 +50,7 @@ typedef int (*find_fn) (const PsscTagList *, const char *, int);
 typedef uint64 (*generation_fn) (void);
 typedef bool (*blob_size_fn) (size_t, size_t, size_t *);
 typedef const PsscExtractorList *(*extractors_fn) (void);
+typedef int (*load_order_fn) (const char *, int *);
 
 static void *
 main_sym(const char *name)
@@ -502,9 +503,16 @@ PG_FUNCTION_INFO_V1(pssc_guc_test_load_order_wrong);
 Datum
 pssc_guc_test_load_order_wrong(PG_FUNCTION_ARGS)
 {
-	bool		(*fn) (const char *) =
-		(bool (*) (const char *)) main_sym("pssc_load_order_wrong");
+	load_order_fn fn = (load_order_fn) main_sym("pssc_load_order_wrong");
+	int			wrong = fn(text_to_cstring(PG_GETARG_TEXT_PP(0)), NULL);
+	StringInfoData out;
 
-	PG_RETURN_TEXT_P(cstring_to_text(fn(text_to_cstring(PG_GETARG_TEXT_PP(0))) ?
-									 "pg_stat_statements" : ""));
+	initStringInfo(&out);
+	if (wrong & PSSC_LOAD_ORDER_PGSS)
+		appendStringInfoString(&out, "pg_stat_statements");
+	if (wrong & PSSC_LOAD_ORDER_PGSM)
+		appendStringInfo(&out, "%spg_stat_monitor", out.len ? "," : "");
+	if (wrong & ~(PSSC_LOAD_ORDER_PGSS | PSSC_LOAD_ORDER_PGSM))
+		elog(ERROR, "unexpected load-order flags 0x%x", wrong);
+	PG_RETURN_TEXT_P(cstring_to_text(out.data));
 }

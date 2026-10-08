@@ -71,15 +71,15 @@ Statistics are collected for **all** databases of the cluster as soon as the lib
 
 ### Load order
 
-`pg_stat_statements` clears the query ID of utility statements (DDL, `VACUUM`, ...) before it calls the next `ProcessUtility` hook. The library listed last installs the outermost hook, so `pg_stat_statement_context` must be listed **after** `pg_stat_statements`. If the order is wrong, the server logs at startup:
+`pg_stat_statements` clears the query ID of utility statements (DDL, `VACUUM`, ...) before it calls the next `ProcessUtility` hook, and so does `pg_stat_monitor`. The library listed last installs the outermost hook, so `pg_stat_statement_context` must be listed **after** both of them: `'pg_stat_statements, pg_stat_monitor, pg_stat_statement_context'` (leave out the ones you don't use). If the order is wrong, the server logs at startup, once for each library listed after `pg_stat_statement_context`:
 
 ```
 WARNING:  pg_stat_statements is loaded after pg_stat_statement_context in shared_preload_libraries
 DETAIL:  In this order the ProcessUtility hook of pg_stat_statements runs first and clears the query identifier of utility statements, so they are not recorded; they are counted in utility_missing_queryid instead.
-HINT:  Set shared_preload_libraries = 'pg_stat_statements, pg_stat_statement_context' (pg_stat_statements first) and restart the server.
+HINT:  Set shared_preload_libraries = 'pg_stat_statements, pg_stat_statement_context' and restart the server.
 ```
 
-`pg_stat_monitor` clears utility query IDs the same way, so list it before `pg_stat_statement_context` too: `'pg_stat_statements, pg_stat_monitor, pg_stat_statement_context'`. The warning only checks `pg_stat_statements`.
+With `pg_stat_monitor` listed after `pg_stat_statement_context`, the warning names `pg_stat_monitor` instead, and the hint gives the order of all the listed libraries, for example `'pg_stat_statements, pg_stat_monitor, pg_stat_statement_context'`.
 
 If you see that warning, the symptoms will be that plannable statements (`SELECT`, DML) are recorded, but utility statements (`VACUUM`, DDL) will be invisible to `pg_stat_statement_context`, even if a context exists. Instead, they get counted in `pg_stat_statement_context_info().utility_missing_queryid`.
 

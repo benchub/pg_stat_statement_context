@@ -12,7 +12,7 @@ Every statement about privileges on this page is checked by `test/t/037_managed_
 
 ## Installing
 
-1. In the parameter group, set `shared_preload_libraries` to include `pg_stat_statement_context`, **after** `pg_stat_statements` if you use it (see [Load order](../README.md#load-order)), for example `pg_stat_statements,pg_stat_statement_context`. This needs a reboot.
+1. In the parameter group, set `shared_preload_libraries` to include `pg_stat_statement_context`, **after** `pg_stat_statements` and `pg_stat_monitor` if you use them (see [Load order](../README.md#load-order)), for example `pg_stat_statements,pg_stat_statement_context`. This needs a reboot.
 2. Check that `compute_query_id` is `auto` or `on` (see [Query IDs](../README.md#query-ids)).
 3. In each database where you want to query the statistics, run `CREATE EXTENSION pg_stat_statement_context;` as the administrator role. The role that runs `CREATE EXTENSION` owns the extension's functions in that database, which matters for [the restricted functions](#functions-_reset-and-_extract).
 
@@ -280,7 +280,7 @@ Each check below is SQL that the administrator role (a member of `pg_monitor`) c
 
 ### My utility statements are missing
 
-Utility statements (DDL, `VACUUM`, ...) are recorded only with `track_utility = on`, and only when `pg_stat_statements` comes **before** `pg_stat_statement_context` in `shared_preload_libraries`. With the wrong order they are counted in `utility_missing_queryid` instead, and the server logs a `WARNING` at startup (see [Load order](../README.md#load-order)). On PostgreSQL 14 and 15 some utility statements have no query ID at all (see [Limitations](limitations.md#utility-statement-query-ids-on-postgresql-14-and-15)). `EXECUTE` and `PREPARE` are recorded as the statement they run, not as utilities.
+Utility statements (DDL, `VACUUM`, ...) are recorded only with `track_utility = on`, and only when `pg_stat_statements` (and `pg_stat_monitor`, if used) comes **before** `pg_stat_statement_context` in `shared_preload_libraries`. With the wrong order they are counted in `utility_missing_queryid` instead, and the server logs a `WARNING` at startup (see [Load order](../README.md#load-order)). On PostgreSQL 14 and 15 some utility statements have no query ID at all (see [Limitations](limitations.md#utility-statement-query-ids-on-postgresql-14-and-15)). `EXECUTE` and `PREPARE` are recorded as the statement they run, not as utilities.
 
 ```sql
 SHOW pg_stat_statement_context.track_utility;
@@ -290,8 +290,8 @@ SELECT utility_missing_queryid FROM pg_stat_statement_context_counters();
 
 A growing `utility_missing_queryid` means utility statements arrived without a query ID. It does **not** by itself prove that the order is wrong, because the counter also grows with the correct order. `pg_stat_statements` clears the query ID of a utility statement kept in a plan cache (a statement in a PL/pgSQL function, or a named prepared statement of the extended protocol) on its first execution in a session, so later executions of the same cached statement have no query ID. `pg_stat_statements` counts them only once too. Before you reboot:
 
-- Check the order that `SHOW shared_preload_libraries` prints above: `pg_stat_statements` must come before `pg_stat_statement_context`.
-- Look in the server log, downloaded from the provider, for the startup `WARNING:  pg_stat_statements is loaded after pg_stat_statement_context in shared_preload_libraries`.
+- Check the order that `SHOW shared_preload_libraries` prints above: `pg_stat_statements` and `pg_stat_monitor` must come before `pg_stat_statement_context`.
+- Look in the server log, downloaded from the provider, for the startup `WARNING:  pg_stat_statements is loaded after pg_stat_statement_context in shared_preload_libraries` (or the same with `pg_stat_monitor`).
 
 Only if the order is wrong (the warning is logged at every startup) should you fix it in the parameter group and reboot. With the correct order, a counter that grows only while functions or prepared statements run DDL is the cached-utility case, and a reboot won't change it.
 
