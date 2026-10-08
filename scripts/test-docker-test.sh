@@ -10,6 +10,9 @@
 #   3. --prune removes only the images labelled with this checkout's path.
 #   4. --prune-stale removes only the images whose labelled checkout no longer
 #      exists, never those of existing checkouts.
+#   5. Other scripts get the PGDG image through docker-test.sh --build-image,
+#      so it carries the checkout label: fuzz/sql/run.sh --pgdg builds it
+#      with the label, and no other tracked file builds the -test tag itself.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -22,8 +25,9 @@ check() { if [ "$2" = "$3" ]; then ok "$1"; else not_ok "$1: got '$2', want '$3'
 
 rm -rf "$T"
 for c in a b; do
-	mkdir -p "$T/$c/scripts" "$T/$c/docker"
+	mkdir -p "$T/$c/scripts" "$T/$c/docker" "$T/$c/fuzz/sql"
 	cp "$ROOT/scripts/docker-test.sh" "$T/$c/scripts/"
+	cp "$ROOT/fuzz/sql/run.sh" "$T/$c/fuzz/sql/"
 	cp "$ROOT/docker/Dockerfile" "$ROOT/docker/Dockerfile.source" \
 		"$ROOT/docker/build-postgres.sh" "$ROOT/docker/run-tests.sh" "$T/$c/docker/"
 done
@@ -48,7 +52,13 @@ case "$1 $2" in
 	while read -r id ref path; do echo "$id $ref"; done < "$T/images" ;;
 "image inspect")
 	id=${*: -1}
-	while read -r i ref path; do if [ "$i" = "$id" ]; then echo "$path"; fi; done < "$T/images" ;;
+	while read -r i ref path; do
+		if [ "$i" = "$id" ] || [ "$ref" = "$id" ]; then echo "$path"; exit 0; fi
+	done < "$T/images"
+	exit 1 ;;
+build*)
+	echo "$*" >> "$T/built" ;;
+run*) ;;
 rmi*|"image rm")
 	shift; [ "$1" = rm ] && shift
 	for x in "$@"; do case $x in -*) ;; *) echo "$x" >> "$T/removed" ;; esac; done ;;
@@ -85,5 +95,21 @@ rm -f "$T/removed"
 run "$A/scripts/docker-test.sh" --prune-stale >/dev/null
 check "--prune-stale removes only missing checkouts' images" \
 	"$(sort "$T/removed" 2>/dev/null | tr '\n' ' ')" "pg_stat_statement_context-test:pg18-3333 sha256:ggg2 "
+
+# 5. The fuzz PGDG image is built with this checkout's label.
+rm -f "$T/built"
+run "$A/fuzz/sql/run.sh" --pgdg --pg 18 >/dev/null 2>&1 || true
+if grep -q -- "--label pssc.checkout=$A " "$T/built" 2>/dev/null \
+	&& grep -q -- "-t $ta " "$T/built"; then
+	ok "fuzz/sql/run.sh --pgdg builds the labelled image"
+else
+	not_ok "fuzz/sql/run.sh --pgdg build: '$(cat "$T/built" 2>/dev/null)'"
+fi
+direct=$(cd "$ROOT" && git ls-files -z | xargs -0 grep -lE 'docker build' 2>/dev/null \
+	| grep -vx -e scripts/docker-test.sh -e scripts/test-docker-test.sh \
+	| while read -r f; do
+		if grep -qE 'pg_stat_statement_context-test|--print-image|"\$ROOT/docker" *(>|$)' "$ROOT/$f"; then echo "$f"; fi
+	done || true)
+check "no other file builds the PGDG image directly" "$direct" ""
 
 if [ $fails -eq 0 ]; then echo "docker-test self-test passed"; rm -rf "$T"; else exit 1; fi

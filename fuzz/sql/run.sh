@@ -3,7 +3,8 @@
 #   fuzz/sql/run.sh [--assert|--valgrind|--pgdg] [--pg MAJOR] [-- regex_fuzz.pl options]
 # Default: --assert --pg 18, i.e. the cassert source build of
 # scripts/docker-test.sh --assert 18 (built by that script; run it once first).
-# --pgdg uses the PGDG package image (built here if missing, as CI does).
+# --pgdg uses this checkout's PGDG package image (scripts/docker-test.sh
+# --build-image, so --prune sees it; as CI does).
 # regex_fuzz.pl options: --seed N (printed at the start; default random),
 # --duration SECONDS (default 60), --rounds N (instead of --duration, to
 # replay a seed), --calls N (extract calls per round, default 40).
@@ -32,9 +33,7 @@ OUT=$ROOT/tmp/fuzz-sql
 mkdir -p "$OUT"
 
 if [ "$FLAVOR" = pgdg ]; then
-	IMAGE=$("$ROOT/scripts/docker-test.sh" --print-image "$PG")
-	docker image inspect "$IMAGE" >/dev/null 2>&1 \
-		|| docker build -q --build-arg "PG_MAJOR=${PG}" -t "$IMAGE" "$ROOT/docker" >/dev/null
+	IMAGE=$("$ROOT/scripts/docker-test.sh" --build-image "$PG")
 else
 	IMAGE=$("$ROOT/scripts/docker-test.sh" --print-image "--$FLAVOR" "$PG")
 	docker image inspect "$IMAGE" >/dev/null 2>&1 || {
