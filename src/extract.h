@@ -11,6 +11,7 @@
 #ifndef PSSC_EXTRACT_H
 #define PSSC_EXTRACT_H
 
+#include "export.h"
 #include "tagset.h"
 
 /* Upper bound of pg_stat_statement_context.max_tagset_bytes. */
@@ -36,7 +37,7 @@ extern void pssc_extract_init(void);
  * with pssc_stmt_range() and pssc_stmt_owned_start(). Counters go to the
  * backend-local pending stats (pssc_extract_take_stats()).
  */
-extern PGDLLEXPORT void pssc_extract_tags(const char *s, size_t start,
+extern PSSC_TEST_API void pssc_extract_tags(const char *s, size_t start,
 										  size_t end, char *buf,
 										  size_t bufsize,
 										  PsscExtractResult *result);
@@ -63,7 +64,7 @@ extern PGDLLEXPORT void pssc_extract_tags(const char *s, size_t start,
  * NULL: not wanted) for pssc_extract_recap(), and *cands_len is its
  * length; otherwise *cands_len is 0 and the tag set never needs a recap.
  */
-extern PGDLLEXPORT void pssc_extract_tags_ex(const char *s, size_t start,
+extern PSSC_TEST_API void pssc_extract_tags_ex(const char *s, size_t start,
 											 size_t end, char *buf,
 											 size_t bufsize,
 											 PsscExtractResult *result,
@@ -81,7 +82,7 @@ extern PGDLLEXPORT void pssc_extract_tags_ex(const char *s, size_t start,
  * Its cands (*newcands_len bytes, possibly 0) go to newcands, as for
  * pssc_extract_tags_ex(). Counts collapses in the pending stats.
  */
-extern PGDLLEXPORT void pssc_extract_recap(const char *tags, size_t tags_len,
+extern PSSC_TEST_API void pssc_extract_recap(const char *tags, size_t tags_len,
 										   const char *cands,
 										   size_t cands_len, Oid userid,
 										   char *buf, size_t bufsize,
@@ -112,13 +113,13 @@ extern bool pssc_extract_available(void);
  * shared hash key's tags_hash). Stable within a server binary; not
  * persisted, so endianness does not matter.
  */
-extern PGDLLEXPORT uint32 pssc_tagset_hash(const char *buf, size_t len);
+extern PSSC_TEST_API uint32 pssc_tagset_hash(const char *buf, size_t len);
 
 /*
  * Adds the counters accumulated since the last call to *stats and zeroes
  * them (the recording path flushes them into the shared _info() counters).
  */
-extern PGDLLEXPORT void pssc_extract_take_stats(PsscTagsetStats *stats);
+extern PSSC_TEST_API void pssc_extract_take_stats(PsscTagsetStats *stats);
 
 /*
  * Counts a regex compile failure (PsscTagsetStats.regex_compile_failures);
@@ -132,7 +133,7 @@ extern void pssc_extract_note_regex_compile_failure(void);
  * produce no tags. arg is passed
  * to fn as its first argument. See PsscRegexExtractFn for the contract.
  */
-extern PGDLLEXPORT void pssc_extract_set_regex_hook(PsscRegexExtractFn fn,
+extern PSSC_TEST_API void pssc_extract_set_regex_hook(PsscRegexExtractFn fn,
 													void *arg);
 
 #endif							/* PSSC_EXTRACT_H */

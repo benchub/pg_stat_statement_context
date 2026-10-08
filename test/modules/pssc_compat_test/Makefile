@@ -8,7 +8,8 @@ EXTENSION = pssc_compat_test
 DATA = pssc_compat_test--1.0.sql
 PGFILEDESC = "pssc_compat_test - test-only exerciser for src/compat.h"
 
-PG_CPPFLAGS = -I$(srcdir)/../../../src
+# Built against the testing variant of the library (make PSSC_TESTING=1).
+PG_CPPFLAGS = -I$(srcdir)/../../../src -DPSSC_TESTING
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

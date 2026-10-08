@@ -27,6 +27,9 @@ use IPC::Run;
 use IO::Socket::UNIX;
 use Socket qw(SOCK_STREAM);
 use Time::HiRes qw(usleep);
+use PsscTest;
+
+require_testing_build();
 
 my $P = 'pg_stat_statement_context';
 my $V = "${P}_activity";

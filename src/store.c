@@ -97,8 +97,10 @@ typedef struct PsscSharedState
 	int			exemplar_value_len; /* bytes per exemplar value */
 	Size		exemplar_block; /* per-entry exemplar bytes (in entrysize) */
 
+#ifdef PSSC_TESTING
 	/* changed only under the exclusive lock while the table is empty */
 	bool		force_collisions;
+#endif
 
 	/* time buckets (§5.2): fixed at startup */
 	TimestampTz epoch;			/* bucket 0 starts here */
@@ -112,15 +114,18 @@ typedef struct PsscSharedState
 	pg_atomic_uint64 current_bucket;
 	pg_atomic_uint64 bucket_advances;
 
+#ifdef PSSC_TESTING
+
 	/*
-	 * Debug clock (tests only, store.h). clock_debug is read without a lock
-	 * on every clock read; only when it is set are clock_mode and
+	 * Debug clock (testing build only, store.h). clock_debug is read without
+	 * a lock on every clock read; only when it is set are clock_mode and
 	 * clock_value read, together, under clock_mutex.
 	 */
 	pg_atomic_uint32 clock_debug;
 	slock_t		clock_mutex;
 	PsscDebugClockMode clock_mode;
 	int64		clock_value;
+#endif
 
 	/* under the lock (exclusive to change) */
 	int64		entries;
@@ -160,6 +165,7 @@ static PsscSharedState *store_state = NULL;
 static HTAB *store_htab = NULL;
 static Size store_keysize = 0;
 
+#ifdef PSSC_TESTING
 static PsscStoreRecordTestHook record_test_hook = NULL;
 static void *record_test_hook_arg = NULL;
 static PsscStoreRecordTestHook flush_test_hook = NULL;
@@ -169,6 +175,7 @@ static void *info_scan_test_hook_arg = NULL;
 
 /* Testing aid: the next eviction pass in this backend gets no candidate buffer. */
 static bool debug_fail_next_eviction_alloc = false;
+#endif
 
 static void store_shmem_shutdown(int code, Datum arg);
 static void store_load(void);
@@ -222,8 +229,10 @@ entry_slot(void *entry)
 	return &store_state->evict_slots[entry_header(entry)->evict_index];
 }
 
+#ifdef PSSC_TESTING
 /* Largest debug clock offset either way: about 3000 years. */
 #define PSSC_DEBUG_CLOCK_MAX_OFFSET INT64CONST(100000000000000000)
+#endif
 
 /* ---------------------------------------------------------------- sizing */
 
@@ -370,7 +379,11 @@ key_hash_normal(const PsscKey *key)
 static inline uint32
 key_hash_effective(uint32 normal)
 {
+#ifdef PSSC_TESTING
 	return store_state->force_collisions ? 0 : normal;
+#else
+	return normal;
+#endif
 }
 
 /* dynahash callback; dynahash only runs it under our lock. */
@@ -472,7 +485,9 @@ store_shmem_startup(void)
 															 pssc_bucket_count),
 									state->exemplar_block);
 		state->shmem_bytes = requested_shmem_bytes;
+#ifdef PSSC_TESTING
 		state->force_collisions = false;
+#endif
 		state->entries = 0;
 		state->dealloc = 0;
 		state->reclaimed_entries = 0;
@@ -491,10 +506,12 @@ store_shmem_startup(void)
 						   (uint64) pssc_bucket_for_time(state->stats_reset, state->epoch,
 														 state->interval_us));
 		pg_atomic_init_u64(&state->bucket_advances, 0);
+#ifdef PSSC_TESTING
 		pg_atomic_init_u32(&state->clock_debug, 0);
 		SpinLockInit(&state->clock_mutex);
 		state->clock_mode = PSSC_CLOCK_REAL;
 		state->clock_value = 0;
+#endif
 		pg_atomic_init_u64(&state->invalid_tags, 0);
 		pg_atomic_init_u64(&state->dropped_tags, 0);
 		pg_atomic_init_u64(&state->regex_compile_failures, 0);
@@ -546,6 +563,7 @@ pssc_store_init(void)
 static TimestampTz
 store_now(void)
 {
+#ifdef PSSC_TESTING
 	PsscDebugClockMode mode;
 	int64		value;
 
@@ -561,6 +579,9 @@ store_now(void)
 		return (TimestampTz) value;
 	/* |value| <= PSSC_DEBUG_CLOCK_MAX_OFFSET, so this cannot overflow */
 	return GetCurrentTimestamp() + value;
+#else
+	return GetCurrentTimestamp();
+#endif
 }
 
 static inline int64
@@ -805,10 +826,14 @@ evict_buffer(size_t cap, bool *transient)
 {
 	Size		bytes = (Size) cap * sizeof(PsscEvictCandidate);
 	PsscEvictCandidate *buf;
-
+#ifdef PSSC_TESTING
 	bool		fail = debug_fail_next_eviction_alloc;
 
 	debug_fail_next_eviction_alloc = false;
+#else
+	const bool	fail = false;
+#endif
+
 	*transient = false;
 	if (fail && evict_buf != NULL)
 	{
@@ -1061,9 +1086,11 @@ add_diagnostics_locked(PsscTagsetStats *stats, uint64 utility_missing_queryid)
 	Assert(LWLockHeldByMe(store_state->lock));
 	if (stats->invalid_tags)
 		pg_atomic_fetch_add_u64(&store_state->invalid_tags, stats->invalid_tags);
+#ifdef PSSC_TESTING
 	/* testing aid: a stall between two adds, which a reset must not split */
 	if (unlikely(flush_test_hook != NULL))
 		flush_test_hook(flush_test_hook_arg);
+#endif
 	if (stats->dropped_tags)
 		pg_atomic_fetch_add_u64(&store_state->dropped_tags, stats->dropped_tags);
 	if (stats->heuristic_scans)
@@ -1139,8 +1166,10 @@ record_impl(const PsscKey *key, int64 bucket_id, double elapsed_ms,
 	/* hashing happens before any lock; the collision mode is applied under it */
 	normal = key_hash_normal(key);
 
+#ifdef PSSC_TESTING
 	if (unlikely(record_test_hook != NULL))
 		record_test_hook(record_test_hook_arg);
+#endif
 
 	/*
 	 * §5.2: once the lock is held (a wait for it is a stall too), re-read
@@ -1349,7 +1378,9 @@ read_counters_locked(PsscStoreCounters *c)
 	c->reclaimed_entries = store_state->reclaimed_entries;
 	c->evicted_entries = store_state->evicted_entries;
 	c->stats_reset = store_state->stats_reset;
+#ifdef PSSC_TESTING
 	c->force_collisions = store_state->force_collisions;
+#endif
 	c->max_entries = store_state->max_entries;
 	c->invalid_tags = (int64) pg_atomic_read_u64(&store_state->invalid_tags);
 	c->dropped_tags = (int64) pg_atomic_read_u64(&store_state->dropped_tags);
@@ -1479,8 +1510,10 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 					(oldest == PSSC_BUCKET_NONE || ids[i] < oldest))
 					oldest = ids[i];
 
+#ifdef PSSC_TESTING
 			if (unlikely(info_scan_test_hook != NULL))
 				info_scan_test_hook(info_scan_test_hook_arg);
+#endif
 
 			/* on WIN32, this also dispatches queued signals */
 			if (unlikely(INTERRUPTS_PENDING_CONDITION()) && can_interrupt &&
@@ -1548,6 +1581,7 @@ pssc_store_count_utility_missing_queryid(PsscTagsetStats *pending)
 	LWLockRelease(store_state->lock);
 }
 
+#ifdef PSSC_TESTING
 void
 pssc_store_debug_force_collisions(bool on)
 {
@@ -1621,6 +1655,7 @@ pssc_store_set_info_scan_test_hook(PsscStoreRecordTestHook hook, void *arg)
 	info_scan_test_hook = hook;
 	info_scan_test_hook_arg = arg;
 }
+#endif							/* PSSC_TESTING */
 
 
 /* ------------------------------------------------------- bucket state */
@@ -1636,10 +1671,12 @@ pssc_store_get_buckets(PsscStoreBuckets *b)
 	b->interval_us = store_state->interval_us;
 	b->bucket_count = store_state->bucket_count;
 
+#ifdef PSSC_TESTING
 	SpinLockAcquire(&store_state->clock_mutex);
 	b->clock_mode = store_state->clock_mode;
 	b->clock_value = store_state->clock_value;
 	SpinLockRelease(&store_state->clock_mutex);
+#endif
 
 	/* a diagnostic snapshot: unlike readers, it does not advance anything */
 	b->now = store_now();
@@ -1764,6 +1801,8 @@ pssc_store_check_invariants(void)
 
 /* ------------------------------------------------------- debug clock */
 
+#ifdef PSSC_TESTING
+
 static void
 check_clock_value(PsscDebugClockMode mode, int64 value)
 {
@@ -1831,6 +1870,7 @@ pssc_store_debug_advance_clock(int64 usec)
 			(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
 			 errmsg("pg_stat_statement_context debug clock value out of range")));
 }
+#endif							/* PSSC_TESTING */
 
 /* -------------------------------------------------------- persistence */
 
@@ -2105,7 +2145,8 @@ load_read(FILE *file, void *buf, size_t len, pg_crc32c *crc)
 /*
  * Reads one record with its tags and slots, and checks what a well-formed
  * entry satisfies (src/counters.h's ring invariants against the saved
- * watermark, a tag set "k\0v\0..." that fits the saved max_tagset_bytes).
+ * watermark, a tag set "k\0v\0..." that fits the saved max_tagset_bytes,
+ * and a tags_hash recomputed from those tags).
  */
 static PsscLoadStatus
 load_record(FILE *file, const PsscDumpHeader *hdr, PsscDumpRecord *rec,
@@ -2130,6 +2171,9 @@ load_record(FILE *file, const PsscDumpHeader *hdr, PsscDumpRecord *rec,
 	while (off < rec->tags_len && pssc_tagset_next(tags, rec->tags_len, &off, &tag))
 		;
 	if (off != rec->tags_len)
+		return LOAD_INVALID;
+	/* defense in depth: the key's hash must be the one its tags give */
+	if (pssc_tagset_hash(tags, rec->tags_len) != rec->tags_hash)
 		return LOAD_INVALID;
 	if (pssc_ring_check(slots, hdr->bucket_count, rec->last_bucket,
 						hdr->current_bucket, &bad) != NULL)

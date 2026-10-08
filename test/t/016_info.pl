@@ -37,6 +37,8 @@ use PsscTest;
 use IPC::Run;
 use Time::HiRes qw(usleep time);
 
+require_testing_build();
+
 my $P = 'pg_stat_statement_context';
 
 my $node = PostgreSQL::Test::Cluster->new('info');

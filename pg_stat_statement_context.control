@@ -1,5 +1,5 @@
 # pg_stat_statement_context extension
-comment = 'per-tag statement statistics from SQL comments'
+comment = 'per-tag statement statistics from SQL comments (PostgreSQL 14-18)'
 default_version = '1.0'
 module_pathname = '$libdir/pg_stat_statement_context'
 relocatable = true

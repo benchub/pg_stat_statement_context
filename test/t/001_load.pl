@@ -28,7 +28,8 @@ is($pre->safe_psql('postgres', $qid_sql), 't',
 # PSSC_EXT_VERSION), so pg_get_loaded_modules() identifies it.
 SKIP:
 {
-	skip 'pg_get_loaded_modules() is PostgreSQL 18+', 1 if $pre->pg_version < 18;
+	skip 'pg_get_loaded_modules() is PostgreSQL 18+', 1
+	  if $pre->safe_psql('postgres', 'SHOW server_version_num') < 180000;
 	is( $pre->safe_psql('postgres',
 			q{SELECT string_agg(coalesce(module_name, '?') || '|' || coalesce(version, '?'), ',')
 			  FROM pg_get_loaded_modules()

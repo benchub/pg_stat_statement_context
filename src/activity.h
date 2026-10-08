@@ -25,32 +25,33 @@
 #ifndef PSSC_ACTIVITY_H
 #define PSSC_ACTIVITY_H
 
+#include "export.h"
 #include "context.h"
 
 /* Installs the shared memory request and startup hooks (from _PG_init). */
 extern void pssc_activity_init(void);
 
 /* Whether the slots exist (the library was preloaded). */
-extern PGDLLEXPORT bool pssc_activity_available(void);
+extern PSSC_TEST_API bool pssc_activity_available(void);
 
 /*
  * Publish frame as this backend's active top-level statement, as the
  * current user (GetUserId(): the role it executes as, not the frame's).
  * Returns the publication's sequence number (never 0).
  */
-extern PGDLLEXPORT uint64 pssc_activity_publish(const PsscFrame *frame);
+extern PSSC_TEST_API uint64 pssc_activity_publish(const PsscFrame *frame);
 
 /*
  * Mark the row active again if it is still publication seq (0: never);
  * returns whether it did.
  */
-extern PGDLLEXPORT bool pssc_activity_resume(uint64 seq);
+extern PSSC_TEST_API bool pssc_activity_resume(uint64 seq);
 
 /* Mark the published statement as ended (no-op if nothing is published). */
-extern PGDLLEXPORT void pssc_activity_set_idle(void);
+extern PSSC_TEST_API void pssc_activity_set_idle(void);
 
 /* Remove this backend's row (no-op if nothing is published). */
-extern PGDLLEXPORT void pssc_activity_clear(void);
+extern PSSC_TEST_API void pssc_activity_clear(void);
 
 /* A consistent copy of one slot (pssc_activity_read()). */
 typedef struct PsscActivityRow
@@ -66,13 +67,13 @@ typedef struct PsscActivityRow
 } PsscActivityRow;
 
 /* Number of slots, and the tags buffer size a reader needs. */
-extern PGDLLEXPORT int pssc_activity_nslots(void);
-extern PGDLLEXPORT Size pssc_activity_tags_max(void);
+extern PSSC_TEST_API int pssc_activity_nslots(void);
+extern PSSC_TEST_API Size pssc_activity_tags_max(void);
 
 /*
  * Copies slot i into *row (row->tags must point to pssc_activity_tags_max()
  * bytes), retrying while its backend is writing it.
  */
-extern PGDLLEXPORT void pssc_activity_read(int i, PsscActivityRow *row);
+extern PSSC_TEST_API void pssc_activity_read(int i, PsscActivityRow *row);
 
 #endif							/* PSSC_ACTIVITY_H */

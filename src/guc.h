@@ -24,6 +24,8 @@
 #ifndef PSSC_GUC_H
 #define PSSC_GUC_H
 
+#include "export.h"
+
 /* GUC prefix (reserved once all GUCs are defined). */
 #define PSSC_GUC_PREFIX "pg_stat_statement_context"
 
@@ -60,37 +62,38 @@ typedef enum PsscUntagged
 } PsscUntagged;
 
 /*
- * Variables and accessors are PGDLLEXPORT so the TEST-ONLY module
- * test/modules/pssc_guc_test can reach them through load_external_function.
+ * Variables and accessors are PSSC_TEST_API (export.h) so the TEST-ONLY
+ * module test/modules/pssc_guc_test can reach them through
+ * load_external_function in the testing build.
  */
 
 /* superuser (PGC_SUSET) */
-extern PGDLLEXPORT bool pssc_enabled;
-extern PGDLLEXPORT int pssc_track;			/* PsscTrackLevel */
-extern PGDLLEXPORT bool pssc_track_utility;
-extern PGDLLEXPORT int pssc_nested_tags;	/* PsscNestedTags */
+extern PSSC_TEST_API bool pssc_enabled;
+extern PSSC_TEST_API int pssc_track;			/* PsscTrackLevel */
+extern PSSC_TEST_API bool pssc_track_utility;
+extern PSSC_TEST_API int pssc_nested_tags;	/* PsscNestedTags */
 
 /* postmaster (PGC_POSTMASTER): fixed after startup */
-extern PGDLLEXPORT int pssc_max_entries;
-extern PGDLLEXPORT int pssc_bucket_count;
-extern PGDLLEXPORT int pssc_bucket_interval;	/* seconds */
-extern PGDLLEXPORT int pssc_max_tags;
-extern PGDLLEXPORT int pssc_max_tag_value_len; /* bytes */
-extern PGDLLEXPORT int pssc_max_tagset_bytes;
-extern PGDLLEXPORT bool pssc_reclaim_worker;
-extern PGDLLEXPORT char *pssc_exemplar_keys;	/* raw text; use pssc_guc_exemplar_keys() */
-extern PGDLLEXPORT int pssc_exemplar_memory;	/* kB */
+extern PSSC_TEST_API int pssc_max_entries;
+extern PSSC_TEST_API int pssc_bucket_count;
+extern PSSC_TEST_API int pssc_bucket_interval;	/* seconds */
+extern PSSC_TEST_API int pssc_max_tags;
+extern PSSC_TEST_API int pssc_max_tag_value_len; /* bytes */
+extern PSSC_TEST_API int pssc_max_tagset_bytes;
+extern PSSC_TEST_API bool pssc_reclaim_worker;
+extern PSSC_TEST_API char *pssc_exemplar_keys;	/* raw text; use pssc_guc_exemplar_keys() */
+extern PSSC_TEST_API int pssc_exemplar_memory;	/* kB */
 
 /* sighup (PGC_SIGHUP) */
-extern PGDLLEXPORT int pssc_scan_window;	/* bytes */
-extern PGDLLEXPORT int pssc_reclaim_worker_interval;	/* ms */
-extern PGDLLEXPORT bool pssc_save;
-extern PGDLLEXPORT char *pssc_extractors;	/* raw DSL text; use pssc_guc_extractors() */
-extern PGDLLEXPORT char *pssc_tags;			/* raw text; use pssc_guc_tags() */
-extern PGDLLEXPORT char *pssc_exclude_tags; /* raw text; use pssc_guc_exclude_tags() */
-extern PGDLLEXPORT int pssc_untagged;		/* PsscUntagged */
-extern PGDLLEXPORT char *pssc_normalize;	/* raw text; use pssc_guc_normalize() */
-extern PGDLLEXPORT char *pssc_tags_override;	/* raw text; use pssc_guc_override() */
+extern PSSC_TEST_API int pssc_scan_window;	/* bytes */
+extern PSSC_TEST_API int pssc_reclaim_worker_interval;	/* ms */
+extern PSSC_TEST_API bool pssc_save;
+extern PSSC_TEST_API char *pssc_extractors;	/* raw DSL text; use pssc_guc_extractors() */
+extern PSSC_TEST_API char *pssc_tags;			/* raw text; use pssc_guc_tags() */
+extern PSSC_TEST_API char *pssc_exclude_tags; /* raw text; use pssc_guc_exclude_tags() */
+extern PSSC_TEST_API int pssc_untagged;		/* PsscUntagged */
+extern PSSC_TEST_API char *pssc_normalize;	/* raw text; use pssc_guc_normalize() */
+extern PSSC_TEST_API char *pssc_tags_override;	/* raw text; use pssc_guc_override() */
 
 /*
  * Parsed tag key list (tags / exclude_tags). Keys are kept in list order
@@ -103,27 +106,27 @@ typedef struct PsscTagList PsscTagList;
 
 
 /* True for tags = '*' (keep every tag; exclude_tags then applies). */
-extern PGDLLEXPORT bool pssc_tag_list_match_all(const PsscTagList *list);
+extern PSSC_TEST_API bool pssc_tag_list_match_all(const PsscTagList *list);
 
 /* Number of keys (0 for '*' and for an empty list). */
-extern PGDLLEXPORT int pssc_tag_list_count(const PsscTagList *list);
+extern PSSC_TEST_API int pssc_tag_list_count(const PsscTagList *list);
 
 /* Key i (0-based, < count); its length in bytes is stored in *len if non-NULL. */
-extern PGDLLEXPORT const char *pssc_tag_list_key(const PsscTagList *list, int i,
+extern PSSC_TEST_API const char *pssc_tag_list_key(const PsscTagList *list, int i,
 												 int *len);
 
 /*
  * Position of key[0..len) in the list, or -1 if absent. Exact byte
  * comparison; does not consider match_all.
  */
-extern PGDLLEXPORT int pssc_tag_list_find(const PsscTagList *list,
+extern PSSC_TEST_API int pssc_tag_list_find(const PsscTagList *list,
 										  const char *key, int len);
 
 /* Current parsed tags / exclude_tags. Never NULL once the GUCs are defined. */
-extern PGDLLEXPORT const PsscTagList *pssc_guc_tags(void);
-extern PGDLLEXPORT const PsscTagList *pssc_guc_exclude_tags(void);
+extern PSSC_TEST_API const PsscTagList *pssc_guc_tags(void);
+extern PSSC_TEST_API const PsscTagList *pssc_guc_exclude_tags(void);
 /* Parsed exemplar_keys (at most PSSC_MAX_EXEMPLAR_KEYS keys). */
-extern PGDLLEXPORT const PsscTagList *pssc_guc_exemplar_keys(void);
+extern PSSC_TEST_API const PsscTagList *pssc_guc_exemplar_keys(void);
 
 /*
  * Parsed pg_stat_statement_context.extractors (DESIGN.md §4.2).
@@ -225,7 +228,7 @@ pssc_extractor_renames(const PsscExtractorList *list, const PsscExtractor *e)
 }
 
 /* Current parsed extractors. Never NULL once the GUCs are defined. */
-extern PGDLLEXPORT const PsscExtractorList *pssc_guc_extractors(void);
+extern PSSC_TEST_API const PsscExtractorList *pssc_guc_extractors(void);
 
 /*
  * Parsed pg_stat_statement_context.normalize (DESIGN.md §6.11 step 6):
@@ -261,20 +264,20 @@ pssc_normalize_str(const PsscNormalizeList *list, PsscBlobStr s)
 }
 
 /* Current parsed normalize rules. Never NULL once the GUCs are defined. */
-extern PGDLLEXPORT const PsscNormalizeList *pssc_guc_normalize(void);
+extern PSSC_TEST_API const PsscNormalizeList *pssc_guc_normalize(void);
 
 /*
  * Backend-local config generation: bumped whenever the effective value of
  * extractors, tags, exclude_tags or normalize changes in this process.
  */
-extern PGDLLEXPORT uint64 pssc_guc_config_generation(void);
+extern PSSC_TEST_API uint64 pssc_guc_config_generation(void);
 
 /*
  * Backend-local regex generation: bumped only when extractors or normalize
  * (the settings with compiled regexes) change. tags and exclude_tags can
  * change per function call (SET clause), which must not recompile them.
  */
-extern PGDLLEXPORT uint64 pssc_guc_regex_generation(void);
+extern PSSC_TEST_API uint64 pssc_guc_regex_generation(void);
 
 /*
  * Parsed pg_stat_statement_context.tags_override (backlog item
@@ -304,14 +307,14 @@ pssc_override_str(const PsscOverrideList *list, PsscBlobStr s)
 }
 
 /* Current parsed tags_override; NULL when it holds no pair. */
-extern PGDLLEXPORT const PsscOverrideList *pssc_guc_override(void);
+extern PSSC_TEST_API const PsscOverrideList *pssc_guc_override(void);
 
 /*
  * Backend-local generation of tags_override: bumped whenever its parsed
  * value changes (SET, SET LOCAL, RESET, the end of a transaction or of a
  * function's SET clause that restores another value).
  */
-extern PGDLLEXPORT uint64 pssc_guc_override_generation(void);
+extern PSSC_TEST_API uint64 pssc_guc_override_generation(void);
 
 /*
  * Size in bytes of a PsscTagList blob holding nkeys keys whose bytes,
@@ -320,7 +323,7 @@ extern PGDLLEXPORT uint64 pssc_guc_override_generation(void);
  * PSSC_MAX_TAG_LIST_ENTRIES or keybytes exceeds nkeys * (PSSC_MAX_KEY_LEN + 1).
  * Exported for the TEST-ONLY module's boundary checks.
  */
-extern PGDLLEXPORT bool pssc_tag_list_blob_size(size_t nkeys, size_t keybytes,
+extern PSSC_TEST_API bool pssc_tag_list_blob_size(size_t nkeys, size_t keybytes,
 											   size_t *size);
 
 /* Define all GUCs and reserve the prefix. Call from _PG_init while preloading. */

@@ -28,6 +28,8 @@
 #include <stdbool.h>
 #endif
 
+#include "export.h"
+
 /* Label of a slot that holds no bucket (never written, or reset). */
 #define PSSC_BUCKET_NONE	INT64_MIN
 
@@ -77,12 +79,12 @@ extern bool pssc_slot_roll(PsscSlot *slot, int64 bucket_id);
  *
  * pssc_bucket_start: epoch + bucket_id * interval (the bucket's start).
  */
-extern PGDLLEXPORT int64 pssc_bucket_floor_div(int64 a, int64 b);
-extern PGDLLEXPORT int64 pssc_bucket_for_time(int64 now_us, int64 epoch_us, int64 interval_us);
-extern PGDLLEXPORT int pssc_bucket_slot_index(int64 bucket_id, int bucket_count);
-extern PGDLLEXPORT bool pssc_bucket_is_live(int64 bucket_id, int64 current, int bucket_count);
-extern PGDLLEXPORT bool pssc_bucket_entry_is_dead(int64 last_bucket, int64 current, int bucket_count);
-extern PGDLLEXPORT int64 pssc_bucket_start(int64 bucket_id, int64 epoch_us, int64 interval_us);
+extern PSSC_TEST_API int64 pssc_bucket_floor_div(int64 a, int64 b);
+extern PSSC_TEST_API int64 pssc_bucket_for_time(int64 now_us, int64 epoch_us, int64 interval_us);
+extern PSSC_TEST_API int pssc_bucket_slot_index(int64 bucket_id, int bucket_count);
+extern PSSC_TEST_API bool pssc_bucket_is_live(int64 bucket_id, int64 current, int bucket_count);
+extern PSSC_TEST_API bool pssc_bucket_entry_is_dead(int64 last_bucket, int64 current, int bucket_count);
+extern PSSC_TEST_API int64 pssc_bucket_start(int64 bucket_id, int64 epoch_us, int64 interval_us);
 
 /*
  * Ring invariants of one entry (§5.2), given its ring, its last_bucket and
@@ -94,7 +96,7 @@ extern PGDLLEXPORT int64 pssc_bucket_start(int64 bucket_id, int64 epoch_us, int6
  * description of the first violation, with *bad_slot set to the slot index
  * (-1 if the violation is not about one slot). Pure: safe under a spinlock.
  */
-extern PGDLLEXPORT const char *pssc_ring_check(const PsscSlot *slots, int bucket_count,
+extern PSSC_TEST_API const char *pssc_ring_check(const PsscSlot *slots, int bucket_count,
 											   int64 last_bucket, int64 current_bucket,
 											   int *bad_slot);
 
@@ -172,15 +174,15 @@ typedef struct PsscEvictSelect
 	uint64		next_seq;
 } PsscEvictSelect;
 
-extern PGDLLEXPORT int64 pssc_evict_target(int64 max_entries);
-extern PGDLLEXPORT int64 pssc_evict_live_count(int64 target, int64 dead_freed, int64 nlive);
-extern PGDLLEXPORT int pssc_evict_cmp(const void *a, const void *b);
-extern PGDLLEXPORT void pssc_evict_sort(PsscEvictCandidate *cands, size_t n);
-extern PGDLLEXPORT void pssc_evict_select_init(PsscEvictSelect *sel,
+extern PSSC_TEST_API int64 pssc_evict_target(int64 max_entries);
+extern PSSC_TEST_API int64 pssc_evict_live_count(int64 target, int64 dead_freed, int64 nlive);
+extern PSSC_TEST_API int pssc_evict_cmp(const void *a, const void *b);
+extern PSSC_TEST_API void pssc_evict_sort(PsscEvictCandidate *cands, size_t n);
+extern PSSC_TEST_API void pssc_evict_select_init(PsscEvictSelect *sel,
 											   PsscEvictCandidate *buf, size_t cap);
-extern PGDLLEXPORT void pssc_evict_select_push(PsscEvictSelect *sel, int64 last_bucket,
+extern PSSC_TEST_API void pssc_evict_select_push(PsscEvictSelect *sel, int64 last_bucket,
 											   double usage, void *entry, uint64 seq);
-extern PGDLLEXPORT size_t pssc_evict_select_finish(PsscEvictSelect *sel, size_t k);
+extern PSSC_TEST_API size_t pssc_evict_select_finish(PsscEvictSelect *sel, size_t k);
 
 static inline void
 pssc_evict_select_offer(PsscEvictSelect *sel, int64 last_bucket, double usage,

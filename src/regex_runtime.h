@@ -32,6 +32,7 @@
 #ifndef PSSC_REGEX_RUNTIME_H
 #define PSSC_REGEX_RUNTIME_H
 
+#include "export.h"
 #include "mb/pg_wchar.h"
 #include "regex/regex.h"
 #include "utils/guc.h"
@@ -49,7 +50,7 @@ extern void pssc_regex_init(void);
 extern void pssc_regex_release_stale(void);
 
 /* The regex extractor hook (PsscRegexExtractFn); arg is unused. */
-extern PGDLLEXPORT void pssc_regex_extract(void *arg, int index,
+extern PSSC_TEST_API void pssc_regex_extract(void *arg, int index,
 										   const struct PsscExtractorList *list,
 										   const char *body, size_t len,
 										   const PsscPairOut *out,
@@ -72,7 +73,7 @@ extern PGDLLEXPORT void pssc_regex_extract(void *arg, int index,
  * (engine error, out of memory), else PSSC_NORMALIZE_DONE. Interrupts
  * propagate as ERROR, as for the regex extractor.
  */
-extern PGDLLEXPORT PsscNormalizeResult pssc_regex_normalize(const struct PsscNormalizeList *list,
+extern PSSC_TEST_API PsscNormalizeResult pssc_regex_normalize(const struct PsscNormalizeList *list,
 															const char *key, size_t klen,
 															const char *val, size_t vlen,
 															size_t limit,
@@ -90,7 +91,8 @@ extern PGDLLEXPORT PsscNormalizeResult pssc_regex_normalize(const struct PsscNor
 extern uint64 pssc_regex_transient_failures(void);
 
 /*
- * TEST-ONLY fault injection (test/modules/pssc_extract_test). When set, it
+ * TEST-ONLY fault injection (test/modules/pssc_extract_test; the hooks
+ * exist only in the testing build, the phases in both). When set, it
  * is called right before creating the memory context of a pattern to
  * compile (phase PSSC_REGEX_TEST_CONTEXT), before each pg_regcomp
  * (PSSC_REGEX_TEST_COMPILE) and before each pg_regexec (PSSC_REGEX_TEST_EXEC)
@@ -115,8 +117,9 @@ extern uint64 pssc_regex_transient_failures(void);
  * that allocates (and so can fail); it may throw, as that step can.
  */
 #define PSSC_REGEX_TEST_COMPILE_CATCH	7
+#ifdef PSSC_TESTING
 typedef int (*PsscRegexTestHook) (int phase, int index);
-extern PGDLLEXPORT PsscRegexTestHook pssc_regex_test_hook;
+extern PSSC_TEST_API PsscRegexTestHook pssc_regex_test_hook;
 
 /*
  * TEST-ONLY: for the *COMPILE and CHECK phases, called with the engine's
@@ -125,7 +128,8 @@ extern PGDLLEXPORT PsscRegexTestHook pssc_regex_test_hook;
  * interrupted from one that completed.
  */
 typedef void (*PsscRegexTestEngineHook) (int phase, int index, int rc);
-extern PGDLLEXPORT PsscRegexTestEngineHook pssc_regex_test_engine_hook;
+extern PSSC_TEST_API PsscRegexTestEngineHook pssc_regex_test_engine_hook;
+#endif
 
 /*
  * Compile time limit per pattern, in milliseconds (backlog
@@ -139,15 +143,17 @@ extern PGDLLEXPORT PsscRegexTestEngineHook pssc_regex_test_engine_hook;
  */
 #define PSSC_REGEX_COMPILE_LIMIT_MS 100
 #define PSSC_REGEX_COMPILE_ATTEMPTS 3
-extern PGDLLEXPORT int pssc_regex_compile_limit_ms;
+extern PSSC_TEST_API int pssc_regex_compile_limit_ms;
 
+#ifdef PSSC_TESTING
 /*
  * TEST-ONLY (test/modules/pssc_extract_test): while the compile time limit
  * of a client backend's compile attempt is armed (e.g. from the test hook's
  * *COMPILE or CHECK phase), makes it expire ms from now instead, so that the
  * engine itself is interrupted mid-compile. No-op when not armed.
  */
-extern PGDLLEXPORT void pssc_regex_test_expire_in(int ms);
+extern PSSC_TEST_API void pssc_regex_test_expire_in(int ms);
+#endif
 
 /* pssc_regex_compile() results besides the engine's return codes. */
 #define PSSC_REGEX_COMPILE_TOO_SLOW	(-1)
@@ -198,7 +204,8 @@ extern int	pssc_regex_check_compile(MemoryContext cxt, regex_t *re,
 /* Called by the ProcessUtility hook around ALTER SYSTEM. */
 extern void pssc_regex_note_alter_system(bool running);
 
-/* Backend-local bookkeeping, for tests. */
+#ifdef PSSC_TESTING
+/* Backend-local bookkeeping, for tests (testing build only). */
 typedef struct PsscRegexDebugStats
 {
 	uint64		compiles;		/* successful pg_regcomp calls (extractors and rules) */
@@ -207,6 +214,7 @@ typedef struct PsscRegexDebugStats
 	int			failed;			/* extractors and rules disabled by compile failure */
 } PsscRegexDebugStats;
 
-extern PGDLLEXPORT void pssc_regex_debug_stats(PsscRegexDebugStats *stats);
+extern PSSC_TEST_API void pssc_regex_debug_stats(PsscRegexDebugStats *stats);
+#endif
 
 #endif							/* PSSC_REGEX_RUNTIME_H */

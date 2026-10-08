@@ -21,8 +21,11 @@ for major in "$@"; do
 	cd "$work/src"
 	make clean PG_CONFIG="$pg_config" >/dev/null
 	# with_llvm=no: no JIT bitcode, so the package needs no clang toolchain.
-	make PG_CONFIG="$pg_config" with_llvm=no
-	make install PG_CONFIG="$pg_config" with_llvm=no DESTDIR="$stage"
+	# Packages are release builds (no PSSC_TESTING, DESIGN.md §9): no test
+	# hooks, and only the symbols of test/release-exports.txt exported.
+	make PG_CONFIG="$pg_config" with_llvm=no PSSC_TESTING=
+	scripts/check-release-exports.sh --lib pg_stat_statement_context.so
+	make install PG_CONFIG="$pg_config" with_llvm=no PSSC_TESTING= DESTDIR="$stage"
 
 	docdir="$stage/usr/share/doc/$pkg"
 	mkdir -p "$docdir" "$stage/DEBIAN"

@@ -9,7 +9,8 @@ EXTENSION = pssc_store_test
 DATA = pssc_store_test--1.0.sql
 PGFILEDESC = "pssc_store_test - test-only driver for the pg_stat_statement_context shared store"
 
-PG_CPPFLAGS = -I$(srcdir)/../../../src
+# Built against the testing variant of the library (make PSSC_TESTING=1).
+PG_CPPFLAGS = -I$(srcdir)/../../../src -DPSSC_TESTING
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

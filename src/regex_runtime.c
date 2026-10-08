@@ -81,9 +81,22 @@ typedef struct Slot
 	regex_t		re;
 } Slot;
 
+int			pssc_regex_compile_limit_ms = PSSC_REGEX_COMPILE_LIMIT_MS;
+
+#ifdef PSSC_TESTING
 PsscRegexTestHook pssc_regex_test_hook = NULL;
 PsscRegexTestEngineHook pssc_regex_test_engine_hook = NULL;
-int			pssc_regex_compile_limit_ms = PSSC_REGEX_COMPILE_LIMIT_MS;
+static PsscRegexDebugStats debug_stats;
+
+/* The fault-injection hook's result (regex_runtime.h); REG_OKAY without it. */
+#define TEST_HOOK(phase, index) \
+	(pssc_regex_test_hook != NULL ? pssc_regex_test_hook((phase), (index)) : REG_OKAY)
+#define DEBUG_STAT_ADD(field, n) (debug_stats.field += (n))
+#else
+/* The release build has no test hooks (export.h): the engine always runs. */
+#define TEST_HOOK(phase, index) REG_OKAY
+#define DEBUG_STAT_ADD(field, n) ((void) 0)
+#endif
 
 static Slot slots[PSSC_MAX_EXTRACTORS];
 static Slot norm_slots[PSSC_MAX_NORMALIZE_RULES];
@@ -91,7 +104,6 @@ static uint64 slots_generation;
 static bool slots_valid = false;
 static MemoryContext regex_cxt = NULL;	/* parent of the per-regex contexts */
 static MemoryContext exec_cxt = NULL;	/* per-call scratch, reset after use */
-static PsscRegexDebugStats debug_stats;
 
 /* See pssc_regex_transient_failures(). */
 static uint64 transient_failures = 0;
@@ -102,11 +114,11 @@ release_slot(Slot *slot)
 	if (slot->state == SLOT_READY)
 	{
 		pssc_regfree(&slot->re);
-		debug_stats.frees++;
-		debug_stats.live--;
+		DEBUG_STAT_ADD(frees, 1);
+		DEBUG_STAT_ADD(live, -1);
 	}
 	else if (slot->state == SLOT_FAILED)
-		debug_stats.failed--;
+		DEBUG_STAT_ADD(failed, -1);
 	if (slot->cxt != NULL)
 		MemoryContextDelete(slot->cxt);
 	slot->cxt = NULL;
@@ -347,8 +359,8 @@ copy_error_guarded(MemoryContext cxt, int test_phase, int test_index)
 
 	PG_TRY();
 	{
-		if (test_phase >= 0 && pssc_regex_test_hook != NULL)
-			(void) pssc_regex_test_hook(PSSC_REGEX_TEST_COMPILE_CATCH, test_index);
+		if (test_phase >= 0)
+			(void) TEST_HOOK(PSSC_REGEX_TEST_COMPILE_CATCH, test_index);
 		edata = CopyErrorData();
 	}
 	PG_CATCH();
@@ -360,17 +372,21 @@ copy_error_guarded(MemoryContext cxt, int test_phase, int test_index)
 	return edata;
 }
 
+#ifdef PSSC_TESTING
 void
 pssc_regex_test_expire_in(int ms)
 {
 	if (deadline_armed)
 		enable_timeout_after(compile_timeout_id, ms);
 }
+#endif
 #else
+#ifdef PSSC_TESTING
 void
 pssc_regex_test_expire_in(int ms)
 {
 }
+#endif
 
 static bool
 compile_deadline_arm(int limit_ms)
@@ -389,13 +405,15 @@ run_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat, size_t len,
 {
 	int			rc = REG_OKAY;
 
-	if (test_phase >= 0 && pssc_regex_test_hook != NULL)
-		rc = pssc_regex_test_hook(test_phase, test_index);
+	if (test_phase >= 0)
+		rc = TEST_HOOK(test_phase, test_index);
 	if (rc == REG_OKAY)
 	{
 		rc = pssc_regcomp(cxt, re, pat, len, REG_ADVANCED, C_COLLATION_OID);
+#ifdef PSSC_TESTING
 		if (test_phase >= 0 && pssc_regex_test_engine_hook != NULL)
 			pssc_regex_test_engine_hook(test_phase, test_index, rc);
+#endif
 	}
 	return rc;
 }
@@ -747,8 +765,7 @@ compile_slot(Slot *slot, int index, int ctx_phase, int comp_phase,
 	 */
 	PG_TRY();
 	{
-		if (pssc_regex_test_hook != NULL)
-			rc = pssc_regex_test_hook(ctx_phase, index);
+		rc = TEST_HOOK(ctx_phase, index);
 		if (rc == REG_OKAY)
 		{
 			wpat = MemoryContextAlloc(exec_cxt, sizeof(pg_wchar) * (patlen + 1));
@@ -780,8 +797,8 @@ compile_slot(Slot *slot, int index, int ctx_phase, int comp_phase,
 			!(slot->re.re_info & REG_UBACKREF))
 		{
 			slot->state = SLOT_READY;
-			debug_stats.compiles++;
-			debug_stats.live++;
+			DEBUG_STAT_ADD(compiles, 1);
+			DEBUG_STAT_ADD(live, 1);
 			return;
 		}
 		pssc_regfree(&slot->re);
@@ -799,7 +816,7 @@ compile_slot(Slot *slot, int index, int ctx_phase, int comp_phase,
 
 failed:
 	slot->state = SLOT_FAILED;
-	debug_stats.failed++;
+	DEBUG_STAT_ADD(failed, 1);
 	pssc_extract_note_regex_compile_failure();
 }
 
@@ -860,13 +877,11 @@ match_slot(Slot *slot, int index, const PsscExtractor *e,
 	start = 0;
 	while (start <= (size_t) wlen && nfound < nkeys)
 	{
-		int			rc = REG_OKAY;
+		int			rc = TEST_HOOK(PSSC_REGEX_TEST_EXEC, index);
 		size_t		g;
 		regoff_t	so;
 		regoff_t	eo;
 
-		if (pssc_regex_test_hook != NULL)
-			rc = pssc_regex_test_hook(PSSC_REGEX_TEST_EXEC, index);
 		if (rc == REG_OKAY)
 			rc = pg_regexec(&slot->re, w, (size_t) wlen, start, NULL,
 							nkeys + 1, pmatch, 0);
@@ -1032,12 +1047,10 @@ replace_slot(Slot *slot, int index, const PsscNormalizeRule *rule,
 
 	while (search_start <= (size_t) wlen && !b->full)
 	{
-		int			rc = REG_OKAY;
+		int			rc = TEST_HOOK(PSSC_REGEX_TEST_NORM_EXEC, index);
 		regoff_t	so;
 		regoff_t	eo;
 
-		if (pssc_regex_test_hook != NULL)
-			rc = pssc_regex_test_hook(PSSC_REGEX_TEST_NORM_EXEC, index);
 		if (rc == REG_OKAY)
 			rc = pg_regexec(&slot->re, w, (size_t) wlen, search_start, NULL,
 							nmatch, pmatch, 0);
@@ -1108,7 +1121,7 @@ compile_norm_slot(Slot *slot, int index, const PsscNormalizeRule *rule,
 						 (int) rule->replacement.len, true))
 	{
 		slot->state = SLOT_FAILED;
-		debug_stats.failed++;
+		DEBUG_STAT_ADD(failed, 1);
 		pssc_extract_note_regex_compile_failure();
 		return;
 	}
@@ -1194,11 +1207,13 @@ pssc_regex_normalize(const PsscNormalizeList *list,
 	return PSSC_NORMALIZE_DONE;
 }
 
+#ifdef PSSC_TESTING
 void
 pssc_regex_debug_stats(PsscRegexDebugStats *stats)
 {
 	*stats = debug_stats;
 }
+#endif
 
 uint64
 pssc_regex_transient_failures(void)

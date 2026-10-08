@@ -10,12 +10,18 @@
 #       (default /src, /build, /out, /var/lib/postgresql). As root, builds and
 #       servers run as the postgres user (gosu); otherwise as the caller.
 #   PSSC_TEST_MODE
-#       unset/pgdg/release  everything: unit tests, build, installcheck + TAP
+#       unset/pgdg/release  everything: unit tests, then the testing build
+#                 (make PSSC_TESTING=1, DESIGN.md §9) with the TEST-ONLY
+#                 modules: installcheck + every TAP test; then the release
+#                 build (plain make): its exported symbols against
+#                 test/release-exports.txt, installcheck + the TAP tests that
+#                 need no TEST-ONLY module or hook (the others skip)
 #       assert    as release, and checks the server has debug_assertions = on
-#       valgrind  runs the server under Valgrind with PostgreSQL's
-#                 valgrind.supp for the LOAD checks and the pg_regress suite;
-#                 TAP tests are skipped (they start their own clusters). Fails
-#                 on any Valgrind error.
+#       valgrind  runs the server (testing build) under Valgrind with
+#                 PostgreSQL's valgrind.supp for the LOAD checks and the
+#                 pg_regress suite; TAP tests and the release build are
+#                 skipped (they start their own clusters). Fails on any
+#                 Valgrind error.
 set -euo pipefail
 
 EXT=pg_stat_statement_context
@@ -100,6 +106,9 @@ step "version-guard check"
 scripts/check-version-guards.sh --self-test >/dev/null || fail "version-guard self-test"
 scripts/check-version-guards.sh || fail "version-guard check"
 
+step "upper version guard (src/compat.h rejects PostgreSQL 19+)"
+as_pg scripts/check-compat-guard.sh || fail "compat.h version-guard check"
+
 step "frozen SQL check"
 scripts/check-frozen-sql.sh --self-test >/dev/null || fail "frozen-sql self-test"
 scripts/check-frozen-sql.sh || fail "frozen-sql check"
@@ -107,10 +116,10 @@ scripts/check-frozen-sql.sh || fail "frozen-sql check"
 step "unit tests (src/scan.c lexer + statement scans, src/pairs.c parsers, src/tagset.c pipeline, src/counters.c slot + fuzz entry points, ASan/UBSan)"
 as_pg make unittest || fail "unit tests"
 
-step "make"
-as_pg make PG_CFLAGS="-Werror" || fail "make"
-step "make install"
-make install || fail "make install"
+step "make PSSC_TESTING=1 (testing build: TEST-ONLY hooks and exports)"
+as_pg make PSSC_TESTING=1 PG_CFLAGS="-Werror" || fail "make"
+step "make install PSSC_TESTING=1"
+make install PSSC_TESTING=1 || fail "make install"
 
 step "make install-test-modules (TEST-ONLY compat.h exerciser, GUC inspector, extract and store drivers, context hooks)"
 for m in test/modules/*/; do
@@ -187,7 +196,7 @@ echo "ok"
 
 if [ "$MODE" = valgrind ]; then
 	step "make installcheck (pg_regress suite, server under Valgrind; TAP skipped)"
-	as_pg make installcheck TAP_TESTS= || fail "make installcheck"
+	as_pg make installcheck PSSC_TESTING=1 TAP_TESTS= || fail "make installcheck"
 	pg_stop
 	valgrind_check "LOAD + pg_regress suite"
 	if grep -E "$CRASH_RE" "$WORK/preload.log"; then
@@ -199,7 +208,7 @@ else
 	tapdir="$(dirname "$(pg_config --pgxs)")/../../src/test/perl"
 	[ -f "$tapdir/PostgreSQL/Test/Cluster.pm" ] && [ -f "$tapdir/PostgreSQL/Test/Utils.pm" ] \
 		|| fail "TAP tests need PostgreSQL::Test::Cluster/Utils in $tapdir (PG 14.6+)"
-	step "make installcheck"
+	step "make installcheck (testing build)"
 	# Every harness server (PGDG images, docker/build-postgres.sh builds)
 	# installs pg_stat_statements: the TAP tests fail rather than skip
 	# their pgss parity checks if it is missing (test/perl/PsscTest.pm).
@@ -210,8 +219,31 @@ else
 		require_modules=$(cat /usr/local/share/pssc-test-modules)
 	fi
 	echo "modules the coexistence test requires: $require_modules"
+	# Likewise the tests that need the testing build must not skip here.
 	as_pg env PSSC_REQUIRE_PGSS=1 PSSC_REQUIRE_MODULES="$require_modules" \
-		make installcheck || fail "make installcheck"
+		PSSC_REQUIRE_TESTING_BUILD=1 \
+		make installcheck PSSC_TESTING=1 || fail "make installcheck"
 	pg_stop
+
+	step "release build: exported symbols (test/release-exports.txt)"
+	as_pg scripts/check-release-exports.sh --self-test || fail "release-exports self-test"
+	as_pg scripts/check-release-exports.sh || fail "release-exports check"
+
+	step "release build: make, make install"
+	as_pg make clean >/dev/null
+	as_pg make PG_CFLAGS="-Werror" || fail "make (release)"
+	make install || fail "make install (release)"
+	lib=$(ls "$BUILD/$EXT".so "$BUILD/$EXT".dylib 2>/dev/null | head -n1)
+	[ -n "$lib" ] || fail "no $EXT library in $BUILD"
+	as_pg scripts/check-release-exports.sh --lib "$lib" || fail "installed library is not a release build"
+
+	step "make installcheck (release build: pg_regress + TAP tests without TEST-ONLY modules)"
+	pg_start preload-release || fail "start with preload (release build)"
+	as_pg env PSSC_REQUIRE_PGSS=1 PSSC_REQUIRE_MODULES="$require_modules" \
+		make installcheck || fail "make installcheck (release build)"
+	pg_stop
+	if grep -E "$CRASH_RE" "$WORK/preload-release.log"; then
+		fail "crash in release-build server log"
+	fi
 fi
 step "ALL PASSED ($(pg_config --version), mode: $MODE)"

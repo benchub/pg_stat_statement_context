@@ -21,9 +21,9 @@
 #include "store.h"
 #include "utility.h"
 
-PG_MODULE_MAGIC;
+PSSC_MODULE_MAGIC;
 
-void		_PG_init(void);
+PGDLLEXPORT void _PG_init(void);
 
 /*
  * Module load callback.

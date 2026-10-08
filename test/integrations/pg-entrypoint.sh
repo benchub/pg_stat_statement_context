@@ -13,8 +13,9 @@ tar -C /src --exclude=./.git --exclude=./tmp --exclude=./fuzz \
 	--exclude='*.dSYM' --exclude=./results --exclude=./tmp_check \
 	--exclude=./test/unit -cf - . | tar -C /build -xf -
 make -C /build clean >/dev/null
-make -C /build -j2 >/dev/null
-make -C /build install >/dev/null
+# The testing build: pssc_store_test links against its exports (DESIGN.md §9).
+make -C /build -j2 PSSC_TESTING=1 >/dev/null
+make -C /build install PSSC_TESTING=1 >/dev/null
 # TEST-ONLY: its debug clock simulates a backward clock step.
 make -C /build/test/modules/pssc_store_test install >/dev/null
 

@@ -38,6 +38,7 @@
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
 
+#include "compat.h"
 #include "context.h"
 #include "extract.h"
 #include "guc.h"

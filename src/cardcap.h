@@ -39,6 +39,7 @@
 #ifndef PSSC_CARDCAP_H
 #define PSSC_CARDCAP_H
 
+#include "export.h"
 #include "tagset.h"
 
 /* GUC limits */
@@ -56,10 +57,10 @@ typedef enum PsscCapScope
 	PSSC_CAP_SCOPE_ROLE			/* per (role, database, key), as pgss entries */
 } PsscCapScope;
 
-extern PGDLLEXPORT int pssc_cardinality_cap;
-extern PGDLLEXPORT char *pssc_cardinality_cap_overrides;	/* raw text */
-extern PGDLLEXPORT int pssc_cardinality_cap_slots;
-extern PGDLLEXPORT int pssc_cardinality_cap_scope;	/* PsscCapScope */
+extern PSSC_TEST_API int pssc_cardinality_cap;
+extern PSSC_TEST_API char *pssc_cardinality_cap_overrides;	/* raw text */
+extern PSSC_TEST_API int pssc_cardinality_cap_slots;
+extern PSSC_TEST_API int pssc_cardinality_cap_scope;	/* PsscCapScope */
 
 /* Defines the four GUCs; called from pssc_guc_define(). */
 extern void pssc_cap_define_gucs(void);
@@ -78,19 +79,20 @@ extern void pssc_cap_init(void);
 extern PsscCapFn pssc_cap_hook(bool peek, Oid userid, Oid dbid);
 
 /* Empties every key's set of distinct values (_reset()). */
-extern PGDLLEXPORT void pssc_cap_reset(void);
+extern PSSC_TEST_API void pssc_cap_reset(void);
 
 /* Exact size requested for the shared table (_info().cap_shmem_bytes). */
-extern PGDLLEXPORT Size pssc_cap_shmem_bytes(void);
+extern PSSC_TEST_API Size pssc_cap_shmem_bytes(void);
 
+#ifdef PSSC_TESTING
 /*
  * TEST-ONLY (test/modules/pssc_store_test, 024_cardinality_caps.pl):
  * makes the next _reset() wrap the generation around, and installs a
  * one-shot hook that a wrapping _reset() calls in the middle of clearing
  * the table (after the value slots, before the key slots).
  */
-extern PGDLLEXPORT void pssc_cap_test_near_wrap(void);
-extern PGDLLEXPORT void pssc_cap_set_reset_test_hook(void (*fn) (void *),
+extern PSSC_TEST_API void pssc_cap_test_near_wrap(void);
+extern PSSC_TEST_API void pssc_cap_set_reset_test_hook(void (*fn) (void *),
 													 void *arg);
 
 /*
@@ -98,8 +100,9 @@ extern PGDLLEXPORT void pssc_cap_set_reset_test_hook(void (*fn) (void *),
  * scope of (userid, dbid), or -1 without the table.
  */
 /* The first value slot of (key, value) in the scope of (userid, dbid). */
-extern PGDLLEXPORT int32 pssc_cap_test_slot(const char *key, size_t klen,
+extern PSSC_TEST_API int32 pssc_cap_test_slot(const char *key, size_t klen,
 											const char *val, size_t vlen,
 											Oid userid, Oid dbid);
+#endif
 
 #endif							/* PSSC_CARDCAP_H */

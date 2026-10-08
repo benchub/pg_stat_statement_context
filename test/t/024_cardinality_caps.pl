@@ -25,6 +25,9 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
 use IPC::Run;
+use PsscTest;
+
+require_testing_build();
 
 my $P = 'pg_stat_statement_context';
 

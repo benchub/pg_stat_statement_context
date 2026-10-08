@@ -86,6 +86,7 @@
 #ifndef PSSC_STORE_H
 #define PSSC_STORE_H
 
+#include "export.h"
 #include "datatype/timestamp.h"
 
 #include "counters.h"
@@ -159,7 +160,9 @@ typedef struct PsscStoreCounters
 	Size		entrysize;
 	int			bucket_count;
 	int			max_tagset_bytes;
+#ifdef PSSC_TESTING
 	bool		force_collisions;
+#endif
 	int			exemplar_nkeys; /* exemplar slots per entry (§6.13) */
 	int			exemplar_value_len; /* bytes per exemplar value */
 	Size		exemplar_shmem_bytes;	/* max_entries * per-entry block */
@@ -209,7 +212,7 @@ typedef void (*PsscStoreVisitor) (const PsscStoreEntryView *entry, void *arg);
  * holds no value, else the value in *val / *len (in the entry's encoding,
  * not NUL-terminated, valid as long as the view).
  */
-extern PGDLLEXPORT bool pssc_store_exemplar(const PsscStoreEntryView *view,
+extern PSSC_TEST_API bool pssc_store_exemplar(const PsscStoreEntryView *view,
 											int i, const char **val,
 											size_t *len);
 
@@ -219,14 +222,14 @@ extern PGDLLEXPORT bool pssc_store_exemplar(const PsscStoreEntryView *view,
  * may take (0: none fits, every value is dropped), and *block, the bytes
  * each entry adds (max_entries * *block <= memory_kb kB).
  */
-extern PGDLLEXPORT void pssc_store_exemplar_layout_for(int max_entries,
+extern PSSC_TEST_API void pssc_store_exemplar_layout_for(int max_entries,
 													   int memory_kb,
 													   int nkeys,
 													   int *value_len,
 													   Size *block);
 
 /* exemplar_value_len of the running store; 0 if not set up or disabled. */
-extern PGDLLEXPORT int pssc_store_exemplar_value_len(void);
+extern PSSC_TEST_API int pssc_store_exemplar_value_len(void);
 
 /* Registers the shared-memory request and startup hooks; from _PG_init. */
 extern void pssc_store_init(void);
@@ -236,18 +239,18 @@ extern void pssc_store_init(void);
  * ERROR if a size overflows Size. pssc_store_shmem_size() is the value the
  * store requests at startup for the current settings.
  */
-extern PGDLLEXPORT Size pssc_store_keysize_for(int max_tagset_bytes);
-extern PGDLLEXPORT Size pssc_store_entrysize_for(Size keysize, int bucket_count);
-extern PGDLLEXPORT Size pssc_store_shmem_size_for(int max_entries,
+extern PSSC_TEST_API Size pssc_store_keysize_for(int max_tagset_bytes);
+extern PSSC_TEST_API Size pssc_store_entrysize_for(Size keysize, int bucket_count);
+extern PSSC_TEST_API Size pssc_store_shmem_size_for(int max_entries,
 												  int max_tagset_bytes,
 												  int bucket_count);
-extern PGDLLEXPORT Size pssc_store_shmem_size(void);
+extern PSSC_TEST_API Size pssc_store_shmem_size(void);
 
 /* Whether the shared store is set up (the library was preloaded). */
-extern PGDLLEXPORT bool pssc_store_available(void);
+extern PSSC_TEST_API bool pssc_store_available(void);
 
 /* keysize in effect (0 if the store is not set up). */
-extern PGDLLEXPORT Size pssc_store_keysize(void);
+extern PSSC_TEST_API Size pssc_store_keysize(void);
 
 /*
  * Builds a key into key, which must hold pssc_store_keysize() bytes
@@ -255,13 +258,13 @@ extern PGDLLEXPORT Size pssc_store_keysize(void);
  * Returns false (key unusable) if the store is not set up or tags_len
  * exceeds max_tagset_bytes.
  */
-extern PGDLLEXPORT bool pssc_store_build_key(PsscKey *key, Oid dbid, Oid userid,
+extern PSSC_TEST_API bool pssc_store_build_key(PsscKey *key, Oid dbid, Oid userid,
 											 int64 queryid, bool toplevel,
 											 const char *tags, size_t tags_len,
 											 uint32 tags_hash);
 
 /* Hash table hash of a key (honours the forced-collision debug flag). */
-extern PGDLLEXPORT uint32 pssc_store_key_hash(const PsscKey *key);
+extern PSSC_TEST_API uint32 pssc_store_key_hash(const PsscKey *key);
 
 /*
  * Records one call taking elapsed_ms into the entry for key. The bucket is
@@ -270,7 +273,7 @@ extern PGDLLEXPORT uint32 pssc_store_key_hash(const PsscKey *key);
  * ExecutorEnd / utility completion); the clock is read again once the lock
  * is held, so a stall moves the call forward (see the top of this file).
  */
-extern PGDLLEXPORT PsscStoreResult pssc_store_record(const PsscKey *key,
+extern PSSC_TEST_API PsscStoreResult pssc_store_record(const PsscKey *key,
 													 double elapsed_ms);
 
 /*
@@ -279,7 +282,7 @@ extern PGDLLEXPORT PsscStoreResult pssc_store_record(const PsscKey *key,
  * the record already holds, so a statement's flush costs no extra lock
  * acquisition. *pending is left untouched if the store is unavailable.
  */
-extern PGDLLEXPORT PsscStoreResult pssc_store_record_with_stats(const PsscKey *key,
+extern PSSC_TEST_API PsscStoreResult pssc_store_record_with_stats(const PsscKey *key,
 																double elapsed_ms,
 																PsscTagsetStats *pending);
 
@@ -289,7 +292,7 @@ extern PGDLLEXPORT PsscStoreResult pssc_store_record_with_stats(const PsscKey *k
  * and the bytes) into the entry's exemplar slots, under the entry's
  * spinlock with the call itself; slots without a value keep theirs.
  */
-extern PGDLLEXPORT PsscStoreResult pssc_store_record_ex(const PsscKey *key,
+extern PSSC_TEST_API PsscStoreResult pssc_store_record_ex(const PsscKey *key,
 														double elapsed_ms,
 														PsscTagsetStats *pending,
 														const char *ex,
@@ -301,26 +304,29 @@ extern PGDLLEXPORT PsscStoreResult pssc_store_record_ex(const PsscKey *key,
  * is raised to max(it, the clock bucket under the lock, this id) and the
  * call is written there.
  */
-extern PGDLLEXPORT PsscStoreResult pssc_store_record_at(const PsscKey *key,
+extern PSSC_TEST_API PsscStoreResult pssc_store_record_at(const PsscKey *key,
 														int64 bucket_id,
 														double elapsed_ms);
 
 /* The clock as the store sees it (honours the debug clock, below). */
-extern PGDLLEXPORT TimestampTz pssc_store_now(void);
+extern PSSC_TEST_API TimestampTz pssc_store_now(void);
 
 /* floor((pssc_store_now() - epoch) / interval); 0 if not set up. */
-extern PGDLLEXPORT int64 pssc_store_clock_bucket(void);
+extern PSSC_TEST_API int64 pssc_store_clock_bucket(void);
 
 /* Start of a bucket: epoch + bucket_id * bucket_interval. */
-extern PGDLLEXPORT TimestampTz pssc_store_bucket_start(int64 bucket_id);
+extern PSSC_TEST_API TimestampTz pssc_store_bucket_start(int64 bucket_id);
 
-/* Header bucket state (§5.2), for _info() (item -21) and tests. */
+#ifdef PSSC_TESTING
+/* The debug clock's mode (testing build only, see the end of this file). */
 typedef enum PsscDebugClockMode
 {
 	PSSC_CLOCK_REAL = 0,		/* now = system clock + offset (0 normally) */
 	PSSC_CLOCK_PINNED			/* now = a fixed (settable) timestamp */
 } PsscDebugClockMode;
+#endif
 
+/* Header bucket state (§5.2), for _info() (item -21) and tests. */
 typedef struct PsscStoreBuckets
 {
 	TimestampTz epoch;
@@ -332,28 +338,30 @@ typedef struct PsscStoreBuckets
 								 * the next reader will raise it to */
 	TimestampTz now;			/* pssc_store_now() */
 	int64		advances;		/* watermark advances since startup or reset */
+#ifdef PSSC_TESTING
 	PsscDebugClockMode clock_mode;
 	int64		clock_value;	/* offset (us) or pinned timestamp */
+#endif
 } PsscStoreBuckets;
 
 /*
  * A diagnostic snapshot; unlike readers it does not advance current_bucket.
  * false (and *b zeroed) if the store is not set up.
  */
-extern PGDLLEXPORT bool pssc_store_get_buckets(PsscStoreBuckets *b);
+extern PSSC_TEST_API bool pssc_store_get_buckets(PsscStoreBuckets *b);
 
 /*
  * Checks the ring invariants (top of this file) and the entry count of
  * every entry under the shared lock, in any build. Raises ERROR describing
  * the first violation; returns the number of entries checked.
  */
-extern PGDLLEXPORT int64 pssc_store_check_invariants(void);
+extern PSSC_TEST_API int64 pssc_store_check_invariants(void);
 
 /*
  * Calls fn for a copy of every entry (taken under its spinlock) while
  * holding the shared lock. fn must not call into the store.
  */
-extern PGDLLEXPORT void pssc_store_foreach(PsscStoreVisitor fn, void *arg);
+extern PSSC_TEST_API void pssc_store_foreach(PsscStoreVisitor fn, void *arg);
 
 /*
  * The reclaim worker's pass (DESIGN.md §5.3, reclaim.c): raises
@@ -364,13 +372,13 @@ extern PGDLLEXPORT void pssc_store_foreach(PsscStoreVisitor fn, void *arg);
  * dealloc or evicted_entries) and sets *last_watermark to the watermark it
  * used. Returns the number removed; 0 if the store is not set up.
  */
-extern PGDLLEXPORT int64 pssc_store_reclaim_dead(int64 *last_watermark);
+extern PSSC_TEST_API int64 pssc_store_reclaim_dead(int64 *last_watermark);
 
 /* Removes every entry and zeroes the counters; sets stats_reset. */
-extern PGDLLEXPORT void pssc_store_reset(void);
+extern PSSC_TEST_API void pssc_store_reset(void);
 
 /* Header counters; false (and *c zeroed) if the store is not set up. */
-extern PGDLLEXPORT bool pssc_store_get_counters(PsscStoreCounters *c);
+extern PSSC_TEST_API bool pssc_store_get_counters(PsscStoreCounters *c);
 
 /*
  * For _counters() (DESIGN.md §7): the counters as pssc_store_get_counters(),
@@ -378,7 +386,7 @@ extern PGDLLEXPORT bool pssc_store_get_counters(PsscStoreCounters *c);
  * every reader does. O(1): takes the shared lock only to copy the header.
  * false (*c zeroed) if the store is not set up.
  */
-extern PGDLLEXPORT bool pssc_store_get_header(PsscStoreCounters *c);
+extern PSSC_TEST_API bool pssc_store_get_header(PsscStoreCounters *c);
 
 /*
  * For _info() (DESIGN.md §7): the counters as pssc_store_get_counters(),
@@ -396,7 +404,7 @@ extern PGDLLEXPORT bool pssc_store_get_header(PsscStoreCounters *c);
  * Scans the whole table. false (*c zeroed, *oldest_bucket
  * PSSC_BUCKET_NONE) if the store is not set up.
  */
-extern PGDLLEXPORT bool pssc_store_get_info(PsscStoreCounters *c,
+extern PSSC_TEST_API bool pssc_store_get_info(PsscStoreCounters *c,
 											int64 *oldest_bucket);
 
 /*
@@ -405,13 +413,20 @@ extern PGDLLEXPORT bool pssc_store_get_info(PsscStoreCounters *c,
  * never splits one flush; when all are zero (the common case) no lock is
  * taken. Must not be called while holding the store lock.
  */
-extern PGDLLEXPORT void pssc_store_add_tagset_stats(const PsscTagsetStats *stats);
+extern PSSC_TEST_API void pssc_store_add_tagset_stats(const PsscTagsetStats *stats);
 
 /*
  * Counts a recordable utility statement that arrived with queryId 0, and
  * adds *pending (if not NULL; then zeroed) under the same lock acquisition.
  */
-extern PGDLLEXPORT void pssc_store_count_utility_missing_queryid(PsscTagsetStats *pending);
+extern PSSC_TEST_API void pssc_store_count_utility_missing_queryid(PsscTagsetStats *pending);
+
+#ifdef PSSC_TESTING
+
+/*
+ * The testing aids below are compiled only into the testing build (make
+ * PSSC_TESTING=1; DESIGN.md §9), for the TEST-ONLY modules.
+ */
 
 /*
  * Testing aid (DESIGN.md §9): while on, every key hashes to the same value,
@@ -420,7 +435,7 @@ extern PGDLLEXPORT void pssc_store_count_utility_missing_queryid(PsscTagsetStats
  * it may only be changed while the table is empty (ERROR otherwise).
  * Reachable only from C (the TEST-ONLY module test/modules/pssc_store_test).
  */
-extern PGDLLEXPORT void pssc_store_debug_force_collisions(bool on);
+extern PSSC_TEST_API void pssc_store_debug_force_collisions(bool on);
 
 /*
  * Testing aid: if set, pssc_store_record() calls hook(arg) once it has
@@ -430,7 +445,7 @@ extern PGDLLEXPORT void pssc_store_debug_force_collisions(bool on);
  */
 typedef void (*PsscStoreRecordTestHook) (void *arg);
 /* (The hook runs after the record has computed its bucket id.) */
-extern PGDLLEXPORT void pssc_store_set_record_test_hook(PsscStoreRecordTestHook hook,
+extern PSSC_TEST_API void pssc_store_set_record_test_hook(PsscStoreRecordTestHook hook,
 														void *arg);
 
 /*
@@ -439,7 +454,7 @@ extern PGDLLEXPORT void pssc_store_set_record_test_hook(PsscStoreRecordTestHook 
  * before the other counters, so tests can show that a concurrent reset waits
  * for the whole flush. NULL (the default) disables it.
  */
-extern PGDLLEXPORT void pssc_store_set_flush_test_hook(PsscStoreRecordTestHook hook,
+extern PSSC_TEST_API void pssc_store_set_flush_test_hook(PsscStoreRecordTestHook hook,
 													   void *arg);
 
 /*
@@ -447,7 +462,7 @@ extern PGDLLEXPORT void pssc_store_set_flush_test_hook(PsscStoreRecordTestHook h
  * each entry's slots, under the shared store lock, so tests can move the
  * watermark in the middle of the scan. NULL (the default) disables it.
  */
-extern PGDLLEXPORT void pssc_store_set_info_scan_test_hook(PsscStoreRecordTestHook hook,
+extern PSSC_TEST_API void pssc_store_set_info_scan_test_hook(PsscStoreRecordTestHook hook,
 														   void *arg);
 
 /*
@@ -459,7 +474,7 @@ extern PGDLLEXPORT void pssc_store_set_info_scan_test_hook(PsscStoreRecordTestHo
  * or not it needed the buffer. Reachable only from C
  * (test/modules/pssc_store_test).
  */
-extern PGDLLEXPORT void pssc_store_debug_fail_next_eviction_alloc(void);
+extern PSSC_TEST_API void pssc_store_debug_fail_next_eviction_alloc(void);
 
 /*
  * Testing aid: calls fn for every slot in use of the compact eviction array
@@ -472,7 +487,7 @@ extern PGDLLEXPORT void pssc_store_debug_fail_next_eviction_alloc(void);
 typedef void (*PsscEvictSlotVisitor) (int64 index, const PsscKey *key,
 									  int64 last_bucket, double usage,
 									  void *arg);
-extern PGDLLEXPORT int64 pssc_store_debug_evict_slots(PsscEvictSlotVisitor fn,
+extern PSSC_TEST_API int64 pssc_store_debug_evict_slots(PsscEvictSlotVisitor fn,
 													  void *arg);
 
 /*
@@ -486,9 +501,9 @@ extern PGDLLEXPORT int64 pssc_store_debug_evict_slots(PsscEvictSlotVisitor fn,
  * offset 0. Reachable only from C (test/modules/pssc_store_test); it is
  * not a GUC.
  */
-extern PGDLLEXPORT void pssc_store_debug_set_clock(PsscDebugClockMode mode,
+extern PSSC_TEST_API void pssc_store_debug_set_clock(PsscDebugClockMode mode,
 												   int64 value);
-extern PGDLLEXPORT void pssc_store_debug_advance_clock(int64 usec);
+extern PSSC_TEST_API void pssc_store_debug_advance_clock(int64 usec);
 
 /*
  * Testing aid: raises current_bucket to the (debug) clock as a reader does,
@@ -496,6 +511,8 @@ extern PGDLLEXPORT void pssc_store_debug_advance_clock(int64 usec);
  * test hook running under the lock can move it. Returns the watermark.
  * Reachable only from C (test/modules/pssc_store_test).
  */
-extern PGDLLEXPORT int64 pssc_store_debug_observe_clock(void);
+extern PSSC_TEST_API int64 pssc_store_debug_observe_clock(void);
+
+#endif							/* PSSC_TESTING */
 
 #endif							/* PSSC_STORE_H */

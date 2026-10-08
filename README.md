@@ -15,7 +15,7 @@ For example:
  -8812... | admin/users | index  | /admin/users |   210 |          912.75
 ```
 
-It supports PostgreSQL 14+.
+It supports PostgreSQL 14–18. A newer major fails the build with a clear error until it is validated; `make PSSC_ALLOW_UNTESTED_PG=1` tries it anyway.
 
 ## A companion to pg_stat_statements
 
@@ -32,7 +32,7 @@ How it works, in short: In the executor and utility hooks, the `pg_stat_statemen
 
 ## Requirements
 
-- PostgreSQL 14+, with the server development files (`pg_config`, PGXS) to build.
+- PostgreSQL 14–18, with the server development files (`pg_config`, PGXS) to build.
 - `pg_stat_statement_context` must be listed in the `shared_preload_libraries` GUC, which needs a server restart. On a replicated cluster, set it (and the GUCs) on every instance: each instance keeps its own statistics, which are not replicated (see [Replicas and failover](docs/limitations.md#replicas-and-failover)).
 - `pg_stat_statements` is technically optional but strongly recommended: it provides the query text and every other metric.
 
@@ -47,6 +47,8 @@ make
 make install # may need sudo
 # for a specific server: make PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config install
 ```
+
+This builds the release library. `make PSSC_TESTING=1` builds a testing library instead. It adds test-only hooks and exports the internal API that the TEST-ONLY modules in `test/modules/` need, so don't install it on a production server. See [DESIGN.md §9](DESIGN.md#9-testing-strategy).
 
 ### Binaries
 To build Ubuntu 24.04 (noble) `.deb` packages for PostgreSQL 14–18 from PGDG, on amd64 and arm64, run `scripts/build-debs.sh`. It needs Docker, builds the committed tree, and writes the packages to `binaries/`. Each package is named `postgresql-<major>-pg-stat-statement-context`.
@@ -135,8 +137,11 @@ SELECT pg_stat_statement_context_extract(
 ## Testing
 
 ```sh
-make installcheck                     # needs a running server with the library preloaded
-scripts/docker-test.sh 17             # build and run the regression and TAP suites in Docker
+make installcheck                     # needs a running server with the library preloaded;
+                                      # TAP tests that need the testing build skip on a release one
+make PSSC_TESTING=1 install install-test-modules  # testing build + TEST-ONLY modules, for every TAP test
+scripts/check-release-exports.sh      # release build exports only test/release-exports.txt
+scripts/docker-test.sh 17             # testing build: every test; release build: exports, pg_regress, TAP, in Docker
 scripts/docker-test.sh 15.0           # same, against an exact release built from source
 scripts/docker-test.sh --assert 17    # source build with --enable-cassert
 scripts/docker-test.sh --valgrind 18  # regression suite with the server under Valgrind

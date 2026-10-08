@@ -15,6 +15,15 @@
 #ifndef PSSC_COMPAT_H
 #define PSSC_COMPAT_H
 
+/*
+ * Upper version guard: the extension is validated on PostgreSQL 14-18
+ * (DESIGN.md §6.10). A newer server fails the build unless the builder
+ * explicitly accepts the risk (scripts/check-compat-guard.sh tests this).
+ */
+#if PG_VERSION_NUM >= 190000 && !defined(PSSC_ALLOW_UNTESTED_PG)
+#error "pg_stat_statement_context is not yet validated on PostgreSQL 19 or later (supported: PostgreSQL 14-18); build with make PSSC_ALLOW_UNTESTED_PG=1 (-DPSSC_ALLOW_UNTESTED_PG) to try anyway"
+#endif
+
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -283,6 +292,41 @@ pssc_init_materialized_srf(FunctionCallInfo fcinfo, bits32 flags)
 
 	MemoryContextSwitchTo(oldcxt);
 }
+#endif
+
+/*
+ * SQL-callable functions must stay exported when the library is built with
+ * -fvisibility=hidden (Makefile): PG16+ declares them PGDLLEXPORT in
+ * PG_FUNCTION_INFO_V1; before that only their pg_finfo_* record was. This is
+ * PG16's definition (checked by scripts/check-release-exports.sh).
+ */
+/* PG14/15: PG_FUNCTION_INFO_V1 without PGDLLEXPORT on the function, redefined; PG16+: core's. */
+#if PG_VERSION_NUM < 160000
+#undef PG_FUNCTION_INFO_V1
+#define PG_FUNCTION_INFO_V1(funcname) \
+extern PGDLLEXPORT Datum funcname(PG_FUNCTION_ARGS); \
+extern PGDLLEXPORT const Pg_finfo_record * CppConcat(pg_finfo_,funcname)(void); \
+const Pg_finfo_record * \
+CppConcat(pg_finfo_,funcname) (void) \
+{ \
+	static const Pg_finfo_record my_finfo = { 1 }; \
+	return &my_finfo; \
+} \
+extern int no_such_variable
+#endif
+
+/*
+ * The module magic block. Use PSSC_MODULE_MAGIC; in place of
+ * PG_MODULE_MAGIC; (once, in pg_stat_statement_context.c). PSSC_EXT_VERSION
+ * is the control file's default_version (Makefile).
+ */
+/* PG18+: PG_MODULE_MAGIC_EXT names the library and its version for pg_get_loaded_modules(); PG14-17: plain PG_MODULE_MAGIC. */
+#if PG_VERSION_NUM >= 180000
+#define PSSC_MODULE_MAGIC \
+	PG_MODULE_MAGIC_EXT(.name = "pg_stat_statement_context", \
+						.version = PSSC_EXT_VERSION)
+#else
+#define PSSC_MODULE_MAGIC PG_MODULE_MAGIC
 #endif
 
 #endif							/* PSSC_COMPAT_H */

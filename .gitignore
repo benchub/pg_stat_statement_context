@@ -7,6 +7,7 @@ worktrees/
 *.dylib
 *.bc
 *.dSYM/
+/src/.build-variant
 # pg_regress / TAP output
 /results/
 /regression.diffs

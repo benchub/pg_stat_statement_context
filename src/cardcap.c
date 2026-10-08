@@ -468,6 +468,7 @@ pssc_cap_init(void)
 	shmem_startup_hook = cap_shmem_startup;
 }
 
+#ifdef PSSC_TESTING
 static void (*reset_test_hook) (void *) = NULL;
 static void *reset_test_hook_arg = NULL;
 
@@ -477,6 +478,7 @@ pssc_cap_set_reset_test_hook(void (*fn) (void *), void *arg)
 	reset_test_hook = fn;
 	reset_test_hook_arg = arg;
 }
+#endif
 
 static inline uint32
 gen_of(uint64 seq)
@@ -484,6 +486,7 @@ gen_of(uint64 seq)
 	return (uint32) ((seq - 1) % GEN_MAX) + 1;
 }
 
+#ifdef PSSC_TESTING
 void
 pssc_cap_test_near_wrap(void)
 {
@@ -498,6 +501,7 @@ pssc_cap_test_near_wrap(void)
 	pg_atomic_write_u64(&sh->seq, ((seq - 1) / GEN_MAX + 1) * GEN_MAX);
 	LWLockRelease(sh->lock);
 }
+#endif
 
 Size
 pssc_cap_shmem_bytes(void)
@@ -531,6 +535,7 @@ pssc_cap_reset(void)
 		pg_memory_barrier();
 		for (Size i = 0; i < sh->nvalues; i++)
 			pg_atomic_write_u64(&sh->words[i], 0);
+#ifdef PSSC_TESTING
 		if (reset_test_hook)
 		{
 			void		(*fn) (void *) = reset_test_hook;
@@ -538,6 +543,7 @@ pssc_cap_reset(void)
 			reset_test_hook = NULL;
 			fn(reset_test_hook_arg);
 		}
+#endif
 		for (Size i = sh->nvalues; i < nwords; i++)
 			pg_atomic_write_u64(&sh->words[i], 0);
 		pg_memory_barrier();
@@ -825,6 +831,7 @@ cap_hashes(CapShared *sh, const char *key, size_t klen, const char *val,
 	*vh = hash_bytes_extended((const unsigned char *) val, (int) vlen, *kh);
 }
 
+#ifdef PSSC_TESTING
 int32
 pssc_cap_test_slot(const char *key, size_t klen, const char *val,
 				   size_t vlen, Oid userid, Oid dbid)
@@ -838,6 +845,7 @@ pssc_cap_test_slot(const char *key, size_t klen, const char *val,
 	cap_hashes(sh, key, klen, val, vlen, userid, dbid, &kh, &vh);
 	return (int32) (vh % sh->nvalues);
 }
+#endif
 
 /* Bound on restarts after concurrent _reset()s (each one is a reset). */
 #define STALE_RETRIES	4

@@ -6,7 +6,10 @@ use strict;
 use warnings;
 
 use Exporter 'import';
-our @EXPORT = qw(pgss_suffix module_suffix);
+use File::Basename qw(dirname);
+use File::Spec;
+use Test::More ();
+our @EXPORT = qw(pgss_suffix module_suffix require_testing_build testing_build);
 
 # Suffixes a loadable module can have, by platform (DLSUFFIX): .so on Linux
 # and on macOS before PG16, .dylib on macOS from PG16, .dll on Windows.
@@ -69,6 +72,43 @@ sub module_suffix
 	  . "but PSSC_REQUIRE_MODULES lists it\n"
 	  if $require{$name};
 	return undef;
+}
+
+# Whether the installed library (pg_config --pkglibdir) is the testing build
+# (make PSSC_TESTING=1, DESIGN.md §9): only that one exports the TEST-ONLY
+# hooks and the pssc_* API the TEST-ONLY modules link against. Read from its
+# exported symbols (scripts/list-exports.sh).
+sub testing_build
+{
+	my $pkglibdir = `pg_config --pkglibdir`;
+	die "pg_config --pkglibdir failed\n" if $? != 0;
+	chomp $pkglibdir;
+	my ($lib) = grep { -e $_ }
+	  map { "$pkglibdir/pg_stat_statement_context$_" } @SUFFIXES;
+	die "pg_stat_statement_context is not installed in $pkglibdir\n"
+	  unless defined $lib;
+	my $script = File::Spec->catfile(dirname(__FILE__), '..', '..',
+		'scripts', 'list-exports.sh');
+	my @syms = `"$script" "$lib"`;
+	die "$script $lib failed\n" if $? != 0 || !@syms;
+	chomp @syms;
+	return scalar grep { $_ eq 'pssc_store_set_record_test_hook' } @syms;
+}
+
+# For the tests that need the TEST-ONLY modules or hooks: skips the whole
+# test file (plan skip_all) against a release library. Call it before
+# creating any node. PSSC_REQUIRE_TESTING_BUILD=1 (set by
+# docker/run-tests.sh for its testing-build pass) makes a release library a
+# hard failure instead, so these tests cannot be skipped silently there.
+sub require_testing_build
+{
+	return if testing_build();
+	die "the installed pg_stat_statement_context is a release build, "
+	  . "but PSSC_REQUIRE_TESTING_BUILD=1 (build it with make PSSC_TESTING=1)\n"
+	  if ($ENV{PSSC_REQUIRE_TESTING_BUILD} // '') eq '1';
+	Test::More::plan(skip_all =>
+		  'needs the testing build of pg_stat_statement_context '
+		  . '(make PSSC_TESTING=1) and the TEST-ONLY modules');
 }
 
 1;

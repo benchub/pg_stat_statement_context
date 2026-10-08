@@ -17,7 +17,10 @@
 # Source builds are tagged pg_stat_statement_context-pgsrc:<version>-<flavor>-<hash>,
 # where <hash> covers docker/Dockerfile.source and docker/build-postgres.sh,
 # and are only built when that tag is missing (CI restores it from its cache).
-# docker/run-tests.sh is mounted from the repository for source builds.
+# docker/run-tests.sh is mounted from the repository for source builds. It
+# tests the testing build (make PSSC_TESTING=1) with every test, then the
+# release build (exported symbols, pg_regress, TAP tests without TEST-ONLY
+# modules); valgrind runs only the testing build.
 # Logs and regression diffs from a failed run land in tmp/docker-<version>[-<flavor>]/.
 set -euo pipefail
 

@@ -12,6 +12,10 @@
 # macOS cells build PostgreSQL with docker/build-postgres.sh (Homebrew's
 # packages lack the TAP modules), cache the install prefix, and run
 # docker/run-tests.sh on the host.
+# Every cell but valgrind runs the suite twice (docker/run-tests.sh): on the
+# testing build (make PSSC_TESTING=1) with the TEST-ONLY modules, then on the
+# release build, after scripts/check-release-exports.sh has checked its
+# exported symbols against test/release-exports.txt (DESIGN.md §9).
 name: CI
 
 on:

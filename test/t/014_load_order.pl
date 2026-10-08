@@ -21,6 +21,8 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 use PsscTest;
 
+require_testing_build();
+
 my $P = 'pg_stat_statement_context';
 my $warn_re =
   qr/WARNING:  pg_stat_statements is loaded after $P in shared_preload_libraries/;

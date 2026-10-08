@@ -14,7 +14,8 @@ EXTENSION = pssc_context_test
 DATA = pssc_context_test--1.0.sql
 PGFILEDESC = "pssc_context_test - test-only driver for pg_stat_statement_context execution frames"
 
-PG_CPPFLAGS = -I$(srcdir)/../../../src
+# Built against the testing variant of the library (make PSSC_TESTING=1).
+PG_CPPFLAGS = -I$(srcdir)/../../../src -DPSSC_TESTING
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

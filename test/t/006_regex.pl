@@ -17,6 +17,9 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 use File::Basename;
 use Time::HiRes qw(usleep time);
+use PsscTest;
+
+require_testing_build();
 
 my $P = 'pg_stat_statement_context';
 

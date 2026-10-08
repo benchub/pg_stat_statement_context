@@ -22,6 +22,9 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 use IPC::Run;
 use Time::HiRes qw(usleep);
+use PsscTest;
+
+require_testing_build();
 
 my $P = 'pg_stat_statement_context';
 

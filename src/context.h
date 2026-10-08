@@ -60,6 +60,7 @@
 #ifndef PSSC_CONTEXT_H
 #define PSSC_CONTEXT_H
 
+#include "export.h"
 #include "executor/execdesc.h"
 #include "lib/ilist.h"
 #include "nodes/plannodes.h"
@@ -147,8 +148,8 @@ typedef struct PsscFrameSave
  * outside context.c; change them only with pssc_frame_enter() and
  * pssc_frame_leave().
  */
-extern PGDLLEXPORT PsscFrame *pssc_active_frame;
-extern PGDLLEXPORT int pssc_nesting_level;
+extern PSSC_TEST_API PsscFrame *pssc_active_frame;
+extern PSSC_TEST_API int pssc_nesting_level;
 
 /*
  * Installs the planner hook (from _PG_init, while preloading), which only
@@ -167,10 +168,10 @@ extern void pssc_context_init(void);
  * not a parallel worker, queryId != 0; §3.3). Returns NULL, creating
  * nothing, if memory runs out.
  */
-extern PGDLLEXPORT PsscFrame *pssc_frame_create(QueryDesc *queryDesc);
+extern PSSC_TEST_API PsscFrame *pssc_frame_create(QueryDesc *queryDesc);
 
 /* The registered frame of queryDesc, or NULL. */
-extern PGDLLEXPORT PsscFrame *pssc_frame_lookup(const QueryDesc *queryDesc);
+extern PSSC_TEST_API PsscFrame *pssc_frame_lookup(const QueryDesc *queryDesc);
 
 /*
  * Snapshots a utility statement into *uf, before chaining ProcessUtility:
@@ -178,12 +179,12 @@ extern PGDLLEXPORT PsscFrame *pssc_frame_lookup(const QueryDesc *queryDesc);
  * queryString: no tags). Afterwards uf->frame does not reference pstmt or
  * queryString. Never fails.
  */
-extern PGDLLEXPORT void pssc_utility_frame_init(PsscUtilityFrame *uf,
+extern PSSC_TEST_API void pssc_utility_frame_init(PsscUtilityFrame *uf,
 												const PlannedStmt *pstmt,
 												const char *queryString);
 
 /* Frees what *uf allocated outside itself. Never fails. */
-extern PGDLLEXPORT void pssc_utility_frame_release(PsscUtilityFrame *uf);
+extern PSSC_TEST_API void pssc_utility_frame_release(PsscUtilityFrame *uf);
 
 /*
  * The range of statement (stmt_location, stmt_len) of src that the hooks scan
@@ -207,7 +208,7 @@ extern PsscStmtRange pssc_stmt_owned_range(const char *src, int stmt_location,
  * level 0 with no active frame, the same condition under which making a
  * frame advances it. Never fails.
  */
-extern PGDLLEXPORT void pssc_context_note_stmt_boundary(const char *src,
+extern PSSC_TEST_API void pssc_context_note_stmt_boundary(const char *src,
 														int stmt_location,
 														int stmt_len);
 
@@ -217,7 +218,7 @@ extern PGDLLEXPORT void pssc_context_note_stmt_boundary(const char *src,
  * without a frame) and, if nest, increments the nesting level. Pair every
  * call with pssc_frame_leave(save) in PG_FINALLY.
  */
-extern PGDLLEXPORT void pssc_frame_enter(PsscFrameSave *save, PsscFrame *frame,
+extern PSSC_TEST_API void pssc_frame_enter(PsscFrameSave *save, PsscFrame *frame,
 										 bool nest);
 
 /*
@@ -226,9 +227,9 @@ extern PGDLLEXPORT void pssc_frame_enter(PsscFrameSave *save, PsscFrame *frame,
  * resumes frame's activity row if that is still the row, and never
  * publishes or clears one.
  */
-extern PGDLLEXPORT void pssc_frame_enter_finish(PsscFrameSave *save,
+extern PSSC_TEST_API void pssc_frame_enter_finish(PsscFrameSave *save,
 												PsscFrame *frame);
-extern PGDLLEXPORT void pssc_frame_leave(const PsscFrameSave *save);
+extern PSSC_TEST_API void pssc_frame_leave(const PsscFrameSave *save);
 
 /*
  * Recomputes frame->userid (GetUserId()), nesting_level, toplevel and
@@ -239,10 +240,10 @@ extern PGDLLEXPORT void pssc_frame_leave(const PsscFrameSave *save);
  * a recording hook calls this first so its key matches pgss's. Re-applies
  * role-scoped caps to the tags for a changed user (see above).
  */
-extern PGDLLEXPORT void pssc_frame_refresh(PsscFrame *frame);
+extern PSSC_TEST_API void pssc_frame_refresh(PsscFrame *frame);
 
 /* Number of registered executor frames in this backend. */
-extern PGDLLEXPORT int pssc_frame_count(void);
+extern PSSC_TEST_API int pssc_frame_count(void);
 
 /*
  * Transaction-end check: at the end of every transaction that created an
@@ -257,6 +258,6 @@ typedef struct PsscFrameXactStats
 	uint64		leaks;
 } PsscFrameXactStats;
 
-extern PGDLLEXPORT void pssc_frame_xact_stats(PsscFrameXactStats *stats);
+extern PSSC_TEST_API void pssc_frame_xact_stats(PsscFrameXactStats *stats);
 
 #endif							/* PSSC_CONTEXT_H */

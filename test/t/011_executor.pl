@@ -26,6 +26,8 @@ use Test::More;
 use PsscTest;
 use IPC::Run;
 
+require_testing_build();
+
 my $P = 'pg_stat_statement_context';
 
 my $node = PostgreSQL::Test::Cluster->new('executor');

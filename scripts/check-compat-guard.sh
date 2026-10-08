@@ -44,22 +44,30 @@ if [ $rc -eq 0 ]; then ok "PostgreSQL $(pg_config --version | awk '{print $2}'):
 else not_ok "the installed server's version is accepted: $out"; fi
 
 probe pg19 190000
-if [ $rc -ne 0 ] && echo "$out" | grep -q 'not yet validated on PostgreSQL 19'; then
+if [ $rc -ne 0 ] && grep -q 'not yet validated on PostgreSQL 19' <<< "$out"; then
 	ok "PG_VERSION_NUM 190000: #error \"not yet validated on PostgreSQL 19\""
 else
 	not_ok "PG_VERSION_NUM 190000 is rejected with a clear message (exit $rc): $out"
 fi
 
 probe pg20 200000
-if [ $rc -ne 0 ] && echo "$out" | grep -q 'not yet validated on PostgreSQL 19'; then
+if [ $rc -ne 0 ] && grep -q 'not yet validated on PostgreSQL 19' <<< "$out"; then
 	ok "PG_VERSION_NUM 200000: rejected too"
 else
 	not_ok "PG_VERSION_NUM 200000 is rejected (exit $rc): $out"
 fi
 
+# With a faked version the newer majors' branches of compat.h include headers
+# that older servers lack, so only PostgreSQL 18 headers must preprocess
+# cleanly; on every server the #error must be gone.
 probe pg19_allowed 190000 -DPSSC_ALLOW_UNTESTED_PG
-if [ $rc -eq 0 ]; then ok "-DPSSC_ALLOW_UNTESTED_PG overrides the guard"
-else not_ok "-DPSSC_ALLOW_UNTESTED_PG overrides the guard: $out"; fi
+if grep -q 'not yet validated' <<< "$out"; then
+	not_ok "-DPSSC_ALLOW_UNTESTED_PG overrides the guard: $out"
+elif [ $rc -ne 0 ] && [ "$(pg_config --version | sed 's/^PostgreSQL \([0-9]*\).*/\1/')" -ge 18 ]; then
+	not_ok "-DPSSC_ALLOW_UNTESTED_PG: compat.h preprocesses with PostgreSQL 18+ headers: $out"
+else
+	ok "-DPSSC_ALLOW_UNTESTED_PG overrides the guard"
+fi
 
 [ $fails -eq 0 ] && echo "compat.h version-guard check passed"
 exit $fails

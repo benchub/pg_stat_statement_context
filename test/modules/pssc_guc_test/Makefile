@@ -10,7 +10,8 @@ EXTENSION = pssc_guc_test
 DATA = pssc_guc_test--1.0.sql
 PGFILEDESC = "pssc_guc_test - test-only inspector for pg_stat_statement_context GUCs"
 
-PG_CPPFLAGS = -I$(srcdir)/../../../src
+# Built against the testing variant of the library (make PSSC_TESTING=1).
+PG_CPPFLAGS = -I$(srcdir)/../../../src -DPSSC_TESTING
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

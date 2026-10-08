@@ -2,9 +2,23 @@
 #   make && make install && make installcheck
 # installcheck needs a running server with
 #   shared_preload_libraries = 'pg_stat_statement_context'
-# (scripts/docker-test.sh <pg-major> sets one up). The TAP tests also need the
-# TEST-ONLY modules from "make install-test-modules", which is never installed
-# by "make install".
+# (scripts/docker-test.sh <pg-major> sets one up).
+#
+# Build variants (DESIGN.md §9):
+#   make                  release library: no test hooks, and it exports only
+#                         what PostgreSQL looks up (_PG_init, Pg_magic_func,
+#                         the SQL functions, the background worker entry;
+#                         test/release-exports.txt). Packages are this.
+#   make PSSC_TESTING=1   testing library (-DPSSC_TESTING): adds the TEST-ONLY
+#                         hooks (debug clock, forced collisions, fault
+#                         injection) and exports the pssc_* API that the
+#                         TEST-ONLY modules of "make install-test-modules"
+#                         link against. Pass it to "make install" too.
+# The TAP tests that need those modules skip themselves against a release
+# library (test/perl/PsscTest.pm); pg_regress and the other TAP tests run on
+# both. Switching variants rebuilds every object (src/.build-variant).
+# PSSC_ALLOW_UNTESTED_PG=1 lets the build try a PostgreSQL major newer than
+# the supported 14-18 (src/compat.h).
 
 MODULE_big = pg_stat_statement_context
 OBJS = \
@@ -35,6 +49,13 @@ PGFILEDESC = "pg_stat_statement_context - per-tag statement statistics from SQL 
 PSSC_EXT_VERSION := $(shell sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" $(dir $(lastword $(MAKEFILE_LIST)))pg_stat_statement_context.control)
 PG_CPPFLAGS += -DPSSC_EXT_VERSION='"$(PSSC_EXT_VERSION)"'
 
+ifeq ($(PSSC_TESTING),1)
+PG_CPPFLAGS += -DPSSC_TESTING
+endif
+ifeq ($(PSSC_ALLOW_UNTESTED_PG),1)
+PG_CPPFLAGS += -DPSSC_ALLOW_UNTESTED_PG
+endif
+
 EXTENSION = pg_stat_statement_context
 DATA = sql/pg_stat_statement_context--1.0.sql
 
@@ -59,11 +80,27 @@ EXTRA_CLEAN = test/unit/test_scan test/unit/test_scan_checked \
 	fuzz/fuzz_scan fuzz/fuzz_sqlcommenter fuzz/fuzz_marginalia fuzz/fuzz_tagset \
 	fuzz/fuzz_scan_standalone fuzz/fuzz_sqlcommenter_standalone \
 	fuzz/fuzz_marginalia_standalone fuzz/fuzz_tagset_standalone \
-	fuzz/corpus fuzz/*.dSYM
+	fuzz/corpus fuzz/*.dSYM \
+	src/.build-variant
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+# Export only what is marked PGDLLEXPORT (src/export.h), on every major: PG16+
+# PGXS already does this, PG14/15 export every global by default.
+ifeq ($(GCC),yes)
+override CFLAGS += -fvisibility=hidden
+override CPPFLAGS += '-DPGDLLEXPORT=__attribute__((visibility("default")))'
+endif
+
+# Rebuild everything when the variant changes (src/.build-variant holds it).
+PSSC_VARIANT := $(if $(filter 1,$(PSSC_TESTING)),testing,release)$(if $(filter 1,$(PSSC_ALLOW_UNTESTED_PG)),+untested-pg)
+PSSC_VARIANT_STAMP := src/.build-variant
+ifeq ($(filter clean distclean maintainer-clean,$(MAKECMDGOALS)),)
+$(shell [ "$$(cat $(PSSC_VARIANT_STAMP) 2>/dev/null)" = "$(PSSC_VARIANT)" ] || echo "$(PSSC_VARIANT)" > $(PSSC_VARIANT_STAMP))
+endif
+$(OBJS) $(OBJS:.o=.bc): $(PSSC_VARIANT_STAMP)
 
 # Shared TAP helpers (test/perl/PsscTest.pm).
 PG_PROVE_FLAGS += -I $(srcdir)/test/perl
@@ -87,6 +124,8 @@ PG_PROVE_FLAGS += -I $(srcdir)/test/perl
 # registry, active frame, frames seen at ExecutorEnd) to SQL
 # (test/t/010_context.pl, 012_utility.pl, which also reads recorded entries
 # through pssc_store_test).
+# They link against the pssc_* API that only the testing build exports: build
+# and install the library with PSSC_TESTING=1 before using them.
 TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test \
 	test/modules/pssc_extract_test test/modules/pssc_store_test \
 	test/modules/pssc_context_test

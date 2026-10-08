@@ -80,6 +80,7 @@
 #include "utils/timestamp.h"
 
 #include "cardcap.h"
+#include "compat.h"
 #include "counters.h"
 #include "executor.h"
 #include "extract.h"

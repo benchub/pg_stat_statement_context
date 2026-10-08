@@ -23,6 +23,8 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 use PsscTest;
 
+require_testing_build();
+
 my $P = 'pg_stat_statement_context';
 my $root = dirname(__FILE__) . '/../..';
 

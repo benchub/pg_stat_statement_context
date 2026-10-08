@@ -4,6 +4,15 @@ All notable changes to `pg_stat_statement_context` are recorded here. The format
 
 ## [Unreleased]
 
+### Changed
+
+- **Release builds ship no test-only code.** A plain `make` (and the `.deb` packages) builds a library without the debug clock, forced collisions or fault-injection hooks. It exports only `_PG_init`, `Pg_magic_func`, the SQL functions and the reclaim worker's entry point; `scripts/check-release-exports.sh` checks this. `make PSSC_TESTING=1` builds the testing library that the TEST-ONLY modules and the full TAP suite need.
+- **Supported versions are explicit.** The build fails with `#error` on PostgreSQL 19 or later ("not yet validated"); `make PSSC_ALLOW_UNTESTED_PG=1` overrides it. On PostgreSQL 18, `pg_get_loaded_modules()` shows the library's name and version.
+
+### Security
+
+- The statistics file loader recomputes each entry's `tags_hash` from its tags, and discards the file (LOG "ignoring invalid data") when they disagree.
+
 ## [1.0.0] - 2026-10-06
 
 First release. SQL extension version `1.0`. Supports PostgreSQL 14, 15, 16, 17 and 18 from one source tree. Release notes: [docs/release-notes/v1.0.0.md](docs/release-notes/v1.0.0.md).
