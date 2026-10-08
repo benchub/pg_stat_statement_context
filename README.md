@@ -77,6 +77,8 @@ DETAIL:  In this order the ProcessUtility hook of pg_stat_statements runs first 
 HINT:  Set shared_preload_libraries = 'pg_stat_statements, pg_stat_statement_context' (pg_stat_statements first) and restart the server.
 ```
 
+`pg_stat_monitor` clears utility query IDs the same way, so list it before `pg_stat_statement_context` too: `'pg_stat_statements, pg_stat_monitor, pg_stat_statement_context'`. The warning only checks `pg_stat_statements`.
+
 If you see that warning, the symptoms will be that plannable statements (`SELECT`, DML) are recorded, but utility statements (`VACUUM`, DDL) will be invisible to `pg_stat_statement_context`, even if a context exists. Instead, they get counted in `pg_stat_statement_context_info().utility_missing_queryid`.
 
 ### Query IDs
@@ -143,6 +145,8 @@ fuzz/sql/run.sh -- --duration 600     # regex extractor SQL fuzzer, assert build
 scripts/test-integrations.sh 17       # exporter recipes + Grafana dashboard, end to end in Docker
 bench/run.sh --major 18 [--quick]     # pgbench overhead benchmarks in Docker (docs/benchmarks.md)
 ```
+
+[docs/maintaining.md](docs/maintaining.md) lists the pg_stat_statements behaviors this extension mirrors, what to re-check when a new PostgreSQL release ships, the coexistence tests with other hook-using extensions, and the oldest-minor CI policy.
 
 [fuzz/README.md](fuzz/README.md) describes the fuzz targets, their invariants and how to replay a failure.
 

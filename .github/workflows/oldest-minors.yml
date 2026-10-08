@@ -1,0 +1,80 @@
+# Oldest-minor cells (DESIGN.md §9, docs/maintaining.md; backlog
+# 20261008-065635-7, TST-8).
+#
+# ci.yml tests the latest minor release of each major (PGDG packages and
+# source builds). This workflow adds one cell per major on the oldest minor
+# release the harness can run, built from the official tarball by
+# docker/Dockerfile.source:
+#   14.6  oldest 14.x that ships the PostgreSQL::Test::* TAP modules
+#         (14.0-14.5 cannot run the TAP suite)
+#   15.0, 16.0, 17.0, 18.0
+# Source builds take a while, so this runs weekly and on demand rather than on
+# every push. Reproduce a cell locally with: scripts/docker-test.sh <version>
+# Builds are cached as Docker images exactly like ci.yml's linux-source job.
+# When a new major ships, add <major>.0 here (docs/maintaining.md).
+name: Oldest minors
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oldest-minor:
+    name: Linux PG${{ matrix.pg }} (oldest minor, source build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['14.6', '15.0', '16.0', '17.0', '18.0']
+    env:
+      IMAGE_TAR: tmp/ci-cache/pgsrc-image.tar
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve source-build image
+        id: image
+        run: |
+          tag=$(scripts/docker-test.sh --print-image ${{ matrix.pg }})
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "PostgreSQL source build: $tag"
+      - name: Restore cached PostgreSQL build
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.IMAGE_TAR }}
+          key: pgsrc-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.tag }}
+      - name: Load cached PostgreSQL build
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: docker load -i "$IMAGE_TAR"
+      - name: Run tests
+        run: scripts/docker-test.sh ${{ matrix.pg }}
+      - name: Export PostgreSQL build for the cache
+        id: export
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        env:
+          TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          docker image inspect "$TAG" > /dev/null
+          mkdir -p "$(dirname "$IMAGE_TAR")"
+          docker save -o "$IMAGE_TAR" "$TAG"
+      - name: Save PostgreSQL build to the cache
+        if: always() && steps.export.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.IMAGE_TAR }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-pg${{ matrix.pg }}-oldest-logs
+          path: tmp/docker-${{ matrix.pg }}/
+          if-no-files-found: ignore

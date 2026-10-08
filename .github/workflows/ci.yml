@@ -8,6 +8,7 @@
 # Source builds are cached as Docker images (docker save/load), keyed on the
 # image tag, which encodes the release, the flavor and a hash of
 # docker/Dockerfile.source + docker/build-postgres.sh.
+# The oldest minor of each major runs weekly in oldest-minors.yml.
 # macOS cells build PostgreSQL with docker/build-postgres.sh (Homebrew's
 # packages lack the TAP modules), cache the install prefix, and run
 # docker/run-tests.sh on the host.

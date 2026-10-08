@@ -280,6 +280,8 @@ SELECT current_setting('$P.tags');
 EOS
 is($ret, 0, 'SET LOCAL and savepoint rollback around tags changes: no error') or diag($err);
 like($out, qr/\*$/, 'tags restored after the transaction');
-ok(!$node->log_contains('TRAP|PANIC|terminated by signal'), 'no assertion failure or crash');
+# slurp_file, not log_contains: older PG14 minors (14.6) lack log_contains.
+unlike(slurp_file($node->logfile), qr/TRAP|PANIC|terminated by signal/,
+	'no assertion failure or crash');
 
 done_testing();

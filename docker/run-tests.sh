@@ -203,7 +203,15 @@ else
 	# Every harness server (PGDG images, docker/build-postgres.sh builds)
 	# installs pg_stat_statements: the TAP tests fail rather than skip
 	# their pgss parity checks if it is missing (test/perl/PsscTest.pm).
-	as_pg env PSSC_REQUIRE_PGSS=1 make installcheck || fail "make installcheck"
+	# Likewise auto_explain (contrib), and the third-party modules the PGDG
+	# image installed (docker/Dockerfile) for test/t/035_hook_coexistence.pl.
+	require_modules=auto_explain
+	if [ -r /usr/local/share/pssc-test-modules ]; then
+		require_modules=$(cat /usr/local/share/pssc-test-modules)
+	fi
+	echo "modules the coexistence test requires: $require_modules"
+	as_pg env PSSC_REQUIRE_PGSS=1 PSSC_REQUIRE_MODULES="$require_modules" \
+		make installcheck || fail "make installcheck"
 	pg_stop
 fi
 step "ALL PASSED ($(pg_config --version), mode: $MODE)"

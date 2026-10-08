@@ -13,7 +13,8 @@
 #             installs src/tools/valgrind.supp as <prefix>/share/valgrind.supp
 #
 # Besides the server it installs the TAP Perl modules (src/test/perl),
-# pg_regress and pg_stat_statements (for the parity checks of the TAP tests).
+# pg_regress, pg_stat_statements (for the parity checks of the TAP tests) and
+# auto_explain (for test/t/035_hook_coexistence.pl).
 set -euo pipefail
 
 PG_VERSION=${1:?usage: build-postgres.sh <version> <prefix> [release|assert|valgrind]}
@@ -64,6 +65,7 @@ make -s install
 make -s -C src/test/perl install
 make -s -C src/test/regress install
 make -s -C contrib/pg_stat_statements install
+make -s -C contrib/auto_explain install
 if [ "$FLAVOR" = valgrind ]; then
 	mkdir -p "$PREFIX/share"
 	cp src/tools/valgrind.supp "$PREFIX/share/valgrind.supp"
