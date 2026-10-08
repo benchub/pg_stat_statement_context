@@ -368,7 +368,8 @@ class FreshCheck(unittest.TestCase):
         try:
             head = subprocess.check_output(["git", "-C", here, "rev-parse", "HEAD"], text=True,
                                            stderr=subprocess.DEVNULL).strip()
-            old = subprocess.check_output(["git", "-C", here, "log", "-1", "--format=%H", "--", "src"],
+            old = subprocess.check_output(["git", "-C", os.path.dirname(here), "log", "-1", "--format=%H",
+                                           "--", "src"],
                                           text=True, stderr=subprocess.DEVNULL).strip()
         except (OSError, subprocess.CalledProcessError):
             self.skipTest("no git repository")
@@ -457,6 +458,8 @@ class Plan(unittest.TestCase):
             self.assertEqual(len(f), len(scenarios.TSV_FIELDS))
             self.assertEqual(f[scenarios.TSV_FIELDS.index("config")], r["config"])
             self.assertNotIn("\n", line)
+            self.assertNotIn("", f)          # empty fields are "-": bash read collapses tabs
+            self.assertEqual(f[scenarios.TSV_FIELDS.index("settings")], r["settings"] or "-")
 
     def test_exporter_queries(self):
         here = os.path.dirname(os.path.abspath(__file__))

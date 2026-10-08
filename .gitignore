@@ -33,3 +33,4 @@ worktrees/
 /fuzz/fuzz_tagset
 /fuzz/*_standalone
 /fuzz/corpus/
+__pycache__/
