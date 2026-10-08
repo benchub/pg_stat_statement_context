@@ -66,7 +66,7 @@ A placeholder (pgss not loaded) falls back to this extension's own settings. If 
 
 ### Every new minor release
 
-1. Run the matrix on the new minors: `scripts/docker-test.sh N` for each major (PGDG pulls the latest minor) and `scripts/docker-test.sh --assert N`.
+1. Run the matrix on the new minors: `scripts/docker-test.sh N` for each major (PGDG pulls the latest minor) and `scripts/docker-test.sh --assert N`. Each cell runs the suite on the testing build (`make PSSC_TESTING=1`, with the TEST-ONLY modules), then checks the release build's exports (`scripts/check-release-exports.sh`) and runs pg_regress and the TAP tests that need no TEST-ONLY module against it.
 2. Diff `contrib/pg_stat_statements/pg_stat_statements.c` between the previous and the new minor tag of each supported branch (`git diff REL_17_6..REL_17_7 -- contrib/pg_stat_statements`). Look for changes to anything in §1: `pgss_enabled`, `PGSS_HANDLED_UTILITY`, nesting counters, the queryId zeroing in `pgss_ProcessUtility` / `pgss_post_parse_analyze`, the `totaltime` allocation, and `pgss_store`'s `toplevel` argument. Back-patched fixes do happen. For example, upstream `8700851352a8` changed how a cached utility statement is re-parsed (14.10, 15.5, 16.1; see `DESIGN.md` §9).
 3. Also diff `src/include/tcop/utility.h`, `src/include/executor/executor.h` and `src/include/optimizer/planner.h` for hook signature changes. They are rare in minors, but the macros in `src/compat.h` assume them.
 4. If `.github/workflows/oldest-minors.yml` fails while `ci.yml` passes (or the reverse), a behavior changed within the major. Find the minor that changed it and add a runtime check (as `017` does), not a minor-version check.
@@ -101,7 +101,7 @@ Reproduce a cell locally with `scripts/docker-test.sh 14.6` (or `15.0`, ...).
 | pg_hint_plan | PGDG package `postgresql-N-pg-hint-plan` | `/*+ SeqScan(t) */` changes the plan and is reported as used, also with sqlcommenter and marginalia tag comments in the same statement; the hint comment produces no tags |
 | pg_stat_monitor | not in PGDG apt, so skipped in the images; checked by hand against 2.4.0 built from source | `calls` match this extension's |
 
-A module that isn't installed is skipped, and the skip is reported on stderr. `docker/Dockerfile` writes the modules it installed to `/usr/local/share/pssc-test-modules`, and `docker/run-tests.sh` passes them in `PSSC_REQUIRE_MODULES`. A listed module that is missing makes the test fail rather than skip.
+036 uses no TEST-ONLY module or hook, so `docker/run-tests.sh` runs it against both the testing build (`make PSSC_TESTING=1`) and the release build ([DESIGN.md §9](../DESIGN.md#9-testing-strategy)), with the same `PSSC_REQUIRE_MODULES`. A module that isn't installed is skipped, and the skip is reported on stderr. `docker/Dockerfile` writes the modules it installed to `/usr/local/share/pssc-test-modules`, and `docker/run-tests.sh` passes them in `PSSC_REQUIRE_MODULES`. A listed module that is missing makes the test fail rather than skip.
 
 **pg_stat_monitor must also be loaded before this extension.** Like pgss, `pgsm_ProcessUtility` zeroes the queryId of the utilities it tracks before it chains. The working order is:
 
