@@ -1,7 +1,7 @@
 /*
  * info_fn.c
- *		pg_stat_statement_context_info() and pg_stat_statement_context_reset()
- *		(DESIGN.md §7).
+ *		pg_stat_statement_context_info(), pg_stat_statement_context_counters()
+ *		and pg_stat_statement_context_reset() (DESIGN.md §7).
  *
  * _info() returns one row from a consistent snapshot of the shared header
  * (pssc_store_get_info(): one acquisition of the shared lock, so it is
@@ -35,8 +35,12 @@
  *					slots (included in shmem_bytes), the bytes a value may
  *					take, and the values dropped as longer than that
  * Finding oldest_bucket scans the whole table under the shared lock, as the
- * stats SRF does. Like every reader, _info() first raises current_bucket to
- * the clock.
+ * stats SRF does, in at most 3 passes (pssc_store_get_info()). Like every
+ * reader, _info() first raises current_bucket to the clock.
+ *
+ * _counters() returns the same row without oldest_bucket, from a copy of the
+ * shared header only (pssc_store_get_header()): O(1) whatever the size of
+ * the table, for scrapers that call it often.
  *
  * The extraction counters are accumulated per backend and flushed into the
  * header at each ExecutorEnd and utility completion. _info() flushes the
@@ -63,9 +67,10 @@
  * next configuration change and does not count the failure again, so after
  * a reset regex_compile_failures only counts new failures.
  *
- * Both raise ERROR if the library was not preloaded, as the stats SRF does.
- * Both are PARALLEL RESTRICTED: the pending counters they flush or discard
- * are those of the leader.
+ * All raise ERROR if the library was not preloaded, as the stats SRF does.
+ * All are PARALLEL RESTRICTED: the pending counters they flush or discard
+ * are those of the leader. The C symbols of _info() and _counters() carry
+ * the SQL version whose columns they return, as the SRFs' do.
  */
 #include "postgres.h"
 
@@ -81,6 +86,7 @@
 #include "store.h"
 
 #define INFO_COLS	25
+#define COUNTERS_COLS	(INFO_COLS - 1)
 
 static void
 require_preloaded(void)
@@ -91,24 +97,34 @@ require_preloaded(void)
 				 errmsg("pg_stat_statement_context must be loaded via \"shared_preload_libraries\"")));
 }
 
+/*
+ * The _info() row, or with_oldest false the _counters() row: the same
+ * columns without oldest_bucket, and no scan of the table.
+ */
 static Datum
-info_row(FunctionCallInfo fcinfo)
+info_row(FunctionCallInfo fcinfo, bool with_oldest)
 {
 	TupleDesc	tupdesc;
 	Datum		values[INFO_COLS];
 	bool		nulls[INFO_COLS];
 	PsscStoreCounters c;
-	int64		oldest;
+	int64		oldest = PSSC_BUCKET_NONE;
+	int			ncols = with_oldest ? INFO_COLS : COUNTERS_COLS;
+	bool		ok;
 	int			i = 0;
 
 	require_preloaded();
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
-	if (tupdesc->natts != INFO_COLS)
+	if (tupdesc->natts != ncols)
 		elog(ERROR, "incorrect number of output arguments");
 
 	pssc_flush_extract_stats();
-	if (!pssc_store_get_info(&c, &oldest))
+	if (with_oldest)
+		ok = pssc_store_get_info(&c, &oldest);
+	else
+		ok = pssc_store_get_header(&c);
+	if (!ok)
 		elog(ERROR, "pg_stat_statement_context shared store is not set up");
 
 	memset(nulls, 0, sizeof(nulls));
@@ -120,10 +136,13 @@ info_row(FunctionCallInfo fcinfo)
 	values[i++] = Int64GetDatum(c.dropped_records);
 	values[i++] = Int32GetDatum(c.bucket_count);
 	values[i++] = Int32GetDatum((int32) (c.interval_us / USECS_PER_SEC));
-	if (oldest == PSSC_BUCKET_NONE)
-		nulls[i++] = true;
-	else
-		values[i++] = TimestampTzGetDatum(pssc_store_bucket_start(oldest));
+	if (with_oldest)
+	{
+		if (oldest == PSSC_BUCKET_NONE)
+			nulls[i++] = true;
+		else
+			values[i++] = TimestampTzGetDatum(pssc_store_bucket_start(oldest));
+	}
 	values[i++] = TimestampTzGetDatum(pssc_store_bucket_start(c.current_bucket));
 	values[i++] = TimestampTzGetDatum(pssc_store_bucket_start(c.current_bucket - 1));
 	values[i++] = Int64GetDatum((int64) c.shmem_bytes);
@@ -141,18 +160,26 @@ info_row(FunctionCallInfo fcinfo)
 	values[i++] = Int64GetDatum((int64) c.exemplar_shmem_bytes);
 	values[i++] = Int32GetDatum(c.exemplar_value_len);
 	values[i++] = Int64GetDatum(c.exemplar_values_dropped);
-	Assert(i == INFO_COLS);
+	Assert(i == ncols);
 
 	tupdesc = BlessTupleDesc(tupdesc);
 	return HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
 }
 
-PG_FUNCTION_INFO_V1(pg_stat_statement_context_info);
+PG_FUNCTION_INFO_V1(pg_stat_statement_context_info_1_0);
 
 Datum
-pg_stat_statement_context_info(PG_FUNCTION_ARGS)
+pg_stat_statement_context_info_1_0(PG_FUNCTION_ARGS)
 {
-	return info_row(fcinfo);
+	return info_row(fcinfo, true);
+}
+
+PG_FUNCTION_INFO_V1(pg_stat_statement_context_counters_1_0);
+
+Datum
+pg_stat_statement_context_counters_1_0(PG_FUNCTION_ARGS)
+{
+	return info_row(fcinfo, false);
 }
 
 PG_FUNCTION_INFO_V1(pg_stat_statement_context_reset);

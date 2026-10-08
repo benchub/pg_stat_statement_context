@@ -107,6 +107,17 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_store_test_stall_next_info_scan(release_file text) RETURNS void
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- Until pssc_store_test_info_scan_hook_off() (this backend): every _info()
+-- scan calls a hook after each entry, under the shared store lock, which
+-- counts its calls, for the first max_advances calls advances the debug
+-- clock by advance_us and raises the watermark to it, and sleeps sleep_ms.
+-- _off() removes the hook and returns the number of calls.
+CREATE FUNCTION pssc_store_test_info_scan_hook(advance_us bigint, sleep_ms int,
+                                               max_advances bigint) RETURNS void
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+CREATE FUNCTION pssc_store_test_info_scan_hook_off() RETURNS bigint
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
 -- One-shot (this backend): the next pssc_store_record() switches forced
 -- collisions to on_ after it has hashed its key and before it takes a lock
 -- (pssc_store_set_record_test_hook()), i.e. as if another backend had done

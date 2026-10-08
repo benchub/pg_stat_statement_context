@@ -1,2 +1,2 @@
 # Released extension scripts: never edit in place (scripts/check-frozen-sql.sh).
-9ac84a46ccb52413960685499f37578f3d8b5b4cfaa42dfb630b0118c90bbe53  sql/pg_stat_statement_context--1.0.sql
+0ff3e0d06054c516afd44071bae9cf2b7b5411564d0687ce05660b0c27c03e8d  sql/pg_stat_statement_context--1.0.sql

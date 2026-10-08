@@ -373,15 +373,26 @@ extern PGDLLEXPORT void pssc_store_reset(void);
 extern PGDLLEXPORT bool pssc_store_get_counters(PsscStoreCounters *c);
 
 /*
+ * For _counters() (DESIGN.md §7): the counters as pssc_store_get_counters(),
+ * and c->current_bucket, the watermark after raising it to the clock as
+ * every reader does. O(1): takes the shared lock only to copy the header.
+ * false (*c zeroed) if the store is not set up.
+ */
+extern PGDLLEXPORT bool pssc_store_get_header(PsscStoreCounters *c);
+
+/*
  * For _info() (DESIGN.md §7): the counters as pssc_store_get_counters(),
  * and *oldest_bucket, the oldest live slot of any entry (PSSC_BUCKET_NONE
  * if no slot is live), all under one acquisition of the shared lock, so
  * the snapshot is wholly before or wholly after any reset. Like every
- * reader it first raises current_bucket to the clock, and it judges each
- * entry's slots against the watermark read after copying them (as
- * pssc_store_foreach()); c->current_bucket is the watermark read at the
- * end of the scan. Scans the whole table. false (*c zeroed,
- * *oldest_bucket PSSC_BUCKET_NONE) if the store is not set up.
+ * reader it first raises current_bucket to the clock; every slot is judged
+ * against that watermark, returned as c->current_bucket. If the watermark
+ * moved during the scan, the scan is repeated from scratch under a new
+ * acquisition, at most 3 passes in all; the last pass is returned even if
+ * the watermark moved during it. A pass (but the last) stops for a pending
+ * interrupt, releases the lock and services it, so a cancel is prompt.
+ * Scans the whole table. false (*c zeroed, *oldest_bucket
+ * PSSC_BUCKET_NONE) if the store is not set up.
  */
 extern PGDLLEXPORT bool pssc_store_get_info(PsscStoreCounters *c,
 											int64 *oldest_bucket);
@@ -476,5 +487,13 @@ extern PGDLLEXPORT int64 pssc_store_debug_evict_slots(PsscEvictSlotVisitor fn,
 extern PGDLLEXPORT void pssc_store_debug_set_clock(PsscDebugClockMode mode,
 												   int64 value);
 extern PGDLLEXPORT void pssc_store_debug_advance_clock(int64 usec);
+
+/*
+ * Testing aid: raises current_bucket to the (debug) clock as a reader does,
+ * without taking the store lock (the watermark is lock-free, §5.2), so a
+ * test hook running under the lock can move it. Returns the watermark.
+ * Reachable only from C (test/modules/pssc_store_test).
+ */
+extern PGDLLEXPORT int64 pssc_store_debug_observe_clock(void);
 
 #endif							/* PSSC_STORE_H */

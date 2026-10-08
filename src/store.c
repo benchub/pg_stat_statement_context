@@ -1389,6 +1389,24 @@ pssc_store_get_counters(PsscStoreCounters *c)
 }
 
 bool
+pssc_store_get_header(PsscStoreCounters *c)
+{
+	if (!pssc_store_get_counters(c))
+		return false;
+	/* as every reader (§5.2); the watermark is lock-free and never reset */
+	c->current_bucket = observe_current_bucket(PSSC_BUCKET_NONE);
+	return true;
+}
+
+/*
+ * The most passes pssc_store_get_info() makes over the table (DESIGN.md
+ * §7). A pass is repeated only if the watermark moved during it, which
+ * happens at most once per bucket_interval unless the clock is stepped, so
+ * a second pass is rare and a third one rarer still.
+ */
+#define INFO_MAX_PASSES 3
+
+bool
 pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 {
 	HASH_SEQ_STATUS seq;
@@ -1396,7 +1414,8 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 	int			count;
 	int64	   *ids;
 	int64		oldest = PSSC_BUCKET_NONE;
-	int64		current;
+	int64		current = PSSC_BUCKET_NONE;
+	bool		can_interrupt;
 
 	memset(c, 0, sizeof(*c));
 	*oldest_bucket = PSSC_BUCKET_NONE;
@@ -1405,22 +1424,41 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 	count = store_state->bucket_count;
 	ids = palloc(count * sizeof(int64));
 
-	LWLockAcquire(store_state->lock, LW_SHARED);
-	read_counters_locked(c);
-
-	/* as every reader (§5.2): advance the watermark to the clock first */
-	current = observe_current_bucket(PSSC_BUCKET_NONE);
-
 	/*
-	 * Judge every slot against one watermark, the one returned as
-	 * current_bucket, so the row is self-consistent; if a writer or reader
-	 * moved it during the scan, scan again (it moves at most once per
-	 * bucket_interval, so this is rare and settles quickly).
+	 * The lock holds off interrupts, so a pass gives way to one itself: it
+	 * stops, releases the lock and lets CHECK_FOR_INTERRUPTS() service it
+	 * (a cancel raises ERROR there). Only if the caller could have taken
+	 * the interrupt, or the pass would just start over with it still
+	 * pending.
 	 */
-	for (;;)
+	can_interrupt = INTERRUPTS_CAN_BE_PROCESSED();
+
+	for (int pass = 1;; pass++)
 	{
+		bool		interrupted = false;
 		int64		after;
 
+		/*
+		 * Each pass is a fresh snapshot under one acquisition of the lock
+		 * (counters, watermark and slots together, wholly before or after
+		 * any reset): a scan is never resumed across a release.
+		 */
+		LWLockAcquire(store_state->lock, LW_SHARED);
+		read_counters_locked(c);
+
+		/* as every reader (§5.2): advance the watermark to the clock first */
+		current = observe_current_bucket(PSSC_BUCKET_NONE);
+
+		/*
+		 * Judge every slot against one watermark, the one returned as
+		 * current_bucket, so the row is self-consistent; if a writer or
+		 * reader moved it during the pass, make another one, up to
+		 * INFO_MAX_PASSES. The last pass is kept whatever happens to the
+		 * watermark meanwhile, so oldest_bucket may be up to that
+		 * movement stale when the row is returned (but is never a bucket
+		 * expired at the row's own current_bucket); and it is never cut
+		 * short, so every row comes from a whole pass.
+		 */
 		oldest = PSSC_BUCKET_NONE;
 		hash_seq_init(&seq, store_htab);
 		while ((entry = hash_seq_search(&seq)) != NULL)
@@ -1440,14 +1478,23 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 
 			if (unlikely(info_scan_test_hook != NULL))
 				info_scan_test_hook(info_scan_test_hook_arg);
+
+			if (unlikely(InterruptPending) && can_interrupt &&
+				pass < INFO_MAX_PASSES)
+			{
+				hash_seq_term(&seq);
+				interrupted = true;
+				break;
+			}
 		}
 		after = watermark_read();
-		if (after == current)
+		LWLockRelease(store_state->lock);
+
+		if (!interrupted && (after == current || pass >= INFO_MAX_PASSES))
 			break;
-		current = after;
+		CHECK_FOR_INTERRUPTS();
 	}
 	c->current_bucket = current;
-	LWLockRelease(store_state->lock);
 
 	pfree(ids);
 	*oldest_bucket = oldest;
@@ -1735,6 +1782,14 @@ pssc_store_debug_set_clock(PsscDebugClockMode mode, int64 value)
 	SpinLockAcquire(&store_state->clock_mutex);
 	clock_set_locked(mode, value);
 	SpinLockRelease(&store_state->clock_mutex);
+}
+
+int64
+pssc_store_debug_observe_clock(void)
+{
+	if (store_state == NULL)
+		elog(ERROR, "pg_stat_statement_context shared store is not set up");
+	return observe_current_bucket(PSSC_BUCKET_NONE);
 }
 
 void

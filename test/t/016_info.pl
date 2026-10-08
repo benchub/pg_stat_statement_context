@@ -35,7 +35,7 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 use PsscTest;
 use IPC::Run;
-use Time::HiRes qw(usleep);
+use Time::HiRes qw(usleep time);
 
 my $P = 'pg_stat_statement_context';
 
@@ -110,10 +110,7 @@ sub pin
 
 # ------------------------------------------------------- catalog: §7
 {
-	is(sql(qq{SELECT pg_get_function_arguments(p.oid) || ' -> ' || pg_get_function_result(p.oid)
-	          || ' ' || concat_ws(' ', provolatile, proretset)
-	          FROM pg_proc p WHERE proname = '${P}_info'}),
-		'OUT entries bigint, OUT max_entries bigint, OUT dealloc bigint, '
+	my $info_cols = 'OUT entries bigint, OUT max_entries bigint, OUT dealloc bigint, '
 		  . 'OUT reclaimed_entries bigint, OUT evicted_entries bigint, '
 		  . 'OUT dropped_records bigint, OUT buckets integer, OUT bucket_seconds integer, '
 		  . 'OUT oldest_bucket timestamp with time zone, '
@@ -125,8 +122,11 @@ sub pin
 		  . 'OUT capped_tags bigint, OUT cap_table_full bigint, '
 		  . 'OUT stats_reset timestamp with time zone, OUT stats_reset_epoch bigint, '
 		  . 'OUT exemplar_shmem_bytes bigint, OUT exemplar_value_bytes integer, '
-		  . 'OUT exemplar_values_dropped bigint '
-		  . '-> record v f',
+		  . 'OUT exemplar_values_dropped bigint';
+	is(sql(qq{SELECT pg_get_function_arguments(p.oid) || ' -> ' || pg_get_function_result(p.oid)
+	          || ' ' || concat_ws(' ', provolatile, proretset)
+	          FROM pg_proc p WHERE proname = '${P}_info'}),
+		"$info_cols -> record v f",
 		'_info(): exactly the §7 columns, one row, VOLATILE');
 	is(sql(qq{SELECT pg_get_function_arguments(p.oid) || ' -> ' || pg_get_function_result(p.oid)
 	          || ' ' || provolatile::text FROM pg_proc p WHERE proname = '${P}_reset'}),
@@ -135,6 +135,21 @@ sub pin
 	                 has_function_privilege('alice', '${P}_reset()', 'EXECUTE')}),
 		't|f', '_info() is executable by PUBLIC, _reset() is not');
 	is(sql(qq{SELECT count(*) FROM ${P}_info()}), 1, '_info() returns one row');
+
+	(my $counters_cols = $info_cols) =~ s/OUT oldest_bucket timestamp with time zone, //;
+	is(sql(qq{SELECT pg_get_function_arguments(p.oid) || ' -> ' || pg_get_function_result(p.oid)
+	          || ' ' || concat_ws(' ', provolatile, proparallel, proisstrict, proretset)
+	          FROM pg_proc p WHERE proname = '${P}_counters'}),
+		"$counters_cols -> record v r t f",
+		'_counters(): the _info() columns but oldest_bucket, VOLATILE PARALLEL RESTRICTED STRICT');
+	is(sql(qq{SELECT concat_ws(' ', provolatile, proparallel, proisstrict, prosrc)
+	          FROM pg_proc WHERE proname = '${P}_info'}),
+		'v r t pg_stat_statement_context_info_1_0', '_info(): versioned C symbol');
+	is(sql(qq{SELECT prosrc FROM pg_proc WHERE proname = '${P}_counters'}),
+		'pg_stat_statement_context_counters_1_0', '_counters(): versioned C symbol');
+	is(sql(qq{SELECT has_function_privilege('alice', '${P}_counters()', 'EXECUTE')}),
+		't', '_counters() is executable by PUBLIC, like _info()');
+	is(sql(qq{SELECT count(*) FROM ${P}_counters()}), 1, '_counters() returns one row');
 }
 
 # ------------------------------------------------- sizes, empty store
@@ -479,6 +494,94 @@ my $big = q{'SELECT 2 /*' || (SELECT string_agg('k' || i || '=''' || repeat('v',
 	unlink $release;
 }
 
+# --------------------------------------- bounded, interruptible scan
+# The oldest_bucket walk is repeated when the watermark moves during it,
+# at most 3 passes (DESIGN.md §7): a TEST-ONLY hook advances the watermark
+# after every entry judged, so every pass ends with a moved watermark. The
+# hook stops advancing after 1000 calls, so an unbounded loop ends too (and
+# fails the call count) instead of hanging.
+{
+	sql("SELECT ${P}_reset()");
+	my $b = sql('SELECT reader_bucket + 10 FROM pssc_store_test_buckets()');
+	my $us = sql('SELECT interval_us FROM pssc_store_test_buckets()');
+	pin($b);
+	sql("SELECT pssc_store_test_record(q) FROM generate_series(1, 5) q");
+	my $out = sql(qq{SELECT pssc_store_test_info_scan_hook($us, 0, 1000);
+		SELECT coalesce(oldest_bucket::text, 'NULL') || '|' || current_bucket_start
+		  || '|' || entries FROM ${P}_info();
+		SELECT pssc_store_test_info_scan_hook_off()});
+	my (undef, $row, $calls) = split /\n/, $out;
+	is($calls, 15, 'a moving watermark: _info() gives up after 3 passes over the 5 entries');
+	is($row, 'NULL|' . sql("SELECT pssc_store_test_bucket_start($b + 10)") . '|5',
+		'the row is judged against the watermark of its last pass (b+10: slot b expired)');
+	is(sql('SELECT current_bucket FROM pssc_store_test_buckets()'), $b + 15,
+		'meanwhile the watermark moved on (the documented bounded staleness)');
+
+	# A still watermark: one pass.
+	pin($b + 16);
+	sql("SELECT pssc_store_test_record(q) FROM generate_series(1, 5) q");
+	$out = sql(qq{SELECT pssc_store_test_info_scan_hook(0, 0, 0);
+		SELECT oldest_bucket = pssc_store_test_bucket_start($b + 16) FROM ${P}_info();
+		SELECT pssc_store_test_info_scan_hook_off()});
+	is($out, "\nt\n5", 'a still watermark: one pass, oldest_bucket exact');
+
+	# A cancel is serviced in the middle of a pass: 50 entries, the hook
+	# sleeps 200 ms after each (a 10 s pass) under the lock, where the
+	# interrupt is held off; the walk checks for it after each entry,
+	# releases the lock and lets it through.
+	sql("SELECT pssc_store_test_record(q) FROM generate_series(1, 50) q");
+	my %r = (out => '', err => '');
+	my $h = IPC::Run::start(
+		[ 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d',
+		  $node->connstr('postgres') . ' application_name=pssc_cancel',
+		  '-c', 'SELECT pssc_store_test_info_scan_hook(0, 200, 0)',
+		  '-c', "SELECT entries FROM ${P}_info()" ],
+		'>', \$r{out}, '2>', \$r{err}, IPC::Run::timeout(180));
+	ok($node->poll_query_until('postgres',
+			q{SELECT EXISTS (SELECT FROM pg_stat_activity
+			  WHERE application_name = 'pssc_cancel' AND wait_event = 'PgSleep')}),
+		'the _info() walk is under way');
+	my $t0 = time();
+	sql(q{SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+	      WHERE application_name = 'pssc_cancel'});
+	$h->finish;
+	my $elapsed = time() - $t0;
+	like($r{err}, qr/canceling statement due to user request/, 'the _info() call is canceled');
+	ok($elapsed < 5, "promptly, within the pass ($elapsed s, a pass takes 10 s)");
+	unlike($r{out}, qr/\d/, 'no row');
+	sql('SELECT pssc_store_test_set_clock_offset(0)');
+}
+
+# --------------------------------------------------------- _counters()
+# The cheap counters-only read: every _info() column but oldest_bucket,
+# from the same header snapshot, without walking the entries.
+{
+	sql("SELECT ${P}_reset()");
+	my $b = sql('SELECT reader_bucket + 10 FROM pssc_store_test_buckets()');
+	pin($b);
+	sql("SELECT pssc_store_test_record(q) FROM generate_series(1, 7) q");
+	sql(q{SELECT 1 /*a='1',bad='%00'*/});
+	my @c = grep { $_ ne 'oldest_bucket' } @cols, qw(capped_tags cap_table_full);
+	my $row = join(', ', @c);
+	is(sql(qq{SELECT (SELECT row($row) FROM ${P}_counters())
+	                 IS NOT DISTINCT FROM (SELECT row($row) FROM ${P}_info())}),
+		't', '_counters() equals the corresponding _info() columns');
+	is(sql(qq{SELECT entries || ' ' || invalid_tags || ' ' || (current_bucket_start
+	                 = pssc_store_test_bucket_start($b)) FROM ${P}_counters()}),
+		'8 1 true', '_counters(): the entries (7 + the tagged statement), a counter and the current bucket');
+	is(sql(qq{SELECT pssc_store_test_info_scan_hook(0, 0, 0);
+		SELECT count(*) FROM ${P}_counters();
+		SELECT pssc_store_test_info_scan_hook_off()}), "\n1\n0",
+		'_counters() does not walk the entries');
+	is(sql(qq{SELECT pssc_store_test_info_scan_hook(0, 0, 0);
+		SELECT count(*) FROM ${P}_info();
+		SELECT pssc_store_test_info_scan_hook_off()}), "\n1\n8",
+		'(_info() walks each of the 8 entries)');
+	is(sql(qq{SELECT invalid_tags FROM ${P}_counters() /*a='1',bad='%00'*/}), 2,
+		'_counters() sees the calling statement\'s own extraction counters');
+	sql('SELECT pssc_store_test_set_clock_offset(0)');
+}
+
 # --------------------------------------------------------- oldest_bucket
 {
 	sql("SELECT ${P}_reset()");
@@ -530,7 +633,8 @@ unlike(slurp_file($node->logfile), qr/TRAP|PANIC|terminated by signal/, 'no cras
 	$np->init;
 	$np->start;
 	$np->safe_psql('postgres', "CREATE EXTENSION $P");
-	for my $q ("SELECT * FROM ${P}_info()", "SELECT ${P}_reset()",
+	for my $q ("SELECT * FROM ${P}_info()", "SELECT * FROM ${P}_counters()",
+		"SELECT ${P}_reset()",
 		"SELECT * FROM $P", "SELECT * FROM ${P}_totals", "SELECT * FROM ${P}_last_bucket")
 	{
 		my ($ret, $out, $err) = $np->psql('postgres', $q);

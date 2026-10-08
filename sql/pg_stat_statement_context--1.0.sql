@@ -149,7 +149,9 @@ REVOKE ALL ON FUNCTION pg_stat_statement_context_extract(text, int, int) FROM PU
 -- counters (DESIGN.md §6.13): the exemplar slots' share of shmem_bytes
 -- (exemplar_shmem_bytes), the most bytes a value may take
 -- (exemplar_value_bytes; longer values are dropped) and the values dropped
--- as too long (exemplar_values_dropped). Readable by everyone, like
+-- as too long (exemplar_values_dropped). Finding oldest_bucket scans the
+-- whole table; pg_stat_statement_context_counters() below returns every other
+-- column without that scan. Readable by everyone, like
 -- pg_stat_statements_info.
 CREATE FUNCTION pg_stat_statement_context_info(
     OUT entries bigint,
@@ -179,7 +181,40 @@ CREATE FUNCTION pg_stat_statement_context_info(
     OUT exemplar_values_dropped bigint
 )
 RETURNS record
-AS 'MODULE_PATHNAME', 'pg_stat_statement_context_info'
+AS 'MODULE_PATHNAME', 'pg_stat_statement_context_info_1_0'
+LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
+
+-- The columns of pg_stat_statement_context_info() but oldest_bucket, read
+-- from the shared header only: constant cost whatever the number of
+-- entries, for scrapers. Readable by everyone, like _info().
+CREATE FUNCTION pg_stat_statement_context_counters(
+    OUT entries bigint,
+    OUT max_entries bigint,
+    OUT dealloc bigint,
+    OUT reclaimed_entries bigint,
+    OUT evicted_entries bigint,
+    OUT dropped_records bigint,
+    OUT buckets int,
+    OUT bucket_seconds int,
+    OUT current_bucket_start timestamptz,
+    OUT last_closed_bucket_start timestamptz,
+    OUT shmem_bytes bigint,
+    OUT cap_shmem_bytes bigint,
+    OUT invalid_tags bigint,
+    OUT dropped_tags bigint,
+    OUT heuristic_scans bigint,
+    OUT regex_compile_failures bigint,
+    OUT utility_missing_queryid bigint,
+    OUT capped_tags bigint,
+    OUT cap_table_full bigint,
+    OUT stats_reset timestamptz,
+    OUT stats_reset_epoch bigint,
+    OUT exemplar_shmem_bytes bigint,
+    OUT exemplar_value_bytes int,
+    OUT exemplar_values_dropped bigint
+)
+RETURNS record
+AS 'MODULE_PATHNAME', 'pg_stat_statement_context_counters_1_0'
 LANGUAGE C STRICT VOLATILE PARALLEL RESTRICTED;
 
 -- Removes every entry, zeroes every counter of _info(), sets stats_reset

@@ -480,6 +480,53 @@ pssc_store_test_stall_next_info_scan(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+/*
+ * Persistent (this backend) until pssc_store_test_info_scan_hook_off(): runs
+ * after each entry judged by an _info() scan, under the shared store lock.
+ * Counts its calls; for the first max_advances calls advances the debug
+ * clock by advance_us and raises the watermark to it (as a concurrent
+ * reader would); then sleeps sleep_ms (wait event PgSleep; not cut short by
+ * a cancel, whose interrupt is held off under the lock anyway).
+ */
+static int64 scan_calls;
+static int64 scan_advance_us;
+static int64 scan_max_advances;
+static int	scan_sleep_ms;
+
+static void
+counting_info_scan_hook(void *arg)
+{
+	scan_calls++;
+	if (scan_advance_us != 0 && scan_calls <= scan_max_advances)
+	{
+		((advance_clock_fn) main_sym("pssc_store_debug_advance_clock")) (scan_advance_us);
+		((int64_fn) main_sym("pssc_store_debug_observe_clock")) ();
+	}
+	for (int i = 0; i < scan_sleep_ms / 10; i++)
+		(void) WaitLatch(MyLatch, WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 10L,
+						 WAIT_EVENT_PG_SLEEP);
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_info_scan_hook);
+Datum
+pssc_store_test_info_scan_hook(PG_FUNCTION_ARGS)
+{
+	scan_calls = 0;
+	scan_advance_us = PG_GETARG_INT64(0);
+	scan_sleep_ms = PG_GETARG_INT32(1);
+	scan_max_advances = PG_GETARG_INT64(2);
+	((set_hook_fn) main_sym("pssc_store_set_info_scan_test_hook")) (counting_info_scan_hook, NULL);
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(pssc_store_test_info_scan_hook_off);
+Datum
+pssc_store_test_info_scan_hook_off(PG_FUNCTION_ARGS)
+{
+	((set_hook_fn) main_sym("pssc_store_set_info_scan_test_hook")) (NULL, NULL);
+	PG_RETURN_INT64(scan_calls);
+}
+
 /* ------------------------------------------------- time buckets (§5.2) */
 
 PG_FUNCTION_INFO_V1(pssc_store_test_buckets);
