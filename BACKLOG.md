@@ -54,7 +54,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261008-065635-1 | Regex compile deadline without signal-handler interception | none | no | ready |
 | 20261008-065635-2 | Bounded, cheap health reads: `_info()` retry bound, counters-only function, exporter recipes | none | no | ready |
 | 20261008-065635-3 | Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation | none | no | ready |
-| 20261008-065635-4 | Standby, restart and promotion qualification | none | no | ready |
 | 20261008-065635-5 | Broader memory-checker coverage | none | no | ready |
 | 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-7 | Hook coexistence tests and a pg_stat_statements parity checklist | none | no | ready |
@@ -276,25 +275,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - `scripts/check-version-guards.sh` still passes; extend it if needed. README and docs are updated.
 
 **Design notes:** If `PGDLLEXPORT` can't easily be split between the two builds, use a `PSSC_TEST_API` macro that expands to `PGDLLEXPORT` in testing builds and `__attribute__((visibility("hidden")))` otherwise, and build with `-fvisibility=hidden`.
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
-
-### 20261008-065635-4: Standby, restart and promotion qualification
-
-**Description:** TST-3 and DOC-4. There is no primary/streaming-standby test. The persistence condition that accepts a clean standby shutdown (`src/store.c` about lines 1874–1875, `DB_SHUTDOWNED_IN_RECOVERY`) can be deleted and `028_persist.pl` still passes. Add a TAP test with a primary and a streaming standby (PostgreSQL::Test::Cluster `init_from_backup` with `has_streaming`) that checks:
-- read-only tagged statements on the standby are recorded in the standby's own store
-- the store is instance-local: the primary's entries don't appear on the standby, and vice versa
-- with `save = on`, a clean standby restart reloads its statistics (the mutation above must make the test fail)
-- after promotion, the new primary keeps recording and its existing in-memory history survives
-- an immediate (crash) shutdown of the standby discards saved statistics as designed
-
-Document the behavior in a new "Replicas and failover" section of docs/limitations.md (or another fitting doc), linked from the README: histories are per instance and not replicated; `shared_preload_libraries` and GUCs must be set on each instance; and what happens on failover.
-
-**Acceptance criteria:**
-- The new TAP test passes on PG 14–18 and fails with the `DB_SHUTDOWNED_IN_RECOVERY` condition removed (state in the commit that this was checked).
-- The docs section exists and is accurate.
 
 **Depends on:** none
 **Open questions:** none
