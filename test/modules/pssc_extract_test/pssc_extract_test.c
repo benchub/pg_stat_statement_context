@@ -299,7 +299,10 @@ typedef enum InjectAction
 	INJ_LATECONFLICT,			/* deadline, then a recovery conflict, then CFI */
 	INJ_LATEREGCONFLICT,		/* deadline, then a recovery conflict, REG_CANCEL */
 	INJ_EXPIRE,					/* let the engine run; the limit expires mid-compile */
-	INJ_EXPIREAFTER				/* the limit expires once the engine has returned */
+	INJ_EXPIREAFTER,			/* the limit expires once the engine has returned */
+	INJ_LIMIT,					/* throw ERRCODE_PROGRAM_LIMIT_EXCEEDED */
+	INJ_REGERR,					/* throw ERRCODE_INVALID_REGULAR_EXPRESSION */
+	INJ_SELFINT					/* a real SIGINT, then let the engine run */
 } InjectAction;
 
 static int	inj_phase = -1;
@@ -346,7 +349,10 @@ cpu_ms(void)
  *
  * While the deadline is put off, any cancel that arrives is a genuine one
  * (client cancel, statement_timeout), so it, or a termination, ends the
- * spinning at once and the caller's loop raises it. If the CPU time hasn't
+ * spinning at once and the caller's loop raises it. The runtime holds a
+ * genuine SIGINT pending in the signal mask while the limit is armed; then
+ * the deadline is let expire at once, as it would for a real compile, and
+ * the runtime raises the genuine cancel. If the CPU time hasn't
  * been used after BUSY_WALL_LIMIT_MS of wall-clock time (a starved host),
  * the injection gives up with a WARNING (the test then fails visibly) and
  * lets the deadline expire.
@@ -378,6 +384,23 @@ deadline_due_now(void (*expire) (int))
 #endif
 		pg_usleep(1000L);
 	}
+}
+
+/*
+ * A genuine cancel (SIGINT: a client cancel, statement_timeout) that the
+ * regex runtime holds pending in the signal mask while the compile time
+ * limit is armed.
+ */
+static bool
+sigint_held(void)
+{
+#ifndef WIN32
+	sigset_t	pending;
+
+	return sigpending(&pending) == 0 && sigismember(&pending, SIGINT);
+#else
+	return false;
+#endif
 }
 
 static void
@@ -421,6 +444,8 @@ busy_past_limit(bool race)
 	{
 		if (ProcDiePending || (!was_pending && QueryCancelPending))
 			return;
+		if (sigint_held())
+			break;				/* the deadline then lets the runtime see it */
 		INSTR_TIME_SET_CURRENT(now);
 		INSTR_TIME_SUBTRACT(now, wstart);
 		if (INSTR_TIME_GET_MILLISEC(now) >= BUSY_WALL_LIMIT_MS)
@@ -511,6 +536,16 @@ inject_action(void)
 		case INJ_ERROR:
 			elog(ERROR, "pssc_extract_test injected internal error");
 			break;
+		case INJ_LIMIT:
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("pssc_extract_test injected program limit exceeded")));
+			break;
+		case INJ_REGERR:
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),
+					 errmsg("pssc_extract_test injected invalid regular expression")));
+			break;
 		case INJ_CANCEL:
 			ereport(ERROR,
 					(errcode(ERRCODE_QUERY_CANCELED),
@@ -594,6 +629,9 @@ inject_action(void)
 		case INJ_EXPIREAFTER:
 			inj_expire_after = true;
 			return REG_OKAY;
+		case INJ_SELFINT:
+			kill(MyProcPid, SIGINT);
+			return REG_OKAY;
 	}
 	return REG_OKAY;
 }
@@ -617,7 +655,8 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 		[INJ_REGSTALL] = "regstall", [INJ_LATEINT] = "lateint",
 		[INJ_LATEREGINT] = "lateregint", [INJ_LATEWAIT] = "latewait",
 		[INJ_LATECONFLICT] = "lateconflict", [INJ_LATEREGCONFLICT] = "lateregconflict",
-		[INJ_EXPIRE] = "expire", [INJ_EXPIREAFTER] = "expireafter"
+		[INJ_EXPIRE] = "expire", [INJ_EXPIREAFTER] = "expireafter",
+		[INJ_LIMIT] = "limit", [INJ_REGERR] = "regerr", [INJ_SELFINT] = "selfint"
 	};
 	int			a = -1;
 

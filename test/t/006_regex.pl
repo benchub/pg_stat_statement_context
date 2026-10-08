@@ -15,6 +15,7 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use File::Basename;
 use Time::HiRes qw(usleep time);
 
 my $P = 'pg_stat_statement_context';
@@ -299,8 +300,8 @@ config(tags => '*', exclude_tags => '',
 	extractors => q{regex(pattern='svc=(\w+)', keys=service), }
 	  . q{regex(pattern='op=(\w+)', keys=operation, merge=on), sqlcommenter(position=any, merge=on)});
 my $Q = sqlq(q{SELECT 1 /* svc=s op=o */ /*a='x'*/});
-for my $pa ((map { [ 'compile', $_ ] } qw(espace etoobig oom error)),
-	[ 'context', 'oom' ], [ 'context', 'error' ])
+for my $pa ((map { [ 'compile', $_ ] } qw(espace etoobig oom limit regerr)),
+	[ 'context', 'oom' ], [ 'context', 'limit' ])
 {
 	my ($phase, $act) = @$pa;
 	# 'context': failure before the pattern's memory context exists
@@ -332,6 +333,27 @@ for my $pa ((map { [ 'compile', $_ ] } qw(espace etoobig oom error)),
 	my $r = ex($Q, pre => q{SELECT pssc_extract_test_regex_inject('compile', 1, 'espace', -1);});
 	is("$r->{tags} $r->{regex_fail}", 'a=x,service=s 1', 'compile failure of the second extractor');
 	is(tags($Q), 'a=x,operation=o,service=s', 'other backends compile normally');
+}
+
+# Only out of memory, program limit exceeded and invalid regular expression
+# are swallowed (the allowlist in src/regex_runtime.c): any other ERROR
+# raised while compiling or matching (here an internal error) propagates and
+# fails the statement, like an error anywhere else. It is not a compile
+# failure: the extractor is not disabled, and compiles on next use.
+for my $phase (qw(context compile exec))
+{
+	my $s = session_open();
+	sex($s, $Q) if $phase eq 'exec';
+	sq($s, "SELECT pssc_extract_test_regex_inject('$phase', 0, 'error', 1)");
+	my (undef, $err) = sq_err($s, ex_sql($Q));
+	like($err, qr/ERROR:  pssc_extract_test injected internal error/,
+		"$phase: an error outside the allowlist propagates");
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, "$phase, error outside the allowlist: injected once");
+	is(sq($s, 'SELECT 42'), 42, "$phase, error outside the allowlist: session healthy");
+	my $r = sex($s, $Q);
+	is("$r->{tags} $r->{regex_fail}", 'a=x,operation=o,service=s 0',
+		"$phase, error outside the allowlist: extractor not disabled, not counted");
+	session_close($s);
 }
 
 # Interrupts during compilation are honored and are not compile failures.
@@ -613,6 +635,93 @@ my $HUGE = q{((?:(?:$)|\Zda|(?<!1)|\S){0,255})};
 	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', 'slow pattern, real engine: no cancel left pending');
 	session_close($s);
 }
+# Genuine interrupts during, and right after, a real compile that hits the
+# limit (item 20261008-065635-1): a client cancel or statement_timeout that
+# arrives mid-compile cancels the statement (at the latest when the limit
+# stops the compile) and is not a compile failure; once the limit stopped a
+# compile, cancels and timeouts work as before (nothing about signal
+# handling is left changed). 'selfint' sends this backend a real SIGINT (as
+# pg_cancel_backend() does) and then lets the real engine compile $SLOW.
+{
+	my $limit = 300;	# $SLOW takes longer (see above)
+	my $ex = ex_sql(sqlq(q{SELECT 1 /* x */ /*a='x'*/}));
+	my $s = session_open();
+	sq($s, 'SELECT pssc_extract_test_regex_compile_limit(0)');
+	sq($s, "SELECT pssc_extract_test_set_local('$P.extractors', "
+		  . sqlq("regex(pattern='$SLOW', keys=slow), sqlcommenter(position=any, merge=on)") . ')');
+	sq($s, "SELECT pssc_extract_test_regex_compile_limit($limit)");
+
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', 0, 'selfint', 1)");
+	my $t0 = time;
+	my (undef, $err) = sq_err($s, $ex);
+	my $dt = time - $t0;
+	like($err, qr/ERROR:  canceling statement due to user request/,
+		'cancel during a real compile: the statement is canceled');
+	cmp_ok($dt, '<', $BOUND_S, "cancel during a real compile: promptly (${dt}s)");
+	is(sq($s, 'SELECT pssc_extract_test_regex_injected()'), 1, 'cancel during a real compile: injected');
+	sq($s, "SELECT pssc_extract_test_regex_inject('compile', -1, 'none')");
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', 'cancel during a real compile: nothing left pending');
+
+	(undef, $err) = sq_err($s, "SET statement_timeout = '100ms'; $ex");
+	like($err, qr/ERROR:  canceling statement due to statement timeout/,
+		'statement_timeout during a real compile: the statement is canceled');
+	sq($s, 'RESET statement_timeout');
+	is(sq($s, 'SELECT pg_sleep(0.2), 42'), '|42', 'statement_timeout during a real compile: nothing left pending');
+
+	my $r = sex($s, sqlq(q{SELECT 1 /* x */ /*a='x'*/}));
+	is("$r->{tags} $r->{regex_fail}", 'a=x 1',
+		'interrupted compiles were not failures; the next one is stopped by the limit and counted');
+
+	(undef, $err) = sq_err($s, "SET statement_timeout = '200ms'; SELECT pg_sleep(30)");
+	like($err, qr/ERROR:  canceling statement due to statement timeout/,
+		'statement_timeout after a compile stopped by the limit: honored');
+	sq($s, 'RESET statement_timeout');
+	my $pid = sq($s, 'SELECT pg_backend_pid()');
+	$s->{in} .= "SELECT pg_sleep(30);
+";
+	$s->{h}->pump_nb;
+	$node->poll_query_until('postgres',
+		"SELECT count(*) = 1 FROM pg_stat_activity WHERE pid = $pid AND state = 'active' "
+		  . "AND query LIKE '%pg_sleep(30)%'")
+	  or die 'pg_sleep did not start';
+	$t0 = time;
+	$node->safe_psql('postgres', "SELECT pg_cancel_backend($pid)");
+	(undef, $err) = sq_err($s, 'SELECT 42');
+	$dt = time - $t0;
+	like($err, qr/ERROR:  canceling statement due to user request/,
+		'pg_cancel_backend after a compile stopped by the limit: honored');
+	cmp_ok($dt, '<', $BOUND_S, "pg_cancel_backend after a compile stopped by the limit: promptly (${dt}s)");
+	is(sq($s, 'SELECT 42'), 42, 'after a compile stopped by the limit: session healthy');
+	session_close($s);
+}
+
+# The regex runtime leaves the backend's signal handlers alone and never
+# clears QueryCancelPending (item 20261008-065635-1): the compile time limit
+# raises a cancel only through the one assignment in its timeout handler,
+# which core's ProcessInterrupts() consumes as usual.
+{
+	my $dir = dirname(__FILE__) . '/../../src';
+	my (@sig, @pq, @clear, @set);
+	for my $f (glob("$dir/*.c"), glob("$dir/*.h"))
+	{
+		my $code = slurp_file($f);
+		$code =~ s{/\*.*?\*/}{}gs;
+		$code =~ s{//[^\n]*}{}g;
+		(my $name = $f) =~ s{.*/}{};
+		push @sig, $name if $code =~ /\bsigaction\b|\bsignal\s*\(/;
+		push @pq, $name if $code =~ /\bpqsignal\b/;
+		push @clear, $name if $code =~ /\bQueryCancelPending\s*=\s*(?:false|0)\b/;
+		push @set, $name while $code =~ /\bQueryCancelPending\s*=(?!=)/g;
+	}
+	ok(scalar(glob("$dir/regex_runtime.c")), 'source check: src/ found');
+	is("@sig", '', 'source check: no signal handler is installed or replaced in src/');
+	# The reclaim background worker installs its own handlers at startup, as
+	# every background worker does; no backend handler is touched.
+	is("@pq", 'reclaim.c', 'source check: pqsignal only in the reclaim worker main');
+	is("@clear", '', 'source check: QueryCancelPending is never cleared in src/');
+	is("@set", 'regex_runtime.c', 'source check: QueryCancelPending is set only by the compile time limit');
+}
+
 # The check hooks reject patterns that outlast the limit, promptly.
 for my $c ([ 'extractors', "regex(pattern='$HUGE', keys=a)", 'extractor "regex"' ],
 	[ 'extractors', "regex(pattern='$SLOW', keys=a)", 'extractor "regex"' ],
@@ -947,7 +1056,7 @@ sub parallel_query_ok
 # Match errors: no pairs from that comment, statement succeeds, extractor
 # stays enabled; interrupts are honored
 # ---------------------------------------------------------------------------
-for my $action (qw(espace etoobig oom error))
+for my $action (qw(espace etoobig oom limit regerr))
 {
 	my $s = session_open();
 	sq($s, "SELECT pssc_extract_test_regex_inject('exec', 0, '$action', 1)");

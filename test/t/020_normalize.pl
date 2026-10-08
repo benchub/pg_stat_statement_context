@@ -194,7 +194,7 @@ sub wait_session
 # ---------------------------------------------------------------------------
 config(normalize => q{route: '\d+' => 'N', action: '\d+' => 'A'});
 wait_session();
-for my $c ([ 'espace', 'norm_exec' ], [ 'error', 'norm_exec' ], [ 'oom', 'norm_exec' ])
+for my $c ([ 'espace', 'norm_exec' ], [ 'limit', 'norm_exec' ], [ 'oom', 'norm_exec' ])
 {
 	my ($action, $phase) = @$c;
 	sq("SELECT ${P}_reset()");
@@ -206,6 +206,20 @@ for my $c ([ 'espace', 'norm_exec' ], [ 'error', 'norm_exec' ], [ 'oom', 'norm_e
 		"replace failure ($action): the tag of that key is dropped, others kept");
 	is(sq(q{SELECT pg_stat_statement_context_extract('SELECT 1 /*route:/r/2*/')->>'normalize_failures'}),
 		'0', "replace failure ($action): the next statement normalizes again");
+}
+# An error outside the allowlist (out of memory, program limit exceeded,
+# invalid regular expression), here an internal error, is not swallowed: the
+# statement fails; the rule stays enabled.
+{
+	sq("SELECT ${P}_reset()");
+	sq("SELECT pssc_extract_test_regex_inject('norm_exec', 0, 'error', 1)");
+	my (undef, $err) = sq_err('SELECT count(*) FROM t /*route:/r/1,action:/a/1*/');
+	like($err, qr/ERROR:  pssc_extract_test injected internal error/,
+		'replace error outside the allowlist: propagates');
+	is(sq('SELECT pssc_extract_test_regex_injected()'), 1, 'replace error outside the allowlist: injected once');
+	sq('SELECT count(*) FROM t /*route:/r/1,action:/a/1*/');
+	is(recorded(), qq{{"route": "/r/N", "action": "/a/A"} 1},
+		'replace error outside the allowlist: the rule still applies');
 }
 sq("SELECT pssc_extract_test_regex_inject('norm_exec', 0, 'espace', 1)");
 is( sq(q{SELECT pg_stat_statement_context_extract('SELECT 1 /*route:/r/1,action:/a/1*/') }

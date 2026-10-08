@@ -13,16 +13,17 @@
  * while PG16+'s uses palloc in the current context (the child), where
  * pg_regfree() pfrees and deleting the child reclaims anything left over.
  *
- * Errors. The hook must not fail the user's statement, but must still honor
- * query cancel and other interrupts. Compilation (including creating the
- * pattern's memory context) and matching run in PG_TRY, and matching
- * allocates only with MCXT_ALLOC_NO_OOM: errors
- * whose SQLSTATE stands for an interrupt or a condition that must abort the
- * transaction (QUERY_CANCELED: cancel and statement/lock timeouts; shutdown
- * and similar) are re-thrown; any other ERROR (e.g. out of memory) is
- * swallowed with FlushErrorState() after restoring the interrupt holdoff
- * counts that errfinish() zeroed. No subtransaction is needed: the engine
- * holds no locks, buffers or other resources, only memory in our contexts.
+ * Errors. The hook must not fail the user's statement because of a
+ * pattern, but must still honor query cancel and other interrupts.
+ * Compilation (including creating the pattern's memory context) and
+ * matching run in PG_TRY, and matching allocates only with
+ * MCXT_ALLOC_NO_OOM. The protected code touches only memory in our own
+ * contexts and holds no locks, buffers or other resources, so no
+ * subtransaction is needed. Only the errors a compile or match is expected
+ * to raise (out of memory, program limit exceeded, invalid regular
+ * expression: may_swallow()) are swallowed with FlushErrorState() after
+ * restoring the interrupt holdoff counts that errfinish() zeroed; any other
+ * ERROR, interrupts included, is re-thrown.
  * A non-OK return code (PG14/15 report a pending interrupt as REG_CANCEL,
  * PG16+ report OOM as REG_ESPACE) is followed by CHECK_FOR_INTERRUPTS(), so
  * a pending cancel is raised as the usual ERROR. A failed compile that is
@@ -34,9 +35,10 @@
  * (pssc_regex_compile()): in a client backend a compile still running at
  * the limit is aborted through the engine's cancel check and counts as a
  * compile failure, without an error for the statement; a genuine cancel or
- * timeout during the compile still propagates. A compile that hit the limit
- * because it was descheduled (little CPU time used) is retried, a few
- * times. Every attempt compiles into a new context, deleted if the attempt
+ * timeout during the compile still propagates, at the latest when the
+ * limit expires (SIGINT is blocked meanwhile; see "Compile time limit"
+ * below). A compile that hit the limit because it was descheduled (little
+ * CPU time used) is retried, a few times. Every attempt compiles into a new context, deleted if the attempt
  * fails: on PG16+ an attempt stopped by the limit throws out of
  * pg_regcomp() before its cleanup, leaving its allocations behind (PG14/15
  * return REG_CANCEL after freeing their own). The slot keeps the context of
@@ -132,25 +134,25 @@ pssc_regex_release_stale(void)
 }
 
 /*
- * True if the error being handled must propagate: interrupts (cancel,
- * statement/lock/idle timeouts, termination) and conditions the
- * transaction must not survive.
+ * Catch policy. The PG_TRY sites of this file (compile_slot(),
+ * pssc_regex_extract(), pssc_regex_normalize()) protect code that touches
+ * only private memory: the pattern's or the scratch context and the
+ * engine's own allocations. It takes no locks, pins no buffers and acquires
+ * no resource-owner resources, so an error there leaves nothing that a
+ * subtransaction abort would have to release, and none is used (one per
+ * match would be far too costly). Even so, only the errors the engine and
+ * its allocations are expected to raise are swallowed; anything else (an
+ * interrupt, a bug, an unexpected condition) is re-thrown, so the statement
+ * fails as it would without this extension.
  */
 static bool
-must_rethrow(int code)
+may_swallow(int code)
 {
 	switch (code)
 	{
-		case ERRCODE_QUERY_CANCELED:
-		case ERRCODE_LOCK_NOT_AVAILABLE:
-		case ERRCODE_T_R_SERIALIZATION_FAILURE:
-		case ERRCODE_T_R_DEADLOCK_DETECTED:
-		case ERRCODE_ADMIN_SHUTDOWN:
-		case ERRCODE_CRASH_SHUTDOWN:
-		case ERRCODE_CANNOT_CONNECT_NOW:
-		case ERRCODE_DATABASE_DROPPED:
-		case ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT:
-		case ERRCODE_IDLE_SESSION_TIMEOUT:
+		case ERRCODE_OUT_OF_MEMORY:
+		case ERRCODE_PROGRAM_LIMIT_EXCEEDED:
+		case ERRCODE_INVALID_REGULAR_EXPRESSION:
 			return true;
 		default:
 			return false;
@@ -171,37 +173,40 @@ interrupt_pending(void)
 
 /*
  * Compile time limit (pssc_regex_compile()). In a client backend the limit
- * is a USER_TIMEOUT whose handler raises a query cancel, so the engine
- * aborts the compile at its next interrupt check: PG14/15's engine returns
- * REG_CANCEL, PG16+'s throws the usual "canceling statement" ERROR from
- * CHECK_FOR_INTERRUPTS(). While the timeout is armed, SIGINT goes through
- * compile_sigint_handler(), which notes that a genuine cancel (a client
- * cancel request, or statement_timeout / lock_timeout, which signal the
- * backend itself) arrived and then runs the regular handler. The only other
- * source of QueryCancelPending is a recovery conflict on PG14-16, set by
- * the SIGUSR1 (procsignal) handler; compile_sigusr1_handler() detects it.
- * On disarm the cancel is ours, and is consumed, only if the deadline fired
- * and nothing else requested a cancel; otherwise it is left to propagate as
- * usual. Consuming it re-arms InterruptPending: ProcessInterrupts() clears
- * it before raising the cancel, and other interrupts processed after the
- * cancel (recovery conflicts on PG17+, transaction_timeout, ...) may still
- * be pending.
+ * is a USER_TIMEOUT whose handler raises a query cancel the way core's
+ * SIGINT handler does (QueryCancelPending and InterruptPending), so the
+ * engine aborts the compile at its next interrupt check: PG14/15's engine
+ * returns REG_CANCEL (its rcancelrequested() tests InterruptPending &&
+ * (QueryCancelPending || ProcDiePending)), PG16+'s throws the usual
+ * "canceling statement" ERROR from CHECK_FOR_INTERRUPTS(). Setting only
+ * InterruptPending does not stop either: PG14/15 ignore it, and on PG16+
+ * ProcessInterrupts() clears it and returns, and of the flags it handles
+ * only QueryCancelPending (and recovery conflicts) raise an ERROR rather
+ * than FATAL. So the handler sets QueryCancelPending; nothing here ever
+ * clears it: ProcessInterrupts() consumes it.
+ *
+ * To tell the deadline's cancel from a genuine one, SIGINT is blocked
+ * (sigprocmask(), core's handlers stay in place) while the limit is armed.
+ * A client cancel and statement_timeout / lock_timeout (whose handlers
+ * signal the backend itself) then stay pending in the signal mask until the
+ * compile ends or the deadline fires, i.e. they wait at most the limit. A
+ * cancel error raised with the deadline fired and no SIGINT pending is the
+ * deadline's and is swallowed; with one pending, it also reports the
+ * genuine request and propagates. Once the limit is disarmed, SIGINT is
+ * unblocked, so a pending one is handled by core's handler as usual. The
+ * only other source of QueryCancelPending, a PG14-16 recovery conflict
+ * (SIGUSR1), raises its own SQLSTATE and so is never taken for the
+ * deadline's. A swallowed cancel re-arms InterruptPending: ProcessInterrupts()
+ * clears it before raising the cancel, and other interrupts processed after
+ * the cancel (recovery conflicts on PG17+, transaction_timeout, ...) may
+ * still be pending; with nothing pending ProcessInterrupts() just returns.
  */
-typedef enum DeadlineResult
-{
-	DEADLINE_NOT_FIRED,			/* the limit did not expire */
-	DEADLINE_OWN,				/* expired; its cancel was the only one */
-	DEADLINE_SHARED				/* expired, and a genuine cancel came too */
-} DeadlineResult;
-
 #ifndef WIN32
 static TimeoutId compile_timeout_id;
 static bool compile_timeout_registered = false;
 static volatile sig_atomic_t deadline_armed = false;
 static volatile sig_atomic_t deadline_fired = false;
-static volatile sig_atomic_t foreign_cancel = false;
-static struct sigaction saved_sigint;
-static struct sigaction saved_sigusr1;
+static sigset_t deadline_saved_mask;
 
 static void
 compile_deadline_handler(void)
@@ -209,118 +214,126 @@ compile_deadline_handler(void)
 	if (!deadline_armed)
 		return;
 	deadline_fired = true;
-	if (QueryCancelPending)
-		foreign_cancel = true;
-	else
-		QueryCancelPending = true;
+	QueryCancelPending = true;
 	InterruptPending = true;
 }
 
-static void
-compile_sigint_handler(int signo)
-{
-	foreign_cancel = true;
-	saved_sigint.sa_handler(signo);
-}
-
-/*
- * Hides QueryCancelPending from the regular handler, so that one it sets
- * (a PG14-16 recovery conflict) is seen even after the deadline set it.
- */
-static void
-compile_sigusr1_handler(int signo)
-{
-	bool		was_pending = QueryCancelPending;
-
-	QueryCancelPending = false;
-	saved_sigusr1.sa_handler(signo);
-	if (QueryCancelPending)
-		foreign_cancel = true;
-	else if (was_pending)
-		QueryCancelPending = true;
-}
-
 static bool
-plain_handler(int signo, struct sigaction *sa)
+sigint_held(void)
 {
-	return sigaction(signo, NULL, sa) == 0 && !(sa->sa_flags & SA_SIGINFO) &&
-		sa->sa_handler != SIG_IGN && sa->sa_handler != SIG_DFL;
+	sigset_t	pending;
+
+	return sigpending(&pending) == 0 && sigismember(&pending, SIGINT);
+}
+
+static void
+unblock_sigint(void)
+{
+	sigprocmask(SIG_SETMASK, &deadline_saved_mask, NULL);
 }
 
 /*
  * Arms the limit, if this process can: a regular client backend past its
- * startup (InitializeTimeouts() would forget the registration) with
- * interrupts not held off and plain SIGINT and SIGUSR1 handlers. Returns
- * false if not.
+ * startup (InitializeTimeouts() would forget the registration), with
+ * interrupts not held off (checked by the caller). Blocks SIGINT; a cancel
+ * pending before is raised first. Returns false if not armed.
  */
 static bool
 compile_deadline_arm(int limit_ms)
 {
-	struct sigaction act;
+	sigset_t	block;
 
 	if (!IsUnderPostmaster || MyBackendType != B_BACKEND ||
 		!IsNormalProcessingMode())
 		return false;
-	if (!plain_handler(SIGINT, &saved_sigint) ||
-		!plain_handler(SIGUSR1, &saved_sigusr1))
-		return false;
+	sigemptyset(&block);
+	sigaddset(&block, SIGINT);
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (sigprocmask(SIG_BLOCK, &block, &deadline_saved_mask) != 0)
+			return false;
+		if (!QueryCancelPending)
+			break;
+		/* a cancel came in meanwhile: raise it */
+		unblock_sigint();
+	}
 	if (!compile_timeout_registered)
 	{
 		compile_timeout_id = RegisterTimeout(USER_TIMEOUT, compile_deadline_handler);
 		compile_timeout_registered = true;
 	}
 	deadline_fired = false;
-	foreign_cancel = false;
-	act = saved_sigint;
-	act.sa_handler = compile_sigint_handler;
-	if (sigaction(SIGINT, &act, NULL) != 0)
-		return false;
-	act = saved_sigusr1;
-	act.sa_handler = compile_sigusr1_handler;
-	/*
-	 * The deadline (SIGALRM) must not fire while the wrapper has hidden
-	 * QueryCancelPending, or its cancel would be taken for a foreign one.
-	 */
-	sigaddset(&act.sa_mask, SIGALRM);
-	if (sigaction(SIGUSR1, &act, NULL) != 0)
-	{
-		sigaction(SIGINT, &saved_sigint, NULL);
-		return false;
-	}
 	deadline_armed = true;
 	enable_timeout_after(compile_timeout_id, limit_ms);
 	return true;
 }
 
-/*
- * Disarms the limit. With DEADLINE_OWN its cancel is no longer pending.
- * SIGINT and SIGUSR1 are blocked while deciding and restoring their
- * handlers, so a genuine cancel is never lost.
- */
-static DeadlineResult
-compile_deadline_disarm(void)
+/* Stops the limit's timer; SIGINT stays blocked. */
+static void
+compile_deadline_stop(void)
 {
-	sigset_t	block;
-	sigset_t	old;
-	DeadlineResult res;
-
 	disable_timeout(compile_timeout_id, false);
 	deadline_armed = false;
-	sigemptyset(&block);
-	sigaddset(&block, SIGINT);
-	sigaddset(&block, SIGUSR1);
-	sigprocmask(SIG_BLOCK, &block, &old);
-	res = !deadline_fired ? DEADLINE_NOT_FIRED
-		: foreign_cancel ? DEADLINE_SHARED : DEADLINE_OWN;
-	if (res == DEADLINE_OWN)
+}
+
+/*
+ * With the limit stopped after it fired, SIGINT still blocked and no error
+ * being handled: raises any interrupt pending, except the deadline's own
+ * cancel, which is consumed. Unblocks SIGINT.
+ */
+static void
+compile_deadline_settle(uint32 save_holdoff, uint32 save_cancel_holdoff)
+{
+	MemoryContext oldcxt = CurrentMemoryContext;
+
+	if (sigint_held())
 	{
-		QueryCancelPending = false;
+		/* a genuine cancel: core raises it, with the deadline's merged */
+		unblock_sigint();
+		CHECK_FOR_INTERRUPTS();
+		return;
+	}
+	PG_TRY();
+	{
+		CHECK_FOR_INTERRUPTS();
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		if (geterrcode() != ERRCODE_QUERY_CANCELED || sigint_held())
+		{
+			unblock_sigint();
+			PG_RE_THROW();
+		}
+		FlushErrorState();
+		InterruptHoldoffCount = save_holdoff;
+		QueryCancelHoldoffCount = save_cancel_holdoff;
 		InterruptPending = true;
 	}
-	sigaction(SIGINT, &saved_sigint, NULL);
-	sigaction(SIGUSR1, &saved_sigusr1, NULL);
-	sigprocmask(SIG_SETMASK, &old, NULL);
-	return res;
+	PG_END_TRY();
+	unblock_sigint();
+}
+
+/*
+ * The cancel error being handled was raised with a genuine SIGINT pending,
+ * so it reports that request too; the pending signal is the same request
+ * and is dropped rather than cancelling a second time. Unless a statement
+ * or lock timeout fell due after the error was raised: then the error does
+ * not name it, and false is returned.
+ */
+static bool
+drop_coalesced_sigint(void)
+{
+	sigset_t	set;
+	int			sig;
+
+	if (get_timeout_indicator(STATEMENT_TIMEOUT, false) ||
+		get_timeout_indicator(LOCK_TIMEOUT, false))
+		return false;
+	sigemptyset(&set);
+	sigaddset(&set, SIGINT);
+	return sigwait(&set, &sig) == 0;
 }
 
 void
@@ -339,12 +352,6 @@ static bool
 compile_deadline_arm(int limit_ms)
 {
 	return false;
-}
-
-static DeadlineResult
-compile_deadline_disarm(void)
-{
-	return DEADLINE_NOT_FIRED;
 }
 #endif
 
@@ -403,15 +410,17 @@ compile_attempt(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
 	uint32		save_holdoff = InterruptHoldoffCount;
 	uint32		save_cancel_holdoff = QueryCancelHoldoffCount;
 	volatile int rc = REG_OKAY;
-	volatile bool aborted = false;
 	bool		held_off;
 	double		start;
 
 	*timed = false;
 	held_off = InterruptHoldoffCount != 0 || QueryCancelHoldoffCount != 0 ||
 		CritSectionCount != 0;
+#ifndef WIN32
 	if (!held_off && compile_deadline_arm(limit))
 	{
+		volatile bool aborted = false;
+
 		*timed = true;
 		PG_TRY();
 		{
@@ -419,44 +428,80 @@ compile_attempt(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
 		}
 		PG_CATCH();
 		{
-			DeadlineResult res;
-
 			MemoryContextSwitchTo(oldcxt);
-			res = compile_deadline_disarm();
-
-			/*
-			 * The cancel raised is ours if only the deadline asked for one.
-			 * If a genuine cancel came too, but after ProcessInterrupts()
-			 * consumed the flag, it is still pending and is raised at the
-			 * next CHECK_FOR_INTERRUPTS(); otherwise this is the genuine
-			 * one.
-			 */
-			if (geterrcode() != ERRCODE_QUERY_CANCELED ||
-				!(res == DEADLINE_OWN ||
-				  (res == DEADLINE_SHARED && QueryCancelPending)))
+			compile_deadline_stop();
+			if (!deadline_fired)
+			{
+				unblock_sigint();
 				PG_RE_THROW();
-			FlushErrorState();
-			InterruptHoldoffCount = save_holdoff;
-			QueryCancelHoldoffCount = save_cancel_holdoff;
-			InterruptPending = true;
-			aborted = true;
+			}
+			if (geterrcode() == ERRCODE_QUERY_CANCELED && !QueryCancelPending)
+			{
+				/* raised by ProcessInterrupts(), which consumed the flag */
+				if (!sigint_held())
+				{
+					/* the deadline's cancel alone */
+					FlushErrorState();
+					InterruptHoldoffCount = save_holdoff;
+					QueryCancelHoldoffCount = save_cancel_holdoff;
+					InterruptPending = true;
+					unblock_sigint();
+					aborted = true;
+				}
+				else if (drop_coalesced_sigint())
+				{
+					unblock_sigint();
+					PG_RE_THROW();
+				}
+			}
+			if (!aborted)
+			{
+				/*
+				 * Some other error, or a cancel error that does not name a
+				 * timeout that fell due meanwhile. The deadline's cancel may
+				 * still be pending, so settle it before re-throwing; a
+				 * genuine interrupt it raises takes precedence.
+				 */
+				ErrorData  *edata = CopyErrorData();
+
+				FlushErrorState();
+				InterruptHoldoffCount = save_holdoff;
+				QueryCancelHoldoffCount = save_cancel_holdoff;
+				compile_deadline_settle(save_holdoff, save_cancel_holdoff);
+				ReThrowError(edata);
+			}
 		}
 		PG_END_TRY();
 		if (aborted)
 			return PSSC_REGEX_COMPILE_TOO_SLOW;
-		if (compile_deadline_disarm() == DEADLINE_OWN)
+		compile_deadline_stop();
+		if (!deadline_fired)
 		{
-			/* REG_CANCEL from PG14/15, or finished before noticing */
-			if (rc != REG_OKAY)
-				return PSSC_REGEX_COMPILE_TOO_SLOW;
-			if (strict)
-			{
+			unblock_sigint();
+			return rc;
+		}
+		/* REG_CANCEL from PG14/15, or finished before noticing */
+		PG_TRY();
+		{
+			compile_deadline_settle(save_holdoff, save_cancel_holdoff);
+		}
+		PG_CATCH();
+		{
+			if (rc == REG_OKAY)
 				pssc_regfree(re);
-				return PSSC_REGEX_COMPILE_TOO_SLOW;
-			}
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		if (rc != REG_OKAY)
+			return PSSC_REGEX_COMPILE_TOO_SLOW;
+		if (strict)
+		{
+			pssc_regfree(re);
+			return PSSC_REGEX_COMPILE_TOO_SLOW;
 		}
 		return rc;
 	}
+#endif
 
 	/*
 	 * No timer: interrupts are held off (a client backend puts the lazy
@@ -594,8 +639,8 @@ pssc_regex_check_compile(MemoryContext cxt, regex_t *re, const pg_wchar *pat,
  * nsub_min and nsub_max capture groups and no back-references. On return
  * the slot is READY or FAILED (also when over the compile time limit), or
  * still EMPTY if an interrupt is pending or interrupts are held off.
- * Interrupts propagate as ERROR (the slot is then EMPTY and its context
- * gone).
+ * Interrupts and other errors outside the catch policy's allowlist
+ * (may_swallow()) propagate (the slot is then EMPTY and its context gone).
  */
 static void
 compile_slot(Slot *slot, int index, int ctx_phase, int comp_phase,
@@ -643,7 +688,7 @@ compile_slot(Slot *slot, int index, int ctx_phase, int comp_phase,
 			MemoryContextDelete(slot->cxt);
 		slot->cxt = NULL;
 		MemoryContextReset(exec_cxt);
-		if (must_rethrow(geterrcode()))
+		if (!may_swallow(geterrcode()))
 			PG_RE_THROW();
 		FlushErrorState();
 		InterruptHoldoffCount = save_holdoff;
@@ -825,7 +870,7 @@ pssc_regex_extract(void *arg, int index, const PsscExtractorList *list,
 	{
 		MemoryContextSwitchTo(oldcxt);
 		MemoryContextReset(exec_cxt);
-		if (must_rethrow(geterrcode()))
+		if (!may_swallow(geterrcode()))
 			PG_RE_THROW();
 		FlushErrorState();
 		InterruptHoldoffCount = save_holdoff;
@@ -1052,7 +1097,7 @@ pssc_regex_normalize(const PsscNormalizeList *list,
 		{
 			MemoryContextSwitchTo(oldcxt);
 			MemoryContextReset(exec_cxt);
-			if (must_rethrow(geterrcode()))
+			if (!may_swallow(geterrcode()))
 				PG_RE_THROW();
 			FlushErrorState();
 			InterruptHoldoffCount = save_holdoff;

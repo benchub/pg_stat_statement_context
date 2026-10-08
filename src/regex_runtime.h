@@ -19,12 +19,15 @@
  * regex pair based on its value), and matching stops once every key has a
  * value, so a comment yields at most one pair per key.
  *
- * Never fails the statement: compile failures, including a compile aborted
- * at the compile time limit (PSSC_REGEX_COMPILE_LIMIT_MS), disable the
- * extractor for this backend until the next regex generation (counted in
- * the backend's PsscTagsetStats.regex_compile_failures); match errors yield
- * no pairs for that comment. Query cancel and other interrupts are still
- * honored (they propagate as the usual ERROR / FATAL).
+ * Does not fail the statement because of a pattern: compile failures,
+ * including a compile aborted at the compile time limit
+ * (PSSC_REGEX_COMPILE_LIMIT_MS), disable the extractor for this backend
+ * until the next regex generation (counted in the backend's
+ * PsscTagsetStats.regex_compile_failures); match errors yield no pairs for
+ * that comment. Query cancel and other interrupts are still honored (they
+ * propagate as the usual ERROR / FATAL), as are errors outside a short
+ * allowlist (out of memory, program limit, invalid regex; see
+ * regex_runtime.c).
  */
 #ifndef PSSC_REGEX_RUNTIME_H
 #define PSSC_REGEX_RUNTIME_H
