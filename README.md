@@ -139,7 +139,10 @@ SELECT pg_stat_statement_context_extract(
 
 ## Testing
 
+**Warning:** `make installcheck` changes server settings with `ALTER SYSTEM` and then resets them, wiping any value set that way, and most of its TAP tests need TEST-ONLY modules: run it only against a disposable cluster. To check a provisioned server, including a managed service such as Amazon RDS, run `make smoke` instead (see [Smoke test](docs/managed-services.md#smoke-test)): it needs only psql, runs as any role and changes no setting.
+
 ```sh
+make smoke                            # existing server (libpq environment), any role; changes no setting
 make installcheck                     # needs a running server with the library preloaded;
                                       # TAP tests that need the testing build skip on a release one
 make PSSC_TESTING=1 install install-test-modules  # testing build + TEST-ONLY modules, for every TAP test

@@ -233,6 +233,18 @@ GRANT EXECUTE ON FUNCTION pg_stat_statement_context_extract(text, int, int) TO m
 - `SHOW shared_preload_libraries` needs superuser or the privileges of `pg_read_all_settings` (included in `pg_monitor`) <!-- check: preload-visible -->.
 - `pg_file_settings`, which shows errors in the configuration files, is readable only by superusers by default, even for members of `pg_monitor` <!-- check: file-settings-denied -->. The checklist below gives the alternatives.
 
+## Smoke test
+
+`make smoke` checks a provisioned server end to end. It runs `test/smoke/smoke.sql` with psql, connects with the libpq environment, and runs as any role, superuser or not. Unlike `make installcheck`, which changes server settings with `ALTER SYSTEM` and is only for disposable clusters, it changes no setting. It writes only the statistics of its own tagged statements (one entry per comment format, tagged `controller=pssc_smoke`), and runs `CREATE EXTENSION` if the extension is missing in the database. The extension is then left installed, and the test fails if the role may not create it.
+
+```sh
+PGHOST=mydb.example.com PGUSER=admin PGDATABASE=app make smoke
+# without make or pg_config:
+psql -X -q -v ON_ERROR_STOP=1 -f test/smoke/smoke.sql
+```
+
+It checks that `shared_preload_libraries` lists the library, that the extension exists, and that `_counters()` and `_info()` work. It checks what `_extract()` finds in its statements under the server's current extractor configuration, and that its tagged statements, in SQLCommenter and marginalia format, are recorded and visible to the role in the views. It prints an `ok:`, `skipped:` or `info:` line for each check. A check it cannot make as this role is skipped with the reason, for example `skipped: _extract() not executable by this role`. On a failure it prints a `FAIL:` line and exits non-zero; the [troubleshooting checklist](#troubleshooting) below helps find the cause. The statements carry `controller` and `action` tags, which the default [`extractors`](configuration.md#extractors) and [`tags`](configuration.md#tags) allowlist keep. With a configuration that recognizes neither format, or doesn't keep `controller`, the test fails.
+
 ## Troubleshooting
 
 Each check below is SQL that the administrator role (a member of `pg_monitor`) can run, unless it says otherwise. Some causes appear only in the server log: download it from the provider (its console, CLI or log export) and search for `pg_stat_statement_context`.

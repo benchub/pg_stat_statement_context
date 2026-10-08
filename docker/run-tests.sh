@@ -283,6 +283,30 @@ else
 	pg_start preload-release || fail "start with preload (release build)"
 	as_pg env PSSC_REQUIRE_PGSS=1 PSSC_REQUIRE_MODULES="$require_modules" \
 		make installcheck || fail "make installcheck (release build)"
+
+	step "make smoke (release build, as a NOSUPERUSER role, with and without _extract())"
+	# The smoke test for provisioned servers (test/smoke/smoke.sql): run as a
+	# stand-in for a managed-service administrator, it must change no setting.
+	su_psql() { as_pg "$PGBIN/psql" -X -q -At -v ON_ERROR_STOP=1 "$@"; }
+	settings_snapshot() {
+		cat "$PGDATA_DIR/postgresql.auto.conf"
+		su_psql -d postgres -c "SELECT concat_ws('|', sourcefile, sourceline, seqno, name,
+			setting, applied, error) FROM pg_file_settings ORDER BY seqno" \
+			-c "SELECT setrole, setdatabase, setconfig FROM pg_db_role_setting ORDER BY 1, 2"
+	}
+	su_psql -d postgres -c "CREATE ROLE pssc_smoke LOGIN NOSUPERUSER CREATEDB CREATEROLE" \
+		-c "GRANT pg_monitor TO pssc_smoke" -c "CREATE DATABASE pssc_smoke OWNER pssc_smoke" \
+		|| fail "smoke role and database"
+	su_psql -d pssc_smoke -c "CREATE EXTENSION $EXT" || fail "smoke: CREATE EXTENSION"
+	settings_snapshot > "$WORK/smoke-settings.before" || fail "smoke: settings snapshot"
+	for grant in "" "GRANT EXECUTE ON FUNCTION ${EXT}_extract(text, int, int) TO pssc_smoke"; do
+		[ -z "$grant" ] || su_psql -d pssc_smoke -c "$grant" || fail "smoke: $grant"
+		as_pg env PGUSER=pssc_smoke PGDATABASE=pssc_smoke make smoke \
+			|| fail "make smoke (release build${grant:+, after $grant})"
+	done
+	settings_snapshot > "$WORK/smoke-settings.after" || fail "smoke: settings snapshot"
+	diff "$WORK/smoke-settings.before" "$WORK/smoke-settings.after" \
+		|| fail "make smoke changed postgresql.auto.conf, pg_file_settings or role/database settings"
 	pg_stop
 	if grep -E "$CRASH_RE" "$WORK/preload-release.log"; then
 		fail "crash in release-build server log"

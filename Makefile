@@ -3,6 +3,10 @@
 # installcheck needs a running server with
 #   shared_preload_libraries = 'pg_stat_statement_context'
 # (scripts/docker-test.sh <pg-major> sets one up).
+# WARNING: installcheck changes server settings with ALTER SYSTEM and then
+# resets them (test/sql/include/config.sql), wiping any value set that way,
+# and the TAP tests need TEST-ONLY modules: run them only against a
+# disposable cluster. "make smoke" checks a provisioned server instead.
 #
 # Build variants (DESIGN.md §9):
 #   make                  release library: no test hooks, and it exports only
@@ -130,7 +134,7 @@ TEST_MODULES = test/modules/pssc_compat_test test/modules/pssc_guc_test \
 	test/modules/pssc_extract_test test/modules/pssc_store_test \
 	test/modules/pssc_context_test
 
-.PHONY: test-modules install-test-modules clean-test-modules check-version-guards check-frozen-sql unittest
+.PHONY: test-modules install-test-modules clean-test-modules check-version-guards check-frozen-sql unittest smoke
 
 test-modules:
 	for d in $(TEST_MODULES); do $(MAKE) -C $$d PG_CONFIG=$(PG_CONFIG) || exit 1; done
@@ -161,3 +165,11 @@ check-frozen-sql:
 unittest:
 	$(MAKE) -C test/unit
 	$(MAKE) -C fuzz check
+
+# Smoke test of an existing server, safe on production and managed services
+# (test/smoke/smoke.sql, docs/managed-services.md#smoke-test): psql only,
+# connects with the libpq environment (PGHOST, PGPORT, PGUSER, PGDATABASE,
+# ...), runs as any role, changes no setting; exits non-zero on failure.
+PSQL ?= $(bindir)/psql
+smoke:
+	$(PSQL) -X -q -v ON_ERROR_STOP=1 -f $(srcdir)/test/smoke/smoke.sql
