@@ -10,6 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import analyze  # noqa: E402
+import scenarios  # noqa: E402
 
 
 class Percentile(unittest.TestCase):
@@ -108,91 +109,6 @@ class Report(unittest.TestCase):
         self.assertAlmostEqual(analyze.spread_pct([90, 100, 110]), 20.0)
         self.assertEqual(analyze.spread_pct([100]), 0.0)
 
-    def test_aggregate_relative_to_baseline(self):
-        runs = []
-        for i, (bt, et) in enumerate([(1000, 900), (1100, 990), (1050, 945)]):
-            runs.append({"config": "w/pgss", "workload": "w", "baseline": "w/pgss", "run": i,
-                         "tps": bt, "all": {"n": 10, "avg_ms": 1.0, "p50_ms": 1.0, "p99_ms": 2.0, "max_ms": 5.0}})
-            runs.append({"config": "w/ext", "workload": "w", "baseline": "w/pgss", "run": i,
-                         "tps": et, "all": {"n": 10, "avg_ms": 1.1, "p50_ms": 1.0, "p99_ms": 2.2, "max_ms": 6.0 + i}})
-        agg = {a["config"]: a for a in analyze.aggregate(runs)}
-        self.assertEqual(agg["w/ext"]["runs"], 3)
-        self.assertEqual(agg["w/ext"]["tps"], 945)
-        self.assertAlmostEqual(agg["w/ext"]["tps_rel_pct"], -10.0)
-        self.assertAlmostEqual(agg["w/ext"]["avg_rel_pct"], 10.0)
-        self.assertAlmostEqual(agg["w/ext"]["p99_rel_pct"], 10.0)
-        self.assertEqual(agg["w/ext"]["max_ms"], 7.0)        # median of 6, 7, 8
-        self.assertEqual(agg["w/ext"]["max_worst_ms"], 8.0)
-        self.assertAlmostEqual(agg["w/ext"]["tps_spread_pct"], (990 - 900) / 945 * 100)
-        self.assertAlmostEqual(agg["w/pgss"]["tps_rel_pct"], 0.0)
-        # Order of first appearance is kept.
-        self.assertEqual([a["config"] for a in analyze.aggregate(runs)], ["w/pgss", "w/ext"])
-
-    @staticmethod
-    def _run(config, baseline, rnd, tps, p99=2.0, checks=None):
-        return {"config": config, "workload": "w", "baseline": baseline, "run": rnd, "tps": tps,
-                "checks": checks,
-                "all": {"n": 10, "avg_ms": 1000.0 / tps, "p50_ms": 1, "p99_ms": p99, "max_ms": 5.0}}
-
-    def test_aggregate_paired_by_round(self):
-        # Rounds 2k-1 (forward) and 2k (reverse) form a pair; the pair's
-        # ratio is the geometric mean of its two per-round ratios, then the
-        # median (and min/max) over pairs. Round 5 has no partner: dropped.
-        R = self._run
-        ratios = {1: 0.9, 2: 1.0, 3: 0.8, 4: 0.8, 5: 0.5}
-        runs = []
-        for rnd, q in ratios.items():
-            base = 1000.0 * rnd   # rounds drift; only same-round ratios matter
-            runs += [R("w/pgss", "w/pgss", rnd, base), R("w/ext", "w/pgss", rnd, base * q, p99=2.0 / q)]
-        ext = {a["config"]: a for a in analyze.aggregate(runs)}["w/ext"]
-        pair1, pair2 = (0.9 ** 0.5 - 1) * 100, -20.0
-        self.assertAlmostEqual(ext["tps_rel_pct"], (pair1 + pair2) / 2)
-        self.assertAlmostEqual(ext["tps_rel_min_pct"], pair2)
-        self.assertAlmostEqual(ext["tps_rel_max_pct"], pair1)
-        self.assertAlmostEqual(ext["p99_rel_pct"], ((1 / 0.9 ** 0.5 - 1) * 100 + 25.0) / 2)
-        self.assertEqual(ext["rel_pairs"], 2)
-        self.assertEqual(ext["rel_rounds_dropped"], 1)
-        self.assertTrue(ext["rel_paired"])
-        # A baseline round missing breaks its pair: only pair 1 counts.
-        runs = [r for r in runs if not (r["config"] == "w/pgss" and r["run"] == 4)]
-        ext = {a["config"]: a for a in analyze.aggregate(runs)}["w/ext"]
-        self.assertAlmostEqual(ext["tps_rel_pct"], pair1)
-        self.assertEqual(ext["rel_pairs"], 1)
-        self.assertEqual(ext["rel_rounds_dropped"], 3)
-
-    def test_aggregate_drift_cancels(self):
-        # Reviewer's case: identical performance, a smooth 1% slowdown per
-        # position in the round, 20 configs, 5 rounds (odd rounds forward,
-        # even rounds reversed). Every delta must be 0, not e.g. -2.97%.
-        configs = ["c%02d" % i for i in range(20)]
-        runs = []
-        for rnd in range(1, 6):
-            seq = configs if rnd % 2 == 1 else configs[::-1]
-            for pos, c in enumerate(seq):
-                tps = 1000.0 * 0.99 ** pos
-                runs.append(self._run(c, "c04", rnd, tps, p99=1.0 / tps))
-        for row in analyze.aggregate(runs):
-            for k in ("tps_rel_pct", "avg_rel_pct", "p99_rel_pct", "tps_rel_min_pct", "tps_rel_max_pct"):
-                self.assertAlmostEqual(row[k], 0.0, places=9, msg="%s %s" % (row["config"], k))
-            self.assertEqual(row["rel_rounds_dropped"], 1)
-
-    def test_aggregate_single_round_unpaired(self):
-        # --quick: one round, no pair. Fall back to that round's ratio and say so.
-        runs = [self._run("w/pgss", "w/pgss", 1, 1000.0), self._run("w/ext", "w/pgss", 1, 900.0)]
-        rows = analyze.aggregate(runs)
-        ext = rows[1]
-        self.assertAlmostEqual(ext["tps_rel_pct"], -10.0)
-        self.assertFalse(ext["rel_paired"])
-        self.assertEqual(ext["rel_pairs"], 0)
-        self.assertIn("unpaired", analyze.render_markdown(rows))
-
-    def test_aggregate_checks_from_last_round(self):
-        R = self._run
-        runs = [R("w/ext", "w/ext", rnd, 1.0, checks={"round": rnd}) for rnd in (1, 3, 2)]
-        row = analyze.aggregate(runs)[0]
-        self.assertEqual(row["checks"], {"round": 3})
-        self.assertIn("greatest round", analyze.render_markdown([row]))
-
     def test_run_sh_forwards_documented_env(self):
         # Every BENCH_* variable documented in inside.sh's header must be
         # passed into the container by run.sh (-e BENCH_X or -e BENCH_X=...).
@@ -210,22 +126,6 @@ class Report(unittest.TestCase):
             forwarded = set(re.findall(r"-e (BENCH_[A-Z_]+)", f.read()))
         self.assertEqual(sorted(documented - forwarded), [])
 
-    def test_aggregate_interference(self):
-        mk = lambda run, fc, att: {"config": "w/ext", "workload": "w", "baseline": "w/ext", "run": run,
-                                   "foreign_cores": fc, "attempts": att, "tps": 1,
-                                   "all": {"n": 1, "avg_ms": 1, "p50_ms": 1, "p99_ms": 1, "max_ms": 1}}
-        row = analyze.aggregate([mk(1, 0.1, 1), mk(2, 0.4, 3), mk(3, None, 1)])[0]
-        self.assertAlmostEqual(row["foreign_cores_max"], 0.4)
-        self.assertEqual(row["retries"], 2)
-        row = analyze.aggregate([mk(1, None, 1)])[0]
-        self.assertIsNone(row["foreign_cores_max"])
-        self.assertIn("foreign", analyze.render_markdown([row]))
-
-    def test_aggregate_missing_baseline(self):
-        runs = [{"config": "w/none", "workload": "w", "baseline": "w/pgss", "run": 0,
-                 "tps": 10, "all": {"n": 1, "avg_ms": 1, "p50_ms": 1, "p99_ms": 1, "max_ms": 1}}]
-        self.assertIsNone(analyze.aggregate(runs)[0]["tps_rel_pct"])
-
     def test_analyze_run_end_to_end(self):
         S = 1_000_000
         with tempfile.TemporaryDirectory() as d:
@@ -240,18 +140,336 @@ class Report(unittest.TestCase):
             res = analyze.analyze_run(
                 logs=[os.path.join(d, "log.123"), os.path.join(d, "log.123.1")],
                 pgbench_out=os.path.join(d, "pgbench.out"),
-                meta={"config": "c", "workload": "w", "baseline": "w/pgss", "run": 0},
+                meta={"config": "c", "scenario": "s", "baseline": "pgss", "block": 1,
+                      "server_cpu_ticks": 150, "clk_tck": 100, "duration_s": 2.0,
+                      "stmts_per_txn": 3},
                 interval_us=S, offset_us=0, window_us=5000)
             json.dumps(res)  # serializable
             self.assertEqual(res["tps"], 3.0)
             self.assertEqual(res["all"]["n"], 3)
             self.assertAlmostEqual(res["all"]["max_ms"], 9.0)
+            self.assertAlmostEqual(res["all"]["p95_ms"], 9.0)
             self.assertEqual(res["near"]["n"], 1)
             self.assertAlmostEqual(res["near"]["max_ms"], 9.0)
             self.assertEqual(res["far"]["n"], 2)
             self.assertAlmostEqual(res["far"]["max_ms"], 0.3)
             self.assertEqual(res["boundaries_crossed"], 1)
             self.assertEqual(res["config"], "c")
+            # 150 ticks at 100 Hz = 1.5 s of server CPU over 3 transactions,
+            # 3 statements each; 1.5 s over a 2 s run = 0.75 cores.
+            self.assertAlmostEqual(res["cpu_us_per_txn"], 500000.0)
+            self.assertAlmostEqual(res["cpu_us_per_stmt"], 500000.0 / 3)
+            self.assertAlmostEqual(res["server_cores"], 0.75)
+
+
+class Stats(unittest.TestCase):
+    def test_t_quantile_known(self):
+        # Two-sided 95% critical values of Student's t (standard tables).
+        for df, q in [(1, 12.7062), (2, 4.3027), (4, 2.7764), (7, 2.3646), (9, 2.2622),
+                      (29, 2.0452), (1000, 1.9623)]:
+            self.assertAlmostEqual(analyze.t_quantile(0.975, df), q, places=3, msg="df=%d" % df)
+        self.assertAlmostEqual(analyze.t_quantile(0.95, 10), 1.8125, places=3)
+        self.assertAlmostEqual(analyze.t_quantile(0.995, 5), 4.0321, places=3)
+
+    def test_mean_ci_known(self):
+        ci = analyze.mean_ci([1, 2, 3, 4, 5])
+        self.assertEqual(ci["n"], 5)
+        self.assertAlmostEqual(ci["mean"], 3.0)
+        # sd = sqrt(2.5), se = sqrt(0.5), t(0.975, 4) = 2.776445
+        self.assertAlmostEqual(ci["lo"], 3 - 2.776445 * 0.5 ** 0.5, places=4)
+        self.assertAlmostEqual(ci["hi"], 3 + 2.776445 * 0.5 ** 0.5, places=4)
+        ci = analyze.mean_ci([2.0, 2.0, 2.0])
+        self.assertEqual((ci["lo"], ci["hi"]), (2.0, 2.0))
+
+    def test_mean_ci_too_few(self):
+        ci = analyze.mean_ci([4.0])
+        self.assertEqual(ci["mean"], 4.0)
+        self.assertIsNone(ci["lo"])
+        self.assertIsNone(ci["hi"])
+        self.assertIsNone(analyze.mean_ci([]))
+
+    def test_ratio_ci_known(self):
+        # Ratios e^0.1, e^0.2, e^0.3: log mean 0.2, sd 0.1, se 0.1/sqrt(3),
+        # t(0.975, 2) = 4.302653. Reported as percent change.
+        import math
+        pairs = [(100 * math.exp(0.1), 100), (50 * math.exp(0.2), 50), (10 * math.exp(0.3), 10)]
+        ci = analyze.ratio_ci(pairs)
+        hw = 4.302653 * 0.1 / math.sqrt(3)
+        self.assertEqual(ci["n"], 3)
+        self.assertAlmostEqual(ci["mean"], (math.exp(0.2) - 1) * 100, places=4)
+        self.assertAlmostEqual(ci["lo"], (math.exp(0.2 - hw) - 1) * 100, places=3)
+        self.assertAlmostEqual(ci["hi"], (math.exp(0.2 + hw) - 1) * 100, places=3)
+        # A constant ratio has a zero-width interval; pairs with a missing or
+        # non-positive value are left out.
+        ci = analyze.ratio_ci([(90, 100), (45, 50), (None, 3), (1, 0)])
+        self.assertEqual(ci["n"], 2)
+        self.assertAlmostEqual(ci["lo"], -10.0)
+        self.assertAlmostEqual(ci["hi"], -10.0)
+
+    def test_verdict(self):
+        V = analyze.verdict
+        # Higher is worse (CPU, latency):
+        self.assertTrue(V({"n": 8, "mean": 3.0, "lo": 1.0, "hi": 5.0}).startswith("costlier"))
+        self.assertTrue(V({"n": 8, "mean": -3.0, "lo": -5.0, "hi": -1.0}).startswith("cheaper"))
+        v = V({"n": 8, "mean": 1.0, "lo": -2.0, "hi": 4.0})
+        self.assertTrue(v.startswith("not resolved"))
+        self.assertIn("+4.0", v)            # the bound the data does give
+        self.assertTrue(V({"n": 1, "mean": 1.0, "lo": None, "hi": None}).startswith("no CI"))
+        self.assertTrue(V(None).startswith("no CI"))
+        # Higher is better (TPS): a significant drop is the cost.
+        self.assertTrue(V({"n": 8, "mean": -3.0, "lo": -5.0, "hi": -1.0}, higher_is_better=True)
+                        .startswith("costlier"))
+
+
+def _run(scenario, config, baseline, block, tps, cpu=100.0, p99=1.0, stmts=1, **kw):
+    r = {"scenario": scenario, "config": config, "baseline": baseline, "block": block,
+         "pos": kw.pop("pos", 0), "tps": tps, "cpu_us_per_txn": cpu, "cpu_us_per_stmt": cpu / stmts,
+         "server_cores": 1.0, "stmts_per_txn": stmts, "workload": "w", "protocol": "simple",
+         "clients": 5, "foreign_cores": kw.pop("foreign", 0.1), "attempts": kw.pop("attempts", 1),
+         "checks": kw.pop("checks", {"txns": 10}),
+         "all": {"n": 10, "avg_ms": 1.0, "p50_ms": p99 / 2, "p95_ms": p99 * 0.9, "p99_ms": p99,
+                 "max_ms": 5.0}}
+    r.update(kw)
+    return r
+
+
+class Compare(unittest.TestCase):
+    def test_paired_by_block(self):
+        runs = []
+        cpu_diffs = [2.0, 3.0, 4.0, 3.0]
+        for b in range(1, 5):
+            base = 1000.0 * (1 + 0.1 * b)        # drift between blocks cancels in pairs
+            runs.append(_run("s", "pgss", "pgss", b, base, cpu=100.0 + b, p99=1.0 * b))
+            runs.append(_run("s", "ext", "pgss", b, base * 0.9, cpu=100.0 + b + cpu_diffs[b - 1],
+                             p99=1.2 * b))
+        # Same config name in another scenario: kept apart.
+        runs.append(_run("t", "pgss", "pgss", 1, 50.0))
+        runs.append(_run("t", "ext", "pgss", 1, 60.0))
+        rows = {(r["scenario"], r["config"]): r for r in analyze.compare(runs)}
+        self.assertNotIn(("s", "pgss"), rows)       # baselines are not compared to themselves
+        ext = rows[("s", "ext")]
+        self.assertEqual(ext["n"], 4)
+        self.assertAlmostEqual(ext["tps"]["mean"], -10.0)
+        self.assertAlmostEqual(ext["tps"]["lo"], -10.0)
+        self.assertAlmostEqual(ext["p99"]["mean"], 20.0)
+        ci = analyze.mean_ci(cpu_diffs)
+        self.assertAlmostEqual(ext["cpu_diff_us"]["mean"], 3.0)
+        self.assertAlmostEqual(ext["cpu_diff_us"]["lo"], ci["lo"])
+        self.assertAlmostEqual(ext["cpu_stmt_diff_us"]["hi"], ci["hi"])
+        self.assertAlmostEqual(ext["base_tps"], analyze.median([1100.0, 1200.0, 1300.0, 1400.0]))
+        self.assertEqual(rows[("t", "ext")]["n"], 1)
+        self.assertIsNone(rows[("t", "ext")]["tps"]["lo"])
+
+    def test_missing_baseline_block_dropped(self):
+        runs = [_run("s", "pgss", "pgss", 1, 100.0), _run("s", "ext", "pgss", 1, 90.0),
+                _run("s", "ext", "pgss", 2, 10.0),           # no baseline in block 2
+                _run("s", "pgss", "pgss", 3, 100.0), _run("s", "ext", "pgss", 3, 90.0)]
+        ext = analyze.compare(runs)[0]
+        self.assertEqual(ext["n"], 2)
+        self.assertEqual(ext["runs"], 3)
+        self.assertAlmostEqual(ext["tps"]["mean"], -10.0)
+
+    def test_cpu_per_statement(self):
+        runs = []
+        for b, d in enumerate([7.0, 14.0, 21.0], 1):
+            runs += [_run("rw", "pgss", "pgss", b, 100.0, cpu=700.0, stmts=7),
+                     _run("rw", "ext", "pgss", b, 100.0, cpu=700.0 + d, stmts=7)]
+        ext = analyze.compare(runs)[0]
+        self.assertAlmostEqual(ext["cpu_diff_us"]["mean"], 14.0)
+        self.assertAlmostEqual(ext["cpu_stmt_diff_us"]["mean"], 2.0)
+        self.assertAlmostEqual(ext["cpu_rel"]["mean"], analyze.ratio_ci(
+            [(707.0, 700.0), (714.0, 700.0), (721.0, 700.0)])["mean"])
+
+
+class Campaign(unittest.TestCase):
+    def _write(self, d, notes="Notes for this campaign."):
+        runs = []
+        for b in range(1, 4):
+            for sc in ("ro-simple-c5", "rw-simple-c5"):
+                runs.append(_run(sc, "pgss", "pgss", b, 1000.0 + b, cpu=50.0))
+                runs.append(_run(sc, "ext", "pgss", b, 950.0 + b, cpu=52.0 + b * 0.1,
+                                 checks={"txns": 10, "ext_calls": 10}))
+        with open(os.path.join(d, "runs.jsonl"), "w") as f:
+            for r in runs:
+                f.write(json.dumps(r) + "\n")
+        with open(os.path.join(d, "campaign.json"), "w") as f:
+            json.dump({"commit": "abc1234", "dirty": False, "date": "2026-10-08",
+                       "host": "Apple M1 Max, 10 CPUs", "pg_version": "PostgreSQL 18.0",
+                       "blocks": 3, "duration_s": 12, "warmup_s": 3, "seed": 7,
+                       "wall_time_s": 3600, "quiet_check": "docker ps: none",
+                       "server_cpus": "0-4", "client_cpus": "5-7", "ncpu": 5,
+                       "scenarios": [{"name": "ro-simple-c5", "workload": "ro", "protocol": "simple",
+                                      "clients": 5, "configs": [
+                                          {"name": "pgss", "baseline": "pgss", "settings": "",
+                                           "label": "pg_stat_statements only"},
+                                          {"name": "ext", "baseline": "pgss", "settings": "",
+                                           "label": "tagged, defaults"}]},
+                                     {"name": "rw-simple-c5", "workload": "rw", "protocol": "simple",
+                                      "clients": 5, "configs": [
+                                          {"name": "pgss", "baseline": "pgss", "settings": ""},
+                                          {"name": "ext", "baseline": "pgss", "settings": ""}]}]}, f)
+        with open(os.path.join(d, "env-host.txt"), "w") as f:
+            f.write("host: test\n")
+        if notes is not None:
+            with open(os.path.join(d, "NOTES.md"), "w") as f:
+                f.write(notes + "\n")
+
+    def test_render_campaign(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d)
+            md = analyze.render_campaign(d)
+            self.assertIn("abc1234", md)
+            self.assertIn("95% CI", md)
+            self.assertIn("ro-simple-c5", md)
+            self.assertIn("rw-simple-c5", md)
+            self.assertIn("tagged, defaults", md)
+            self.assertIn("Notes for this campaign.", md)
+            self.assertIn("docker ps: none", md)
+            self.assertIn("costlier", md)        # +2..+2.3 us of CPU, every block
+            # p50/p95/p99 and CPU per statement columns
+            for col in ("p50", "p95", "p99", "CPU", "TPS"):
+                self.assertIn(col, md)
+
+    def test_build_doc(self):
+        with tempfile.TemporaryDirectory() as root:
+            for name in ("2026-10-01-old-host", "2026-10-08-new-host"):
+                os.mkdir(os.path.join(root, name))
+                self._write(os.path.join(root, name), notes="notes of " + name)
+            tmpl = "# Benchmarks\n\nintro\n\n{{campaigns}}\n\nstatic tail\n"
+            doc = analyze.build_doc(tmpl, root)
+            self.assertTrue(doc.startswith("<!-- Generated by bench/analyze.py"))
+            self.assertIn("intro", doc)
+            self.assertIn("static tail", doc)
+            # newest campaign first
+            self.assertLess(doc.index("notes of 2026-10-08-new-host"), doc.index("notes of 2026-10-01-old-host"))
+            self.assertNotIn("{{campaigns}}", doc)
+            with self.assertRaises(ValueError):
+                analyze.build_doc("no marker", root)
+
+    def test_collect_compacts_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for i, r in enumerate([_run("s", "pgss", "pgss", 1, 1.0), _run("s", "ext", "pgss", 1, 1.0)]):
+                paths.append(os.path.join(d, "%d.json" % i))
+                with open(paths[-1], "w") as f:
+                    json.dump(r, f, indent=1)
+            out = os.path.join(d, "runs.jsonl")
+            analyze.collect(paths, out)
+            with open(out) as f:
+                lines = f.read().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(json.loads(lines[1])["config"], "ext")
+
+
+class FreshCheck(unittest.TestCase):
+    def test_stale_paths(self):
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        try:
+            head = subprocess.check_output(["git", "-C", here, "rev-parse", "HEAD"], text=True,
+                                           stderr=subprocess.DEVNULL).strip()
+            old = subprocess.check_output(["git", "-C", here, "log", "-1", "--format=%H", "--", "src"],
+                                          text=True, stderr=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("no git repository")
+        root = os.path.dirname(here)
+        self.assertEqual(analyze.stale_paths(head, root), [])
+        # The parent of the last commit that touched src/ differs in src/.
+        self.assertTrue(any(p.startswith("src/") for p in analyze.stale_paths(old + "~1", root)))
+
+
+class Plan(unittest.TestCase):
+    def test_scenarios_cover_the_matrix(self):
+        scs = scenarios.scenarios(ncpu=5, duration=12)
+        by = {s["name"]: s for s in scs}
+        for wl in ("ro", "rw"):
+            for proto in ("simple", "prepared"):
+                for c in (1, 5, 20):
+                    name = "%s-%s-c%d" % (wl, proto, c)
+                    self.assertIn(name, by)
+                    self.assertEqual(by[name]["clients"], c)
+                    self.assertEqual(by[name]["protocol"], proto)
+                    cfgs = {x["name"] for x in by[name]["configs"]}
+                    self.assertTrue({"pgss", "ext"} <= cfgs, name)
+        self.assertFalse(any(s["clients"] == 256 for s in scs))
+        high = {s["name"] for s in scenarios.scenarios(ncpu=5, duration=12, high_clients=True)}
+        self.assertTrue({"ro-simple-c256", "rw-simple-c256"} <= high)
+        cfgs = {(s["name"], c["name"]) for s in scs for c in s["configs"]}
+        for want in [("ro-simple-c5", "plain-ext"), ("ro-simple-c5", "ext-regex-normalize"),
+                     ("ro-prepared-c5", "plain-ext"), ("ro-prepared-c5", "ext-regex-normalize"),
+                     ("rw-simple-c5", "plain-ext"), ("rw-simple-c5", "ext-regex-normalize"),
+                     ("ro-simple-c5", "ext-store5k"), ("ro-simple-c5", "ext-reader15s"),
+                     ("ro-simple-c5", "ext-reader1s"), ("ro-simple-c5", "ext-1s-buckets"),
+                     ("nested-simple-c5", "ext-all-inherit"), ("nested-simple-c5", "ext-all-scan"),
+                     ("inlist-simple-c5", "inlist-ext"), ("inlist-simple-c5", "inlist-ext-any"),
+                     ("inlist-simple-c5", "inlist0-ext"), ("inlist-simple-c5", "inlist0-ext-any"),
+                     ("evict-simple-c5", "ext-max10000")]:
+            self.assertIn(want, cfgs)
+
+    def test_baselines(self):
+        for s in scenarios.scenarios(ncpu=4, duration=12, high_clients=True):
+            names = {c["name"]: c for c in s["configs"]}
+            for c in s["configs"]:
+                b = names.get(c["baseline"])
+                self.assertIsNotNone(b, "%s/%s" % (s["name"], c["name"]))
+                self.assertEqual(b["preload"], "pgss")
+                self.assertEqual(b["baseline"], b["name"])
+                # a config is compared with pgss alone on the same script
+                self.assertEqual(b["script"], c["script"], "%s/%s" % (s["name"], c["name"]))
+                self.assertIn(c["preload"], ("pgss", "ext"))
+                self.assertGreaterEqual(c["stmts_per_txn"], 1)
+
+    def test_plan_interleaved_blocks(self):
+        scs = scenarios.scenarios(ncpu=5, duration=12)
+        plan = scenarios.make_plan(scs, blocks=4, seed=1)
+        allcfg = {(s["name"], c["name"]) for s in scs for c in s["configs"]}
+        orders = {}
+        for b in range(1, 5):
+            rows = [r for r in plan if r["block"] == b]
+            self.assertEqual(sorted((r["scenario"], r["config"]) for r in rows), sorted(allcfg))
+            # a scenario's runs are contiguous within its block, so each run
+            # is close in time to the baseline it is paired with
+            seq = [r["scenario"] for r in rows]
+            seen = []
+            for x in seq:
+                if not seen or seen[-1] != x:
+                    self.assertNotIn(x, seen)
+                    seen.append(x)
+            orders[b] = [(r["scenario"], r["config"]) for r in rows]
+        self.assertGreater(len({tuple(o) for o in orders.values()}), 1)   # randomized per block
+        self.assertEqual(plan, scenarios.make_plan(scs, blocks=4, seed=1))
+        self.assertNotEqual(plan, scenarios.make_plan(scs, blocks=4, seed=2))
+        self.assertEqual([r["seq"] for r in plan], list(range(1, len(plan) + 1)))
+
+    def test_plan_only(self):
+        scs = scenarios.scenarios(ncpu=5, duration=12)
+        plan = scenarios.make_plan(scs, blocks=2, seed=1, only=r"^inlist-")
+        self.assertTrue(plan)
+        self.assertTrue(all(r["scenario"].startswith("inlist-") for r in plan))
+
+    def test_plan_tsv_roundtrip(self):
+        scs = scenarios.scenarios(ncpu=5, duration=12)
+        plan = scenarios.make_plan(scs, blocks=1, seed=3)
+        lines = scenarios.plan_tsv(plan).splitlines()
+        self.assertEqual(len(lines), len(plan))
+        for line, r in zip(lines, plan):
+            f = line.split("\t")
+            self.assertEqual(len(f), len(scenarios.TSV_FIELDS))
+            self.assertEqual(f[scenarios.TSV_FIELDS.index("config")], r["config"])
+            self.assertNotIn("\n", line)
+
+    def test_exporter_queries(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        qs = scenarios.exporter_queries(os.path.join(
+            here, "..", "docs", "integrations", "postgres_exporter", "queries.yaml"))
+        self.assertEqual(len(qs), 3)
+        self.assertIn("pg_stat_statement_context_last_bucket", qs[0])
+        self.assertIn("pg_stat_statement_context_counters()", qs[2])
+        for q in qs:
+            self.assertNotIn("metrics:", q)
+            self.assertNotIn("usage:", q)
+            self.assertTrue(q.lstrip().startswith(("WITH", "SELECT")))
+        self.assertEqual(scenarios.exporter_queries_sql(qs).count(";\n"), 3)
 
 
 if __name__ == "__main__":
