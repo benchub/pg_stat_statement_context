@@ -373,7 +373,7 @@ sub dump_int64
 			$patch->();
 		});
 		like($log, $re, "$what: LOG message");
-		unlike($log, qr/PANIC|terminated by signal|FATAL/, "$what: no crash");
+		no_crash_ok($log, "$what: no crash");
 		is(entries(), 0, "$what: the store starts empty");
 		ok(!-e $DUMP, "$what: the bad file is removed");
 		is(rec(5003), 'inserted', "$what: recording works");
@@ -396,7 +396,7 @@ sub dump_int64
 	like($log, qr/ignoring invalid data in file ".*$P\.stat"/,
 		'tags_hash: a tags_hash that does not match the tags is rejected with a LOG message');
 	unlike($log, qr/loaded \d+ of \d+ saved entries/, 'tags_hash: nothing is loaded');
-	unlike($log, qr/PANIC|terminated by signal|FATAL/, 'tags_hash: no crash');
+	no_crash_ok($log, 'tags_hash: no crash');
 	is(entries(), 0, 'tags_hash: the store starts empty');
 	ok(!-e $DUMP, 'tags_hash: the bad file is removed');
 

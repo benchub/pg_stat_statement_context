@@ -9,7 +9,8 @@ use Exporter 'import';
 use File::Basename qw(dirname);
 use File::Spec;
 use Test::More ();
-our @EXPORT = qw(pgss_suffix module_suffix require_testing_build testing_build);
+our @EXPORT = qw(pgss_suffix module_suffix require_testing_build testing_build
+  crash_lines no_crash_ok);
 
 # Suffixes a loadable module can have, by platform (DLSUFFIX): .so on Linux
 # and on macOS before PG16, .dylib on macOS from PG16, .dll on Windows.
@@ -109,6 +110,34 @@ sub require_testing_build
 	Test::More::plan(skip_all =>
 		  'needs the testing build of pg_stat_statement_context '
 		  . '(make PSSC_TESTING=1) and the TEST-ONLY modules');
+}
+
+# The lines of a server log excerpt that show a crash: a PANIC, a process
+# terminated by a signal or an exception, the postmaster's crash restart, an
+# assertion failure (TRAP), or a FATAL other than the one a backend of an
+# earlier connection logs while it exits during a fast shutdown or restart
+# ("terminating connection due to administrator command"), which is benign.
+sub crash_lines
+{
+	my ($log) = @_;
+	return grep {
+		/\bPANIC:/
+		  || /terminated by (?:signal|exception)/
+		  || /terminating any other active server processes/
+		  || /^TRAP:|\bTRAP: /
+		  || (/\bFATAL:/
+			&& !/FATAL:\s+terminating connection due to administrator command/)
+	} split /\n/, $log;
+}
+
+# Test::More check that a server log excerpt shows no crash (crash_lines()).
+sub no_crash_ok
+{
+	my ($log, $name) = @_;
+	my @bad = crash_lines($log);
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+	Test::More::ok(!@bad, $name) or Test::More::diag(join("\n", @bad));
+	return !@bad;
 }
 
 1;
