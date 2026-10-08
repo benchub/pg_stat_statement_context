@@ -1459,6 +1459,22 @@ Document the behavior in a new "Replicas and failover" section of docs/limitatio
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-10: Consolidated shared-memory sizing guidance
+
+**Description:** DOC-6 and PERF-8. The sizing information is spread across the docs, and the worked "about 8.6 MB" example is low (measured: 9,261,312 bytes at the defaults; 75,719,568 bytes at `bucket_count = 288`). Write one sizing section (in docs/configuration.md) with:
+- a formula, derived from `src/store.c` (about lines 230–323), `src/cardcap.c` (about lines 390–465) and `src/activity.c` (about lines 59–93), covering entries × (header + tags + bucket slots), dynahash overhead, exemplars when enabled, the cap table, and the activity slots per `MaxBackends`
+- a table of totals for representative settings: defaults, 24 h of history, `max_entries` 50k, exemplars on, `max_connections` 5000
+- guidance on suitable upper limits for small instances
+
+The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes` should together account for the whole request. If activity memory isn't reported anywhere, either add it to the startup log line (no SQL change), or explain how to compute it.
+
+**Acceptance criteria:**
+- A TAP test checks the documented formula against `_info()` for at least three settings combinations (to within the stated rounding). The docs table is produced by a script or by that test, not typed by hand.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
