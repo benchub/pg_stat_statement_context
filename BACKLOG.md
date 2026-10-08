@@ -54,7 +54,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
 | 20261008-120000-1 | Make timing-sensitive TAP checks robust under heavy load | 20261008-065635-6, 20261008-065635-9 | no | ready |
-| 20261008-125932-1 | make smoke: no false overcount when rerun after bucket expiry | 20261008-065635-12 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -275,26 +274,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - Each test passes 20 times in a row on its cell while two other cells run at the same time (to simulate load), and still detects the failure it exists to catch, shown by a mutation.
 
 **Depends on:** 20261008-065635-6, 20261008-065635-9
-**Open questions:** none
-**Status:** ready
-
-### 20261008-125932-1: make smoke: no false overcount when rerun after bucket expiry
-
-**Description:** Left over from the round-2 review of 20261008-065635-12.
-- `test/smoke/smoke.sql` takes its baseline by summing `calls_total` from the views.
-- The views hide expired entries that haven't been reclaimed yet. A later write to such an entry keeps its old lifetime counters and makes it visible again (`src/stats_fn.c` hides it, `src/store.c` updates it, and `025_exporter_surface.pl` pins this behavior).
-- So when the smoke test runs again after its entries' buckets have expired, with no reclaim in between, the baseline is 0. The reappearing entry then adds its old calls to each delta, and the check fails with "expected exactly 3" on a healthy server.
-- This is likely for periodic checks, because the reclaim worker is disabled by default.
-
-Fix:
-- While holding the advisory lock, prime both probe entries before taking the baseline, so that recognized entries stay visible during the measurement. Alternatively, measure in a way that dead entries can't disturb.
-- Update the docs (docs/managed-services.md) and the tests to account for the extra warm-up calls.
-
-**Acceptance criteria:**
-- A new 042 case reruns the smoke test after its buckets expire, with no reclaim in between (use the testing build's debug clock or a short bucket width). It fails before the fix and passes after.
-- The existing 042 cases and `docker/run-tests.sh`'s smoke step still pass on PG 14–18.
-
-**Depends on:** 20261008-065635-12
 **Open questions:** none
 **Status:** ready
 
