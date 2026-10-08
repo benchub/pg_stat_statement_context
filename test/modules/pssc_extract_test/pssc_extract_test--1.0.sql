@@ -131,6 +131,16 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_extract_test_regex_expire_ms(ms int) RETURNS int
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
+-- This backend's SIGPROF handler and CPU-time timer (ITIMER_PROF), which
+-- the 'expire' injection borrows and must give back. 'install' sets a
+-- sentinel handler that counts signals and a 1000 s timer (1000 s interval),
+-- 'remove' the default handler and no timer, 'pending' makes the next give
+-- back find an injection SIGPROF pending. Returns the state after the
+-- action ('state': none), e.g.
+-- 'handler=sentinel timer=armed interval=1000000 hits=0'.
+CREATE FUNCTION pssc_extract_test_sigprof(action text) RETURNS text
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
 -- Fail the next count allocating steps of a compile attempt's error
 -- handling after its limit fired (-1: all); returns how many failed since
 -- the previous call.

@@ -859,6 +859,12 @@ for my $action (qw(sleep regsleep))
 	session_close($s);
 }
 my $MID = q{((?:(?:$)|\Zda|(?<!1)|\S){0,14})};
+# The 'expire' injection borrows the backend's SIGPROF handler and CPU-time
+# timer (ITIMER_PROF) and must give both back as it found them, and its own
+# SIGPROF must not reach the handler it gives back (review of backlog
+# 20261008-120000-1). A sentinel handler and timer stand for a profiler's;
+# an injection that does not arm the expiry must not touch them at all.
+my $SIGPROF_SENTINEL = 'handler=sentinel timer=armed interval=1000000 hits=0';
 my $BASELINE_DELAY_US = 2_000_000;
 for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(position=any, merge=on)", undef, 'compile' ],
 	[ 'normalize rule', 'sqlcommenter(position=any)', "a: '$MID' => 'y'", 'norm_compile' ])
@@ -873,6 +879,8 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 			return ($m eq '' ? 0 : $m) + $cb;
 		};
 		my $m0 = $mem->();
+		is(sq($s, "SELECT pssc_extract_test_sigprof('install')"), $SIGPROF_SENTINEL,
+			"$what" . ($expire ? '' : ', clean compile') . ': sentinel SIGPROF handler and timer installed');
 		sq($s, 'SELECT pssc_extract_test_regex_compile_limit(60000)');
 		# With count 0 the injection only counts attempts and times the
 		# engine, for the clean compile.
@@ -900,6 +908,10 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 			cmp_ok($check_ms, '>', 0, "$what, check hook, clean compile: engine time measured (${check_ms} ms)");
 			cmp_ok($check_cpu, '>', 0, "$what, check hook, clean compile: engine CPU time measured (${check_cpu} ms)");
 		}
+		is(sq($s, "SELECT pssc_extract_test_sigprof('state')"), $SIGPROF_SENTINEL,
+			"$what, check hook" . ($expire ? '' : ', clean compile') . ': SIGPROF handler and timer left as they were');
+		# An injection SIGPROF pending when the timer is given back is dropped.
+		sq($s, "SELECT pssc_extract_test_sigprof('pending')") if $expire;
 		sq($s, 'SELECT pssc_extract_test_regex_expire_ms(' . int($res{0}[5] / 2 + 1) . ')') if $expire;
 		sq($s, "SELECT pssc_extract_test_regex_inject('$phase', 0, 'expire', $expire)");
 		my $t0 = time;
@@ -927,6 +939,9 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 			cmp_ok($compile_ms, '>', 0, "$name: engine time measured (${compile_ms} ms)");
 			cmp_ok($compile_cpu, '>', 0, "$name: engine CPU time measured (${compile_cpu} ms)");
 		}
+		is(sq($s, "SELECT pssc_extract_test_sigprof('state')"), $SIGPROF_SENTINEL,
+			"$name: SIGPROF handler and timer left as they were, no injection signal reached the handler");
+		sq($s, "SELECT pssc_extract_test_sigprof('remove')");
 		note "$name: ${dt}s round trip, engine ${check_ms} ms (check hook) and ${compile_ms} ms, "
 		  . "of CPU time ${check_cpu} ms and ${compile_cpu} ms, backend grew by $grew bytes";
 		$res{$expire} = [ $grew, $dt, $check_ms, $compile_ms, $check_cpu, $compile_cpu ];

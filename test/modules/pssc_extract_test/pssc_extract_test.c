@@ -14,6 +14,7 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -332,6 +333,9 @@ static double inj_engine_cpu_ms = -1;	/* and its CPU time */
  */
 static int	inj_expire_ms = 300;
 
+/* pssc_extract_test_sigprof('pending') */
+static bool inj_pending_at_restore = false;
+
 static double
 cpu_ms(void)
 {
@@ -353,42 +357,144 @@ cpu_ms(void)
  * (ITIMER_PROF: user and system time of the process), i.e. after a given
  * share of the engine's work, whatever else runs on the host. Its SIGPROF
  * handler makes the armed limit expire right away, as the limit's own
- * timer would (pssc_regex_test_expire_now() only sets flags). Armed right
- * before the engine runs, disarmed when it returns or at the next
- * injection.
+ * timer would (pssc_regex_test_expire_now() only sets flags).
+ *
+ * The SIGPROF handler and the timer are borrowed only while an expiry is
+ * armed, right before the engine runs: the previous ones (a profiler's)
+ * are saved then and given back when the engine returns, when the next
+ * attempt or injection starts (on PG16+ a stopped compile throws out of the
+ * engine), and at the end of the transaction or an aborted subtransaction
+ * (an error that left the compile). SIGPROF is blocked meanwhile, and an
+ * injection SIGPROF still pending when the timer is given back is dropped,
+ * so it never reaches the previous handler. The previous timer gets back
+ * what it had left, less the CPU time used meanwhile.
  */
 static void (*cpu_expire_now) (void) = NULL;
+static bool cpu_expiry_armed = false;
+static double cpu_expiry_armed_at;
+#ifndef WIN32
+static struct sigaction cpu_expiry_old_sa;
+static struct itimerval cpu_expiry_old_it;
+#endif
 
 static void
 cpu_expiry_handler(SIGNAL_ARGS)
 {
+	int			save_errno = errno;
+
 	if (cpu_expire_now != NULL)
 		cpu_expire_now();
+	errno = save_errno;
 }
 
 static void
-cpu_expiry_set(int ms)
+cpu_expiry_restore(void)
 {
 #ifndef WIN32
+	sigset_t	block;
+	sigset_t	old;
+	struct itimerval off;
+	struct sigaction ign;
+	struct itimerval it = cpu_expiry_old_it;
+
+	if (!cpu_expiry_armed)
+		return;
+	sigemptyset(&block);
+	sigaddset(&block, SIGPROF);
+	sigprocmask(SIG_BLOCK, &block, &old);
+	memset(&off, 0, sizeof(off));
+	(void) setitimer(ITIMER_PROF, &off, NULL);
+	if (inj_pending_at_restore)
+	{
+		inj_pending_at_restore = false;
+		raise(SIGPROF);			/* held pending by the mask */
+	}
+	/* setting SIG_IGN discards a pending SIGPROF */
+	memset(&ign, 0, sizeof(ign));
+	ign.sa_handler = SIG_IGN;
+	sigemptyset(&ign.sa_mask);
+	(void) sigaction(SIGPROF, &ign, NULL);
+	(void) sigaction(SIGPROF, &cpu_expiry_old_sa, NULL);
+	if (it.it_value.tv_sec != 0 || it.it_value.tv_usec != 0)
+	{
+		int64		left = (int64) it.it_value.tv_sec * 1000000 + it.it_value.tv_usec -
+			(int64) ((cpu_ms() - cpu_expiry_armed_at) * 1000.0);
+
+		if (left < 1)
+			left = 1;			/* due now: its signal goes to its handler */
+		it.it_value.tv_sec = left / 1000000;
+		it.it_value.tv_usec = left % 1000000;
+	}
+	(void) setitimer(ITIMER_PROF, &it, NULL);
+	cpu_expiry_armed = false;
+	sigprocmask(SIG_SETMASK, &old, NULL);
+#endif
+}
+
+static void
+cpu_expiry_xact_callback(XactEvent event, void *arg)
+{
+	cpu_expiry_restore();
+}
+
+static void
+cpu_expiry_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
+							SubTransactionId parentSubid, void *arg)
+{
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+		cpu_expiry_restore();
+}
+
+static void
+cpu_expiry_arm(int ms)
+{
+#ifndef WIN32
+	static bool callbacks = false;
+	sigset_t	block;
+	sigset_t	old;
+	sigset_t	pending;
+	struct sigaction sa;
 	struct itimerval it;
 
-	memset(&it, 0, sizeof(it));
-	if (ms > 0)
+	cpu_expiry_restore();
+	cpu_expire_now = (void (*) (void)) main_sym("pssc_regex_test_expire_now");
+	if (!callbacks)
 	{
-		struct sigaction sa;
-
-		memset(&sa, 0, sizeof(sa));
-		sa.sa_handler = cpu_expiry_handler;
-		sa.sa_flags = SA_RESTART;
-		sigemptyset(&sa.sa_mask);
-		if (sigaction(SIGPROF, &sa, NULL) != 0)
-			elog(ERROR, "could not set the SIGPROF handler: %m");
-		cpu_expire_now = (void (*) (void)) main_sym("pssc_regex_test_expire_now");
-		it.it_value.tv_sec = ms / 1000;
-		it.it_value.tv_usec = (ms % 1000) * 1000;
+		RegisterXactCallback(cpu_expiry_xact_callback, NULL);
+		RegisterSubXactCallback(cpu_expiry_subxact_callback, NULL);
+		callbacks = true;
 	}
-	if (setitimer(ITIMER_PROF, &it, NULL) != 0)
+	sigemptyset(&block);
+	sigaddset(&block, SIGPROF);
+	sigprocmask(SIG_BLOCK, &block, &old);
+	/* a SIGPROF already pending belongs to the previous handler */
+	if (!sigismember(&old, SIGPROF) && sigpending(&pending) == 0 &&
+		sigismember(&pending, SIGPROF))
+	{
+		sigprocmask(SIG_SETMASK, &old, NULL);
+		sigprocmask(SIG_BLOCK, &block, NULL);
+	}
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = cpu_expiry_handler;
+	sa.sa_flags = SA_RESTART;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGPROF, &sa, &cpu_expiry_old_sa) != 0)
+	{
+		sigprocmask(SIG_SETMASK, &old, NULL);
+		elog(ERROR, "could not set the SIGPROF handler: %m");
+	}
+	memset(&it, 0, sizeof(it));
+	it.it_value.tv_sec = ms / 1000;
+	it.it_value.tv_usec = (ms % 1000) * 1000;
+	cpu_expiry_armed_at = cpu_ms();
+	if (setitimer(ITIMER_PROF, &it, &cpu_expiry_old_it) != 0)
+	{
+		(void) sigaction(SIGPROF, &cpu_expiry_old_sa, NULL);
+		sigprocmask(SIG_SETMASK, &old, NULL);
 		elog(ERROR, "could not set the CPU-time timer: %m");
+	}
+	cpu_expiry_armed = true;
+	sigprocmask(SIG_SETMASK, &old, NULL);
 #endif
 }
 
@@ -542,6 +648,8 @@ inject_hook(int phase, int index)
 		}
 		return REG_OKAY;
 	}
+	/* the previous attempt threw out of the engine (PG16+) */
+	cpu_expiry_restore();
 	if (phase != inj_phase || (inj_index >= 0 && index != inj_index))
 		return REG_OKAY;
 	inj_attempts++;
@@ -576,8 +684,7 @@ inject_engine_hook(int phase, int index, int rc)
 		inj_engine_ms = INSTR_TIME_GET_MILLISEC(now);
 		inj_engine_ok++;
 	}
-	if (inj_action == INJ_EXPIRE)
-		cpu_expiry_set(0);
+	cpu_expiry_restore();
 	if (inj_expire_after)
 	{
 		void		(*expire) (int) = (void (*) (int)) main_sym("pssc_regex_test_expire_in");
@@ -699,7 +806,7 @@ inject_action(void)
 			CHECK_FOR_INTERRUPTS();
 			return REG_OKAY;
 		case INJ_EXPIRE:
-			cpu_expiry_set(inj_expire_ms);
+			cpu_expiry_arm(inj_expire_ms);
 			return REG_OKAY;
 		case INJ_EXPIREAFTER:
 			inj_expire_after = true;
@@ -775,7 +882,7 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 	inj_expire_after = false;
 	inj_engine_ms = -1;
 	inj_engine_cpu_ms = -1;
-	cpu_expiry_set(0);
+	cpu_expiry_restore();
 	*hook = a == INJ_NONE ? NULL : inject_hook;
 	*ehook = a == INJ_NONE ? NULL : inject_engine_hook;
 	PG_RETURN_VOID();
@@ -849,6 +956,78 @@ pssc_extract_test_regex_expire_ms(PG_FUNCTION_ARGS)
 		elog(ERROR, "the expiry must be at least 1 ms");
 	inj_expire_ms = PG_GETARG_INT32(0);
 	PG_RETURN_INT32(old);
+}
+
+/*
+ * pssc_extract_test_sigprof(action): see the SQL script. The sentinel stands
+ * for whatever else in the backend uses SIGPROF and ITIMER_PROF (a
+ * profiler), whose handler and timer an injection must leave as it found
+ * them, and which an injection's own SIGPROF must never reach.
+ */
+#define SENTINEL_TIMER_S 1000
+static volatile sig_atomic_t sentinel_hits = 0;
+
+static void
+sentinel_handler(SIGNAL_ARGS)
+{
+	sentinel_hits++;
+}
+
+PG_FUNCTION_INFO_V1(pssc_extract_test_sigprof);
+Datum
+pssc_extract_test_sigprof(PG_FUNCTION_ARGS)
+{
+#ifndef WIN32
+	char	   *action = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	struct sigaction sa;
+	struct itimerval it;
+	const char *handler;
+	const char *timer;
+
+	if (strcmp(action, "install") == 0 || strcmp(action, "remove") == 0)
+	{
+		bool		install = action[0] == 'i';
+
+		memset(&sa, 0, sizeof(sa));
+		sa.sa_handler = install ? sentinel_handler : SIG_DFL;
+		sa.sa_flags = SA_RESTART;
+		sigemptyset(&sa.sa_mask);
+		memset(&it, 0, sizeof(it));
+		if (install)
+		{
+			it.it_value.tv_sec = SENTINEL_TIMER_S;
+			it.it_interval.tv_sec = SENTINEL_TIMER_S;
+		}
+		if (setitimer(ITIMER_PROF, &it, NULL) != 0 ||
+			sigaction(SIGPROF, &sa, NULL) != 0)
+			elog(ERROR, "could not set SIGPROF: %m");
+		sentinel_hits = 0;
+	}
+	else if (strcmp(action, "pending") == 0)
+		inj_pending_at_restore = true;
+	else if (strcmp(action, "state") != 0)
+		elog(ERROR, "unknown action \"%s\"", action);
+	if (sigaction(SIGPROF, NULL, &sa) != 0 || getitimer(ITIMER_PROF, &it) != 0)
+		elog(ERROR, "could not read SIGPROF: %m");
+	handler = sa.sa_handler == SIG_DFL ? "default" :
+		sa.sa_handler == SIG_IGN ? "ignore" :
+		sa.sa_handler == sentinel_handler ? "sentinel" :
+		sa.sa_handler == cpu_expiry_handler ? "injection" : "other";
+	/*
+	 * The sentinel's timer, less at most 100 s of this backend's CPU time
+	 * (the kernel may round it up by a tick).
+	 */
+	timer = it.it_value.tv_sec == 0 && it.it_value.tv_usec == 0 ? "off" :
+		it.it_value.tv_sec >= SENTINEL_TIMER_S - 100 &&
+		it.it_value.tv_sec <= SENTINEL_TIMER_S ? "armed" : "wrong";
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("handler=%s timer=%s interval=%ld hits=%d",
+											  handler, timer,
+											  (long) it.it_interval.tv_sec * 1000 +
+											  (long) it.it_interval.tv_usec / 1000,
+											  (int) sentinel_hits)));
+#else
+	PG_RETURN_NULL();
+#endif
 }
 
 /*
