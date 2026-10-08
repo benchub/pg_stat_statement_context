@@ -15,7 +15,7 @@ queries:
   - query_name: pssc_tag
     query: |
       WITH i AS (
-        SELECT bucket_seconds::float8 AS secs FROM pg_stat_statement_context_info()
+        SELECT bucket_seconds::float8 AS secs FROM pg_stat_statement_context_counters()
       ), c AS (
         -- The last closed bucket, as chosen by the store: the one before its
         -- current bucket, which never moves backwards, so a backward clock step
@@ -43,7 +43,7 @@ queries:
   - query_name: pssc_query
     query: |
       WITH i AS (
-        SELECT bucket_seconds::float8 AS secs FROM pg_stat_statement_context_info()
+        SELECT bucket_seconds::float8 AS secs FROM pg_stat_statement_context_counters()
       ), q AS (
         SELECT coalesce(d.datname, c.dbid::text) AS datname,
                c.toplevel::text AS toplevel,
@@ -73,10 +73,10 @@ queries:
     query: |
       SELECT i.entries::float8 AS entries,
              i.max_entries::float8 AS max_entries,
-             (SELECT count(*) FROM pg_stat_statement_context(false, true))::float8 AS live_entries,
+             l.live_entries::float8 AS live_entries,
              i.buckets::float8 AS buckets,
              i.bucket_seconds::float8 AS bucket_interval_seconds,
-             coalesce(extract(epoch FROM now() - i.oldest_bucket), 0)::float8 AS oldest_bucket_age_seconds,
+             coalesce(extract(epoch FROM now() - l.oldest_bucket), 0)::float8 AS oldest_bucket_age_seconds,
              extract(epoch FROM i.last_closed_bucket_start)::float8 AS last_closed_bucket_timestamp_seconds,
              i.shmem_bytes::float8 AS shmem_bytes,
              i.stats_reset_epoch::float8 AS stats_reset_timestamp_seconds,
@@ -88,8 +88,19 @@ queries:
              i.dropped_tags::float8 AS dropped_tags_total,
              i.heuristic_scans::float8 AS heuristic_scans_total,
              i.regex_compile_failures::float8 AS regex_compile_failures_total,
-             i.utility_missing_queryid::float8 AS utility_missing_queryid_total
-        FROM pg_stat_statement_context_info() i
+             i.utility_missing_queryid::float8 AS utility_missing_queryid_total,
+             i.capped_tags::float8 AS capped_tags_total,
+             i.cap_table_full::float8 AS cap_table_full_total,
+             i.exemplar_values_dropped::float8 AS exemplar_values_dropped_total
+        FROM pg_stat_statement_context_counters() i
+       CROSS JOIN (
+             -- The one scan of the store: entries with a live bucket, and the
+             -- oldest live bucket (a merged row starts at its entry's oldest
+             -- live bucket, so this is _info().oldest_bucket, without a
+             -- second scan). Everything else is read by _counters(), which
+             -- doesn't scan.
+             SELECT count(*) AS live_entries, min(bucket_start) AS oldest_bucket
+               FROM pg_stat_statement_context(false, true)) l
 
 metrics:
   - metric_name: pssc_tag_calls_per_second
@@ -136,3 +147,6 @@ metrics:
   - {metric_name: pssc_info_heuristic_scans_total, type: counter, help: "Statements whose comments were found by the heuristic tail scan", values: [heuristic_scans_total], query_ref: pssc_info}
   - {metric_name: pssc_info_regex_compile_failures_total, type: counter, help: "Regex extractors that failed to compile in a backend", values: [regex_compile_failures_total], query_ref: pssc_info}
   - {metric_name: pssc_info_utility_missing_queryid_total, type: counter, help: "Tracked utility statements without a query ID (check shared_preload_libraries order)", values: [utility_missing_queryid_total], query_ref: pssc_info}
+  - {metric_name: pssc_info_capped_tags_total, type: counter, help: "Tag values collapsed to null by a cardinality cap", values: [capped_tags_total], query_ref: pssc_info}
+  - {metric_name: pssc_info_cap_table_full_total, type: counter, help: "Of capped_tags, the values collapsed because the cap table was full (raise cardinality_cap_slots)", values: [cap_table_full_total], query_ref: pssc_info}
+  - {metric_name: pssc_info_exemplar_values_dropped_total, type: counter, help: "Exemplar values dropped as longer than exemplar_value_bytes", values: [exemplar_values_dropped_total], query_ref: pssc_info}

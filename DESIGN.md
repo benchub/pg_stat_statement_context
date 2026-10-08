@@ -533,7 +533,7 @@ High-cardinality keys such as `traceparent` must not be grouped by (§6.1), but 
 
 `sql/pg_stat_statement_context--1.0.sql` is **frozen** as of v1.0.0 (item 20261005-091225-29). Installations created from it must stay identical to new ones, so any later change to the SQL surface ships as an upgrade script (`pg_stat_statement_context--1.0--1.1.sql`, ...) with a `default_version` bump in the `.control` file, and its scripts are added to `sql/frozen.sha256` when that version is released. `scripts/check-frozen-sql.sh` (run in CI and by `docker/run-tests.sh`) fails if a listed script is edited in place.
 
-Version 1.0 was never released before v1.0.0, so the SQL surface added on `main` after the first freeze (exemplars, item 20261005-091225-33, briefly version 1.1 with an upgrade script) was folded into `pg_stat_statement_context--1.0.sql` and its checksum re-recorded (owner decision, 2026-10-06, item 20261005-091225-29). The first release therefore ships a single install script and no upgrade scripts; the freeze applies from v1.0.0 on.
+Version 1.0 was never released before v1.0.0, so the SQL surface added on `main` after the first freeze (exemplars, item 20261005-091225-33, briefly version 1.1 with an upgrade script) was folded into `pg_stat_statement_context--1.0.sql` and its checksum re-recorded (owner decision, 2026-10-06, item 20261005-091225-29). Likewise `_counters()` and the versioned `_info()` C symbol (item 20261008-065635-2, owner decision 2026-10-08). The first release therefore ships a single install script and no upgrade scripts; the freeze applies from v1.0.0 on.
 
 ```sql
 CREATE FUNCTION pg_stat_statement_context(
@@ -584,6 +584,20 @@ CREATE FUNCTION pg_stat_statement_context_info(
     OUT cap_table_full bigint, OUT stats_reset timestamptz,
     OUT stats_reset_epoch bigint, OUT exemplar_shmem_bytes bigint,
     OUT exemplar_value_bytes int, OUT exemplar_values_dropped bigint) ...;
+
+CREATE FUNCTION pg_stat_statement_context_counters(
+    OUT entries bigint, OUT max_entries bigint, OUT dealloc bigint,
+    OUT reclaimed_entries bigint, OUT evicted_entries bigint,
+    OUT dropped_records bigint,
+    OUT buckets int, OUT bucket_seconds int,
+    OUT current_bucket_start timestamptz,
+    OUT last_closed_bucket_start timestamptz, OUT shmem_bytes bigint,
+    OUT cap_shmem_bytes bigint, OUT invalid_tags bigint, OUT dropped_tags bigint,
+    OUT heuristic_scans bigint, OUT regex_compile_failures bigint,
+    OUT utility_missing_queryid bigint, OUT capped_tags bigint,
+    OUT cap_table_full bigint, OUT stats_reset timestamptz,
+    OUT stats_reset_epoch bigint, OUT exemplar_shmem_bytes bigint,
+    OUT exemplar_value_bytes int, OUT exemplar_values_dropped bigint) ...;
 ```
 
 These are the 1.0 definitions. The `exemplars` column (§6.13, item 20261005-091225-33) is the last column of both functions and so of all three views, and the three `exemplar_*` columns are the last ones of `_info()`.
@@ -615,12 +629,14 @@ Exporter support (item 20261006-010149-1). Bucket gauges only become final once 
 
 SRF implementation (item -20): materialize mode, `STRICT VOLATILE PARALLEL SAFE`, C symbol `pg_stat_statement_context_1_0`. Under the shared lock only raw bytes are copied (key fields, encoding, live slots, and tags only when shown); encoding conversion, jsonb building and merging happen after the lock is released. Reading changes no entry data: it may only advance the `current_bucket` watermark (§5.2). Expired slots keep their contents until a writer rolls them over. Non-merged rows of an entry come out in bucket order.
 
-`_info()` and `_reset()` (item -21):
+`_info()`, `_counters()` and `_reset()` (item -21):
 - `buckets` is the configured `bucket_count`. `oldest_bucket` is the start of the oldest live slot of any entry (it equals `min(bucket_start)` in the view), or `NULL` when no slot is live. All values come from one snapshot under the shared lock. Every slot is judged against the one watermark the row reports as `current_bucket_start`. If the watermark moves during the scan, the scan is repeated, so `oldest_bucket` is never a bucket that has already expired at the row's own `current_bucket_start`. `shmem_bytes` is the exact size requested at startup.
+- **Bounded scan** (item 20261008-065635-2): the scan is repeated at most twice (3 passes in all). Each pass releases the lock at its end and the next one starts from scratch under a new acquisition, with a fresh copy of the counters (a dynahash scan is never resumed across a release). The last pass is returned even if the watermark moved during it: the row is still self-consistent (judged against its own `current_bucket_start`), but the watermark may already be newer, by as much as it moved during that pass (bounded staleness). The watermark moves at most once per `bucket_interval` unless the clock is stepped, so a second pass is rare. `LWLockAcquire()` holds off interrupts, so `CHECK_FOR_INTERRUPTS()` under the lock would do nothing: instead a pass other than the last checks `InterruptPending` after each entry and, if set (and the caller could take interrupts), ends the scan, releases the lock and calls `CHECK_FOR_INTERRUPTS()`, which raises the cancel; a benign interrupt just costs that pass. The last pass is never cut short, so every row comes from a whole pass and a cancel waits for at most one pass.
+- **`_counters()`** (item 20261008-065635-2) returns `_info()`'s columns except `oldest_bucket`, in the same order: the shared lock is taken only to copy the header counters, and the watermark is raised to the clock lock-free, as every reader does. It is O(1) whatever `max_entries`, so exporters call it on every scrape and leave `_info()` (one table scan) to the panels that need `oldest_bucket`. Same labels (`STRICT VOLATILE PARALLEL RESTRICTED`), same pending-counter flush, and `PUBLIC` like `_info()`: it shows nothing `_info()` doesn't. The C symbols are versioned (`pg_stat_statement_context_info_1_0`, `pg_stat_statement_context_counters_1_0`, like the SRFs'), so a later version can add columns with a new symbol while 1.0 catalogs keep the old one. Both changes went into the unreleased `--1.0.sql` and its checksum was re-recorded (owner decision, 2026-10-08).
 - `_info()` first flushes the caller's pending extraction counters, so a session sees its own activity. It is callable by `PUBLIC`, like `pg_stat_statements_info`.
 - `_reset()` (superuser-only by default) takes the exclusive lock, clears all entries, header counters and the cardinality-cap value sets, sets `stats_reset`, and discards the caller's own pending counters. Counts from statements running elsewhere land after the reset. A backend whose regex failed before the reset keeps that extractor disabled and doesn't count the failure again.
 - Diagnostic counter flushes hold the store's shared lock, so a flush lands entirely before or after a reset. When nothing is pending, no lock is taken. At `ExecutorEnd` the flush reuses the record's lock hold (`pssc_store_record_with_stats()`).
-- Both functions are `VOLATILE PARALLEL RESTRICTED`, because pending counters live only in the leader backend.
+- All three functions are `VOLATILE PARALLEL RESTRICTED`, because pending counters live only in the leader backend.
 
 Bucket merging (`merge_buckets = true`) sums `calls` and `total_exec_time` across an entry's live slots (§5.2). Because the key has no bucket, each entry yields exactly one merged row, and `bucket_start` is its oldest live slot.
 

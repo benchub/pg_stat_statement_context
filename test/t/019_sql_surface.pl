@@ -6,7 +6,8 @@
 #     from the documents and run against a known workload, so this test
 #     fails if an example stops working or stops giving sensible results;
 #   - the column names and types of the views, of the set-returning
-#     function and of _info() equal DESIGN.md §7 and the docs' tables;
+#     function, of _info() and of _counters() equal DESIGN.md §7 and the
+#     docs' tables;
 #   - tags recorded through the hooks in UTF8, LATIN1 and SQL_ASCII
 #     databases, read from a UTF8 and from a SQL_ASCII database, including
 #     the docs' SQL_ASCII escaping example.
@@ -194,6 +195,12 @@ sql(q{SELECT count(*) FROM t WHERE id < 100000 /*controller='orders',action='ind
 	my ($info) = $design7 =~ /CREATE FUNCTION ${P}_info\(\n(.*?)\) \.\.\.;/s
 	  or die 'DESIGN.md §7: _info() definition not found';
 	is($args->("${P}_info()"), $norm->($info), '_info() OUT columns as in DESIGN.md §7');
+	my ($counters) = $design7 =~ /CREATE FUNCTION ${P}_counters\(\n(.*?)\) \.\.\.;/s
+	  or die 'DESIGN.md §7: _counters() definition not found';
+	is($args->("${P}_counters()"), $norm->($counters), '_counters() OUT columns as in DESIGN.md §7');
+	is($args->("${P}_counters()"),
+		$args->("${P}_info()") =~ s/OUT oldest_bucket timestamp with time zone, //r,
+		'_counters() has the _info() columns but oldest_bucket, in the same order');
 
 	my $view_cols = sub {
 		return sql(qq{SELECT string_agg('OUT ' || attname || ' ' || format_type(atttypid, atttypmod), ', '

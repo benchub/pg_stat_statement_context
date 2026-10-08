@@ -140,6 +140,9 @@ def check_exporter(c, name, url):
     info("pssc_info_heuristic_scans_total", lambda v: v >= 0, ">= 0")
     info("pssc_info_regex_compile_failures_total", lambda v: v == 0, "0")
     info("pssc_info_utility_missing_queryid_total", lambda v: v == 0, "0")
+    info("pssc_info_capped_tags_total", lambda v: v == 0, "0 (no cardinality caps configured)")
+    info("pssc_info_cap_table_full_total", lambda v: v == 0, "0")
+    info("pssc_info_exemplar_values_dropped_total", lambda v: v == 0, "0")
     info("pssc_info_oldest_bucket_age_seconds", lambda v: 0 <= v <= 70, "in [0, 70]")
     info("pssc_info_stats_reset_timestamp_seconds", lambda v: abs(v - time.time()) < 3600,
          "within the last hour")

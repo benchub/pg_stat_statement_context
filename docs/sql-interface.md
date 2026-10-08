@@ -7,6 +7,7 @@
 | [`pg_stat_statement_context`](#the-views) | view, one row per entry and live bucket | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context(showtags, merge_buckets)`](#pg_stat_statement_contextshowtags-merge_buckets) | set-returning function behind both views | `PUBLIC` |
 | [`pg_stat_statement_context_activity`](#pg_stat_statement_context_activity) | view, current tags of each backend (join `pg_stat_activity` on `pid`); `pg_stat_statement_context_activity()` is the function behind it | `SELECT` granted to `PUBLIC` |
+| [`pg_stat_statement_context_counters()`](#pg_stat_statement_context_counters) | the store and diagnostic counters of `_info()` without its table scan: cheap, for scrapers | `PUBLIC` |
 | [`pg_stat_statement_context_extract(query, stmt_location, stmt_len)`](#pg_stat_statement_context_extract) | debug: show the tags extracted from a statement | superuser only |
 | [`pg_stat_statement_context_info()`](#pg_stat_statement_context_info) | store and diagnostic counters | `PUBLIC` |
 | [`pg_stat_statement_context_last_bucket`](#pg_stat_statement_context_last_bucket) | view, one row per entry, last closed bucket only; `pg_stat_statement_context_last_bucket(showtags)` is the function behind it | `SELECT` granted to `PUBLIC` |
@@ -213,6 +214,14 @@ Some details:
 - **Cost.** Each backend has one shared slot of `max_tagset_bytes` bytes plus a small header, for each of `MaxBackends` backends; at the defaults that is 67–75 kB, depending on the PostgreSQL version (see [Shared memory sizing](configuration.md#shared-memory-sizing)). The extension writes the slot when a top-level statement starts and ends, without taking a lock. A reader never blocks a writer: it retries the copy of any slot that is being written while it reads. See [benchmarks](benchmarks.md#activity-view) for the measured overhead.
 - **Not counted in `_info().shmem_bytes`.** That column reports the statistics store only; `pg_shmem_allocations` shows the size of the activity slots, under the name `pg_stat_statement_context activity`.
 
+## `pg_stat_statement_context_counters()`
+
+```sql
+SELECT * FROM pg_stat_statement_context_counters();
+```
+
+The row of [`_info()`](#pg_stat_statement_context_info) without `oldest_bucket`: every other column, in the same order and with the same meaning, read from the store's shared header alone. Its cost does not depend on the number of entries, whereas `_info()` scans every entry to find `oldest_bucket`, so it is the one to call on every scrape (the [integrations](integrations/README.md) do). Like `_info()`, it is readable by everyone, first moves the current bucket up to the clock, and includes the calling session's own pending extraction counts.
+
 ## `pg_stat_statement_context_info()`
 
 One row of store-wide counters, readable by everyone (like `pg_stat_statements_info`):
@@ -250,6 +259,8 @@ SELECT * FROM pg_stat_statement_context_info();
 | `exemplar_values_dropped` | `bigint` | Exemplar values not stored because they were longer than `exemplar_value_bytes` (the entry keeps its previous value). |
 
 The extraction counters (`invalid_tags`, `dropped_tags`, `heuristic_scans`, `capped_tags`, `cap_table_full`) are collected per backend and added to the shared counters when a statement finishes; `_info()` includes the calling session's own pending counts.
+
+Finding `oldest_bucket` scans every entry under the store's shared lock; [`_counters()`](#pg_stat_statement_context_counters) returns the other columns without it. If the current bucket moves during the scan (at most once per `bucket_seconds`, unless the clock is stepped), the scan starts over, at most 3 times in all. The row is always consistent with its own `current_bucket_start`, which is the current bucket of its last scan: if that one moved too, the store's current bucket is already newer when the row is returned. A cancel interrupts the scan promptly.
 
 ## `pg_stat_statement_context_reset()`
 

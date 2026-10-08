@@ -23,7 +23,7 @@ Ready-to-use configurations that turn `pg_stat_statement_context` into Prometheu
 | `pssc_info_entries`, `_max_entries`, `_live_entries` | gauge | |
 | `pssc_info_buckets`, `_bucket_interval_seconds`, `_oldest_bucket_age_seconds`, `_last_closed_bucket_timestamp_seconds` | gauge | |
 | `pssc_info_shmem_bytes`, `_stats_reset_timestamp_seconds` | gauge | |
-| `pssc_info_{dealloc,reclaimed_entries,evicted_entries,dropped_records,invalid_tags,dropped_tags,heuristic_scans,regex_compile_failures,utility_missing_queryid}_total` | counter | |
+| `pssc_info_{dealloc,reclaimed_entries,evicted_entries,dropped_records,invalid_tags,dropped_tags,heuristic_scans,regex_compile_failures,utility_missing_queryid,capped_tags,cap_table_full,exemplar_values_dropped}_total` | counter | |
 
 Each exporter adds its own labels: postgres_exporter adds `server`, and the OTel Prometheus exporter adds `otel_scope_*`. Example scrape output:
 
@@ -44,12 +44,12 @@ The extension stores calls and time **in time buckets**. Buckets expire after `b
 * `pg_stat_statement_context_totals` is a **sliding-window** sum over the live buckets. It drops whenever the oldest bucket expires, so `rate()` on it is meaningless, and Prometheus would read every drop as a counter reset.
 * Per-bucket rows (`pg_stat_statement_context`) are complete only once their bucket has closed, and then they expire.
 
-The recipes therefore export **the last closed bucket**, divided by `bucket_interval`, as a gauge. The store tells them which bucket that is: the [`pg_stat_statement_context_last_bucket`](../sql-interface.md#pg_stat_statement_context_last_bucket) view returns just that bucket, and `_info()` reports `bucket_seconds` and `last_closed_bucket_start` (exported as `pssc_info_last_closed_bucket_timestamp_seconds`):
+The recipes therefore export **the last closed bucket**, divided by `bucket_interval`, as a gauge. The store tells them which bucket that is: the [`pg_stat_statement_context_last_bucket`](../sql-interface.md#pg_stat_statement_context_last_bucket) view returns just that bucket, and [`pg_stat_statement_context_counters()`](../sql-interface.md#pg_stat_statement_context_counters) reports `bucket_seconds` and `last_closed_bucket_start` (exported as `pssc_info_last_closed_bucket_timestamp_seconds`):
 
 ```sql
 SELECT tags ->> 'controller', sum(calls)::float8 / min(i.bucket_seconds)
   FROM pg_stat_statement_context_last_bucket,
-       pg_stat_statement_context_info() i
+       pg_stat_statement_context_counters() i
  GROUP BY 1;
 ```
 
@@ -65,7 +65,9 @@ The last closed bucket is the one before the store's current bucket, a monotonic
 * **Eviction** of live entries removes their buckets, so the gauges **undercount** but never produce a false counter reset. Watch `rate(pssc_info_evicted_entries_total[...])`: it counts only live entries, and if it is not 0, raise `max_entries` or reduce tag cardinality. `pssc_info_reclaimed_entries_total` counts expired entries recycled when the table is full, which is normal. `pssc_info_dropped_records_total` should always be 0 (see [Eviction](../configuration.md#eviction)).
 * **`pg_stat_statement_context_reset()`** (or a restart that does not load [saved statistics](../configuration.md#save)) clears the buckets. The gauges read `0` until the next bucket closes, and the `pssc_info_*_total` counters restart from 0, which `rate()` handles as an ordinary counter reset. `pssc_info_stats_reset_timestamp_seconds` records when this happened.
 
-The `pssc_info_*_total` counters come from `_info()`. They are real cumulative counters, so `rate()`/`increase()` is correct for them.
+The `pssc_info_*_total` counters come from `_counters()`. They are real cumulative counters, so `rate()`/`increase()` is correct for them. Watch `pssc_info_capped_tags_total` and `pssc_info_cap_table_full_total` if you configure [cardinality caps](../configuration.md#cardinality_cap), and `pssc_info_exemplar_values_dropped_total` if you record [exemplars](../configuration.md#exemplar_keys).
+
+**Cost per scrape.** `_counters()` reads the counters and settings without scanning the store, so the recipes never call `_info()`, whose `oldest_bucket` walks every entry. Each scrape reads the store four times: twice for the tag metrics (the last bucket and the live tag sets), once for the query metrics, and once for `pssc_info_live_entries` and `pssc_info_oldest_bucket_age_seconds`, which come from one `pg_stat_statement_context(false, true)` scan (`min(bucket_start)` over merged rows is `_info().oldest_bucket`). Drop that last scan if you don't need those two gauges.
 
 **Per-entry counters.** The views also have `calls_total` and `exec_time_total`, which only grow for as long as an entry exists (like `pg_stat_statements`' counters, with `stats_since` as their start time). Exported per entry (one series per `queryid` × tag set), `rate()` works on them and catches every call, at full scrape resolution. The recipes don't export them by default, because:
 
@@ -140,7 +142,7 @@ PSSC_PG_USER=pssc_monitor PSSC_PG_PASSWORD=... \
 otelcol-contrib --config=config.yaml
 ```
 
-* The rate metrics are OTel **gauges**. The `_info` counters are **cumulative monotonic sums** whose start time (`start_ts_column`) is `_info().stats_reset` in Unix nanoseconds, so OTLP backends see a reset as a counter restart.
+* The rate metrics are OTel **gauges**. The `_counters()` counters are **cumulative monotonic sums** whose start time (`start_ts_column`) is `_counters().stats_reset` in Unix nanoseconds, so OTLP backends see a reset as a counter restart.
 * The Prometheus exporter (`:8889`) appends `_total` to monotonic sums, so the SQL column and metric names omit it. `metric_expiration: 90s` drops series that are no longer returned.
 * To send metrics elsewhere, replace the `prometheus`/`debug` exporters with `otlp`/`otlphttp`. The dashboard needs Prometheus-compatible storage with the names above (for example via a Prometheus OTLP receiver or remote-write).
 
@@ -155,7 +157,7 @@ Import [grafana/pg_stat_statement_context.json](grafana/pg_stat_statement_contex
   * The top 10 query ids over time, and a table of the top query ids with totals over the time range.
   * Nested statements (`toplevel="false"`).
   * Health: entries and live entries against `max_entries`, bucket settings, the age of the oldest bucket, and the last reset.
-  * Eviction rate, and the rates of tag problems (invalid, dropped, regex failures, missing utility query ids, heuristic scans).
+  * Eviction rate, and the rates of tag problems (invalid, dropped, regex failures, missing utility query ids, heuristic scans, capped tags, a full cap table, dropped exemplar values).
 * The panels use the gauges as they are (`sum by`), and `rate()` only on `pssc_info_*_total`.
 * **Totals over the time range.** The tables integrate the gauges: `sum_over_time(x[$__range])` multiplied by the scrape interval. The scrape interval is derived as `$__range_s` divided by the number of `pssc_info_max_entries` samples, since every scrape returns that metric. Scrapes where a series is absent therefore count as 0. That matters because the series are sparse: a tag set disappears once its buckets expire, and a query id is only exported while it is in its tag set's top 5. `avg_over_time()` would average only the samples that are present, which inflates sparse series and can reverse rankings. Query id totals are lower bounds for query ids that were not always in the top 5. The totals assume the exporter was scraped throughout the range.
 
@@ -172,7 +174,7 @@ The script runs everything in Docker on a private network, with ports bound to 1
 * It builds the extension into the `scripts/docker-test.sh` image, with `bucket_interval = 10s`, and starts a tagged workload that includes nested plpgsql statements and a malformed tag. psql runs the workload with `ON_ERROR_STOP`, and the checks fail at once if the workload stops.
 * It runs all three collectors with these recipes, plus Prometheus and Grafana with the dashboard provisioned.
 * `test/integrations/check.py` then checks:
-  * The expected series and values on each `/metrics`. The call rates must match the workload's ratios within 4%: users#show : posts#index : orders#create : job=cleanup : the malformed tag = 5 : 2 : 1 : 1 : 1, and nested calls = 3 × orders#create. A missing or extra statement in the workload can't pass. The `_info` counters and settings must have the expected values.
+  * The expected series and values on each `/metrics`. The call rates must match the workload's ratios within 4%: users#show : posts#index : orders#create : job=cleanup : the malformed tag = 5 : 2 : 1 : 1 : 1, and nested calls = 3 × orders#create. A missing or extra statement in the workload can't pass. The `_counters()` counters and settings must have the expected values.
   * That Prometheus has scraped every job.
   * That every dashboard panel query returns data for each exporter job, through Grafana's `/api/ds/query`.
   * A backward clock step. The TEST-ONLY `pssc_store_test` module's debug clock runs the store 40 s ahead for a moment, then returns it to the real clock. postgres_exporter and sql_exporter must then stop exporting the per-second series, then recover once the clock catches up. These two run the queries on every scrape. The OTel collector keeps its last values until `metric_expiration`, so it isn't checked for the gap, but it runs the same SQL.
