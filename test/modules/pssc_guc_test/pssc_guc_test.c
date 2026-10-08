@@ -492,9 +492,11 @@ pssc_guc_test_extractors_size(PG_FUNCTION_ARGS)
 }
 
 /*
- * Whether pg_stat_statement_context would warn about the load order for the
- * given shared_preload_libraries value (src/utility.c), so spellings the
- * server cannot load here (e.g. other letter case) can be checked.
+ * The libraries pg_stat_statement_context would warn about as loaded after
+ * it, for the given shared_preload_libraries value (src/utility.c), joined
+ * by ',' in the order pg_stat_statements, pg_stat_monitor; '' when the order
+ * is right. Spellings the server cannot load here (e.g. other letter case)
+ * can be checked this way.
  */
 PG_FUNCTION_INFO_V1(pssc_guc_test_load_order_wrong);
 Datum
@@ -503,5 +505,6 @@ pssc_guc_test_load_order_wrong(PG_FUNCTION_ARGS)
 	bool		(*fn) (const char *) =
 		(bool (*) (const char *)) main_sym("pssc_load_order_wrong");
 
-	PG_RETURN_BOOL(fn(text_to_cstring(PG_GETARG_TEXT_PP(0))));
+	PG_RETURN_TEXT_P(cstring_to_text(fn(text_to_cstring(PG_GETARG_TEXT_PP(0))) ?
+									 "pg_stat_statements" : ""));
 }

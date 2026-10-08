@@ -12,7 +12,10 @@
 # whitespace-padded entries are matched by basename; a duplicate entry does
 # not change the order of the first load; letter case is ignored (checked
 # through pssc_guc_test_load_order_wrong(), as mixed-case names do not load
-# on a case-sensitive filesystem).
+# on a case-sensitive filesystem). The matcher also covers pg_stat_monitor
+# (backlog 20261008-092913-1), alone and with pgss, in every order; its
+# server-log WARNING is checked by 041_load_order_pgsm.pl where it is
+# installed.
 use strict;
 use warnings;
 
@@ -147,24 +150,62 @@ for my $c (@cases)
 
 # ------------------------------------------------- matcher, any spelling
 # Drives the matcher directly with values the server could not load here
-# (mixed case only loads on a case-insensitive filesystem), as the same
-# function _PG_init uses.
+# (mixed case only loads on a case-insensitive filesystem, and
+# pg_stat_monitor is usually not installed), as the same function _PG_init
+# uses. It returns the libraries that would be warned about: those of
+# pg_stat_statements and pg_stat_monitor listed after this extension.
 sql('CREATE EXTENSION pssc_guc_test');
+my $PGSS = 'pg_stat_statements';
+my $PGSM = 'pg_stat_monitor';
 my @matcher = (
-	[ "PG_STAT_STATEMENT_CONTEXT, pg_stat_statements", 't',
+	[ "PG_STAT_STATEMENT_CONTEXT, pg_stat_statements", $PGSS,
 		'upper-case extension, pgss after' ],
-	[ "$P, Pg_Stat_Statements", 't', 'mixed-case pgss after' ],
+	[ "$P, Pg_Stat_Statements", $PGSS, 'mixed-case pgss after' ],
 	[ "\"\$libdir/Pg_Stat_Statement_Context.SO\", \"\$libdir/PG_STAT_STATEMENTS.Dylib\"",
-		't', 'mixed-case quoted paths and suffixes, pgss after' ],
-	[ "PG_STAT_STATEMENTS.SO, Pg_Stat_Statement_Context", 'f',
+		$PGSS, 'mixed-case quoted paths and suffixes, pgss after' ],
+	[ "PG_STAT_STATEMENTS.SO, Pg_Stat_Statement_Context", '',
 		'mixed case, pgss first' ],
-	[ "$P, pg_stat_statements", 't', 'plain wrong order' ],
-	[ "pg_stat_statements, $P", 'f', 'plain documented order' ],
-	[ "$P", 'f', 'no pgss' ],
-	[ "pg_stat_statements", 'f', 'pgss without this extension' ],
-	[ "", 'f', 'empty list' ],
-	[ "$P, pg_stat_statements_ext", 'f', 'longer name is not pgss' ],
-	[ "$P, pg_stat_statements.sox", 'f', 'unknown suffix is not stripped' ],
+	[ "$P, pg_stat_statements", $PGSS, 'plain wrong order' ],
+	[ "pg_stat_statements, $P", '', 'plain documented order' ],
+	[ "$P", '', 'no pgss' ],
+	[ "pg_stat_statements", '', 'pgss without this extension' ],
+	[ "", '', 'empty list' ],
+	[ "$P, pg_stat_statements_ext", '', 'longer name is not pgss' ],
+	[ "$P, pg_stat_statements.sox", '', 'unknown suffix is not stripped' ],
+
+	# pg_stat_monitor zeroes utility queryIds like pgss (backlog
+	# 20261008-092913-1).
+	[ "$P, pg_stat_monitor", $PGSM, 'pgsm after this extension' ],
+	[ "pg_stat_monitor, $P", '', 'pgsm first' ],
+	[ "pg_stat_monitor", '', 'pgsm without this extension' ],
+	[ "\"\$libdir/$P\", \"\$libdir/pg_stat_monitor.so\"", $PGSM,
+		'quoted paths, pgsm after' ],
+	[ "\"\$libdir/pg_stat_monitor.dylib\",\"\$libdir/$P\"", '',
+		'quoted paths, pgsm first' ],
+	[ "  $P  ,   PG_STAT_MONITOR.Dylib  ", $PGSM,
+		'whitespace and mixed case, pgsm after' ],
+	[ "\t$P,\tpg_stat_monitor\t", $PGSM, 'tabs, pgsm after' ],
+	[ "pg_stat_monitor, $P, pg_stat_monitor", '',
+		'duplicate pgsm entry after: first load decides the order' ],
+	[ "$P, pg_stat_monitor_ext", '', 'longer name is not pgsm' ],
+	[ "$P, pg_stat_mon", '', 'shorter name is not pgsm' ],
+
+	# Both libraries.
+	[ "pg_stat_statements, pg_stat_monitor, $P", '',
+		'documented order of all three' ],
+	[ "pg_stat_monitor, pg_stat_statements, $P", '',
+		'pgsm before pgss, both before this extension' ],
+	[ "pg_stat_statements, $P, pg_stat_monitor", $PGSM,
+		'pgss first, pgsm after' ],
+	[ "pg_stat_monitor, $P, pg_stat_statements", $PGSS,
+		'pgsm first, pgss after' ],
+	[ "$P, pg_stat_statements, pg_stat_monitor", "$PGSS,$PGSM",
+		'both after, pgss first' ],
+	[ "$P, \"\$libdir/pg_stat_monitor\" , PG_STAT_STATEMENTS.so", "$PGSS,$PGSM",
+		'both after, pgsm first, quoted and suffixed' ],
+	[ "$P", '', 'neither library' ],
+	[ "pg_stat_statements, pg_stat_monitor", '',
+		'both without this extension' ],
 );
 for my $c (@matcher)
 {

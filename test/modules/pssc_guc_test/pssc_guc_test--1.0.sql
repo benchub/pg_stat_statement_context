@@ -46,7 +46,9 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_guc_test_extractors_size() RETURNS bigint
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
--- Whether this shared_preload_libraries value lists pg_stat_statements after
--- pg_stat_statement_context (the _PG_init load-order WARNING, src/utility.c).
-CREATE FUNCTION pssc_guc_test_load_order_wrong(spl text) RETURNS bool
+-- The libraries this shared_preload_libraries value lists after
+-- pg_stat_statement_context that must come before it (the _PG_init
+-- load-order WARNINGs, src/utility.c), as 'pg_stat_statements',
+-- 'pg_stat_monitor', 'pg_stat_statements,pg_stat_monitor' or ''.
+CREATE FUNCTION pssc_guc_test_load_order_wrong(spl text) RETURNS text
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
