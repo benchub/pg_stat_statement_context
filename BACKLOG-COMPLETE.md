@@ -1604,6 +1604,22 @@ The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-5: Broader memory-checker coverage
+
+**Description:** TST-4, TST-9 and TST-10. Valgrind runs only the pg_regress suite (`docker/run-tests.sh` about lines 188–190 disable TAP under `--valgrind`). The CI SQL fuzz job runs against PGDG builds without assertions (`.github/workflows/ci.yml` about lines 74–78). Long-session memory growth is not tested.
+- Under the existing Valgrind wrapper, run a selected TAP subset that covers the SRFs, eviction, cap races, exemplars and persistence save/reload, for example 007, 009, 024, 028 and 029 (pick a set that finishes in reasonable time). Add it as an opt-in `--valgrind-tap` mode and run it in CI on PG 18.
+- Run the SQL fuzz job against the `--assert` build in CI.
+- Add a bounded-memory soak test: one backend runs, for example, 200k tagged statements in many shapes (nested, utility, prepared, errors), and the test checks that its memory doesn't grow. Use `pg_backend_memory_contexts` (PG14+) to compare TopMemoryContext/CacheMemoryContext totals at fixed points, and allow a small slack. Make it a TAP test that is quick by default and can be run longer via an environment variable.
+- Document the exact coverage in DESIGN.md §9.
+
+**Acceptance criteria:**
+- The new modes run locally via `scripts/docker-test.sh` and are wired into CI, and the TAP subset passes under Valgrind with no errors.
+- The soak test fails if a leak is introduced; check this once with a temporary deliberate per-statement allocation into TopMemoryContext.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
