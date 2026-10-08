@@ -18,7 +18,8 @@
 --     current extractor configuration (if this role may call it);
 --   - recording is on (enabled, track) for this session;
 --   - the tagged smoke statements, run 3 times in SQLCommenter and 3 times
---     in marginalia format, are each recorded exactly once (every format
+--     in marginalia format after one unmeasured warm-up call of each (so 8
+--     calls per run), are each recorded exactly once (every format
 --     _extract() recognizes; without _extract(), at least one format) and
 --     visible to this role in the views;
 --   - pg_file_settings is unchanged (if this role may read it).
@@ -31,8 +32,8 @@
 -- so repeated runs reuse those two entries per role and database and admit
 -- one value of controller to a cardinality cap; the value pssc_smoke is
 -- reserved for this test. Smoke runs in one database take turns on the
--- advisory lock (1886614371, 1936551787) ('pssc', 'smok') from their first
--- count to their last, so the calls counted are their own.
+-- advisory lock (1886614371, 1936551787) ('pssc', 'smok') from their
+-- warm-up to their last count, so the calls counted are their own.
 \set ON_ERROR_STOP 1
 \set QUIET 1
 \set fail 'DO $pssc_smoke$ BEGIN RAISE EXCEPTION ''pg_stat_statement_context smoke test failed''; END $pssc_smoke$;'
@@ -187,9 +188,19 @@ SELECT :'x_sc'::boolean OR :'x_mg'::boolean AS x_any \gset
 -- Record the smoke statements, three times in each format, and count the
 -- calls of the smoke entries of this role and database before, between and
 -- after. Each format must add exactly 3, or 0 if the configuration does
--- not recognize it.
+-- not recognize it. The views hide an entry whose buckets have all
+-- expired, but it keeps its lifetime calls until it is reclaimed and shows
+-- them again after its next call; so each statement (and the count itself)
+-- is first run once, unmeasured, to bring its entry back before the first
+-- count. The entries counted (queryid and stats_since) must be the same at
+-- each count, or the counts cannot be compared and the run must be
+-- repeated: an entry appeared (expired again, after a stall of the whole
+-- live window since the warm-up, or recreated), or one was evicted.
 SELECT pg_advisory_lock(1886614371, 1936551787) AS smoke_locked \gset
-\set smoke_calls 'SELECT coalesce(sum(calls_total), 0) AS calls FROM ' :"s" '.pg_stat_statement_context_totals WHERE userid = (SELECT oid FROM pg_roles WHERE rolname = current_user) AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND tags->>''controller'' = ''pssc_smoke'''
+\set smoke_calls 'SELECT coalesce(sum(calls_total), 0) AS calls, coalesce(string_agg(queryid || ''@'' || stats_since, '','' ORDER BY queryid, stats_since), '''') AS keys FROM ' :"s" '.pg_stat_statement_context_totals WHERE userid = (SELECT oid FROM pg_roles WHERE rolname = current_user) AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND tags->>''controller'' = ''pssc_smoke'''
+:stmt_sc \gset smoke_
+:stmt_mg \gset smoke_
+:smoke_calls \gset c_
 :smoke_calls \gset c0_
 :stmt_sc \gset smoke_
 :stmt_sc \gset smoke_
@@ -199,11 +210,17 @@ SELECT pg_advisory_lock(1886614371, 1936551787) AS smoke_locked \gset
 :stmt_mg \gset smoke_
 :stmt_mg \gset smoke_
 :smoke_calls \gset c2_
-SELECT :c1_calls - :c0_calls AS d_sc, :c2_calls - :c1_calls AS d_mg \gset
+SELECT :'c0_keys' = :'c1_keys' AND :'c1_keys' = :'c2_keys' AS same_entries,
+       :c1_calls - :c0_calls AS d_sc, :c2_calls - :c1_calls AS d_mg \gset
+\if :same_entries
+\else
+\echo 'FAIL: the smoke entries changed during the run (an entry expired after a stall, or was evicted or reset), so their calls cannot be counted: rerun the smoke test'
+:fail
+\endif
 SELECT :d_sc = 3 AS rec_sc, :d_mg = 3 AS rec_mg,
        :d_sc NOT IN (0, 3) OR :d_mg NOT IN (0, 3) AS rec_wrong \gset
 \if :rec_wrong
-\echo 'FAIL: the smoke statements were recorded' :d_sc 'times (SQLCommenter) and' :d_mg 'times (marginalia), expected exactly 3 for each format the configuration recognizes (0 otherwise): another session using controller = pssc_smoke, tags_override, or entries evicted meanwhile?'
+\echo 'FAIL: the smoke statements were recorded' :d_sc 'times (SQLCommenter) and' :d_mg 'times (marginalia), expected exactly 3 for each format the configuration recognizes (0 otherwise): another session using controller = pssc_smoke, or tags_override?'
 :fail
 \endif
 \if :rec_sc
