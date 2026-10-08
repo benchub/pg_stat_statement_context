@@ -288,7 +288,12 @@ SHOW shared_preload_libraries;
 SELECT utility_missing_queryid FROM pg_stat_statement_context_counters();
 ```
 
-A growing `utility_missing_queryid` means the order is wrong: fix it in the parameter group and reboot.
+A growing `utility_missing_queryid` means utility statements arrived without a query ID. It does **not** by itself prove that the order is wrong, because the counter also grows with the correct order. `pg_stat_statements` clears the query ID of a utility statement kept in a plan cache (a statement in a PL/pgSQL function, or a named prepared statement of the extended protocol) on its first execution in a session, so later executions of the same cached statement have no query ID. `pg_stat_statements` counts them only once too. Before you reboot:
+
+- Check the order that `SHOW shared_preload_libraries` prints above: `pg_stat_statements` must come before `pg_stat_statement_context`.
+- Look in the server log, downloaded from the provider, for the startup `WARNING:  pg_stat_statements is loaded after pg_stat_statement_context in shared_preload_libraries`.
+
+Only if the order is wrong (the warning is logged at every startup) should you fix it in the parameter group and reboot. With the correct order, a counter that grows only while functions or prepared statements run DDL is the cached-utility case, and a reboot won't change it.
 
 ### My settings change didn't apply
 

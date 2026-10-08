@@ -318,31 +318,78 @@ my %check = (
 	},
 );
 
-my @marks = $guide =~ /<!-- check: ([\w-]+) -->/g;
+# Every HTML comment in the guide must be a well-formed marker, and the
+# raw-example markers must pair up (open, close, open, close, ...), so a
+# typo or a missing marker fails rather than silently dropping a check.
+my (@marks, @opened, @closed, @marker_errors);
+{
+	my $open;
+	for my $c ($guide =~ /<!--(.*?)-->/sg)
+	{
+		if ($c =~ /^ check: ([\w-]+) $/) { push @marks, $1; }
+		elsif ($c =~ /^ raw-example: ([\w-]+) $/)
+		{
+			push @opened, $1;
+			push @marker_errors, "raw-example $1 opened inside $open" if defined $open;
+			$open = $1;
+		}
+		elsif ($c eq ' /raw-example ')
+		{
+			push @closed, $open // '(none)';
+			push @marker_errors, 'closing raw-example marker without an opening one'
+			  unless defined $open;
+			undef $open;
+		}
+		else { push @marker_errors, "unrecognized comment <!--$c-->"; }
+	}
+	push @marker_errors, "raw-example $open is not closed" if defined $open;
+}
+is_deeply(\@marker_errors, [], 'every marker in the guide is well formed and paired');
+my @all_checks = $guide =~ /<!--\s*check\b/g;
+is(scalar(@marks), scalar(@all_checks), 'every check marker is well formed');
 my %seen;
 my @dups = grep { $seen{$_}++ } @marks;
 is_deeply(\@dups, [], 'each check marker appears once in the guide');
 is_deeply([ sort keys %seen ], [ sort keys %check ],
 	'the guide marks exactly the privilege statements checked here');
+my $checks_run = 0;
 for my $name (@marks)
 {
 	note "check: $name";
-	$check{$name}->() if $check{$name};
+	next unless $check{$name};
+	$check{$name}->();
+	$checks_run++;
 }
+is($checks_run, scalar(keys %check), 'every privilege check ran');
 
 # ------------------------------------------------------- GUC contexts
 my %ctx = map { split /\|/ } split /\n/,
   sql("SELECT substr(name, length('$P.') + 1) || '|' || context
 		FROM pg_settings WHERE name LIKE '$P.%'");
+my @guide_rows = $guide =~ /^\| \[`\w+`\]\(configuration\.md#\w+\) \|/mg;
+my @guide_any = $guide =~ /^\| \[`[^`]*`\]\(configuration\.md/mg;
+is(scalar(@guide_rows), scalar(keys %ctx), 'the guide has one context row per GUC');
+is(scalar(@guide_any), scalar(@guide_rows), 'every context row in the guide is well formed');
 my %guide_ctx = $guide =~ /^\| \[`(\w+)`\]\(configuration\.md#\w+\) \| (\w+) \|/mg;
 is_deeply(\%guide_ctx, \%ctx, 'the guide gives every GUC its pg_settings context');
+my @conf_rows = $config =~ /^\| \[`\w+`\]\(#\w+\) \|.*\| \w+ \|$/mg;
+my @conf_any = $config =~ /^\| \[`[^`]*`\]\(#/mg;
+is(scalar(@conf_rows), scalar(keys %ctx), 'configuration.md has one Reference row per GUC');
+is(scalar(@conf_any), scalar(@conf_rows), 'every Reference row is well formed');
 my %conf_ctx = $config =~ /^\| \[`(\w+)`\]\(#\w+\) \|.*\| (\w+) \|$/mg;
 is_deeply(\%conf_ctx, \%ctx,
 	'configuration.md gives every GUC its pg_settings context');
 
 # --------------------------------------------------- raw parameter values
 my @examples = $guide =~ /<!-- raw-example: ([\w-]+) -->\n(.*?)<!-- \/raw-example -->/msg;
-ok(@examples / 2 >= 2, 'the guide has raw-value examples');
+my @want_examples = qw(normalize quoted-pattern svc-op);
+is_deeply([ sort @opened ], \@want_examples, 'the guide opens each raw-value example');
+is_deeply([ sort @closed ], \@want_examples, 'the guide closes each raw-value example');
+is_deeply([ sort map { $examples[ 2 * $_ ] } 0 .. $#examples / 2 ],
+	\@want_examples, 'every raw-value example is parsed');
+my %exercised;
+# Broken markers merge examples; running them would only wait on SHOW.
+@examples = () if @marker_errors;
 my $conf_file = $node->data_dir . '/postgresql.conf';
 my $conf_orig = slurp_file($conf_file);
 
@@ -423,14 +470,40 @@ while (my ($name, $body) = splice(@examples, 0, 2))
 	print $fh $conf_orig;
 	close $fh;
 	reset_all(\%raw);
+	$exercised{$name} = 1;
 }
+is_deeply([ sort keys %exercised ], \@want_examples,
+	'every raw-value example ran to the end');
 
 # ------------------------------------------------ troubleshooting checklist
 my ($trouble) = $guide =~ /^## Troubleshooting\b.*?\n(.*?)(?=^## |\z)/ms;
 ok(defined $trouble, 'the guide has a troubleshooting section');
 # Blocks may be indented under list items.
 my @tsql = map { s/^ +//mgr } ($trouble // '') =~ /^ *```sql\n(.*?)^ *```$/msg;
+my @fences = ($trouble // '') =~ /^ *```(\w*) *$/mg;
+my @fence_errors;
+for (my $i = 0; $i < @fences; $i += 2)
+{
+	push @fence_errors, "fence $i opens without a language" if $fences[$i] eq '';
+	push @fence_errors, "fence $i is not closed"
+	  unless defined $fences[ $i + 1 ] && $fences[ $i + 1 ] eq '';
+}
+is_deeply(\@fence_errors, [], 'the checklist code blocks are paired');
+is(scalar(@tsql), scalar(grep { $_ eq 'sql' } @fences),
+	'every SQL block of the checklist is parsed');
+my @symptoms = ($trouble // '') =~ /^### (.*)$/mg;
+is_deeply(\@symptoms,
+	[ 'The views are empty', 'My utility statements are missing',
+		q{My settings change didn't apply}, 'Statistics vanished after a restart' ],
+	'the checklist covers the four symptoms');
+for my $sym (split /^(?=### )/m, $trouble // '')
+{
+	next unless $sym =~ /^### (.*)$/m;
+	my $title = $1;
+	ok($sym =~ /^ *```sql\n/m, "symptom has SQL: $title");
+}
 ok(@tsql >= 8, 'the checklist has SQL for each symptom');
+my $tsql_run = 0;
 for my $q (@tsql)
 {
 	if ($q =~ /pg_file_settings/)
@@ -444,10 +517,13 @@ for my $q (@tsql)
 		(my $first) = $q =~ /^(.*)$/m;
 		ok_as('dba', 'appdb', $q, "checklist query runs as dba: $first");
 	}
+	$tsql_run++;
 }
+is($tsql_run, scalar(@tsql), 'every checklist query ran');
 for my $needle ('SHOW', 'pg_settings', 'pg_file_settings', 'regex_compile_failures',
 	'utility_missing_queryid', "${P}_counters()", 'pending_restart',
-	'stats_reset', 'server log')
+	'stats_reset', 'server log', 'is loaded after pg_stat_statement_context',
+	'plan cache')
 {
 	like($trouble // '', qr/\Q$needle\E/, "the checklist mentions $needle");
 }
