@@ -56,12 +56,12 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-8 | Managed-service operator guide: privileges, parameter groups, troubleshooting | 20261008-065635-2 | no | ready |
 | 20261008-065635-9 | Upgrade, downgrade and uninstall procedures | 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
-| 20261008-065635-11 | Cardinality pressure guidance: caps vs tag-set combinations | 20261008-065635-2 | no | ready |
 | 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
 | 20261008-092913-1 | Warn at startup when pg_stat_monitor is loaded after this extension | 20261008-065635-7 | no | ready |
 | 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | blocked-on-deps |
+| 20261008-092913-3 | Qualify the cardinality bounds for caps lowered or enabled after collection | 20261008-065635-11 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -308,21 +308,6 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 **Open questions:** none
 **Status:** blocked-on-deps
 
-### 20261008-065635-11: Cardinality pressure guidance: caps vs tag-set combinations
-
-**Description:** DOC-7, SEC-3, SEC-4, PERF-3 and vetter N-1.
-- docs/extractors.md says cardinality caps are counted "server-wide", but by default they are counted per (role, database) (`cardinality_cap_scope = role`). Fix that sentence.
-- Document that per-key caps don't bound tag-set combinations. With k kept keys each capped at N values, a single (role, database, queryid) can still produce up to N^k entries. The vetter reproduced this: cap 5, `max_entries` 100, three default keys, 125 combinations, 25 evictions and zero cap events.
-- Explain how to size for observed combinations; which counters show pressure (`evicted_entries`, `dealloc`, `dropped_records`, `capped_tags`, `cap_table_full`) and what to do when each rises; and the trust implications of the `database`/`server` cap scopes (cross-role membership inference and cap exhaustion). Recommend `role` scope on multi-tenant services.
-
-**Acceptance criteria:**
-- A TAP test reproduces the combination behavior (N^k entries under per-key caps), so the documented claim is pinned down.
-- Docs are updated and cross-linked from docs/configuration.md and the managed-services guide (if -8 has landed; otherwise -8 adds the link).
-
-**Depends on:** 20261008-065635-2 (uses the exported health counters)
-**Open questions:** none
-**Status:** ready
-
 ### 20261008-065635-12: Managed-server-safe smoke test target
 
 **Description:** HYG-5. `make installcheck` runs the regression suite, which changes server settings with `ALTER SYSTEM` and then resets them (`test/sql/include/config.sql` about lines 11–17), wiping operator values. 26 of the 32 TAP tests need test-only modules. Neither can be pointed at a provisioned managed instance. Add a `make smoke` (or `installcheck-smoke`) target: it connects to an existing server using the libpq environment, runs as a NOSUPERUSER role with privileges like `rds_superuser`, and changes no global settings. It checks that the library is preloaded, that `CREATE EXTENSION` worked (or creates it if allowed), that `_extract()` behaves (if executable), that tagged statements under the server's current extractor configuration are recorded and visible, and that `_info()` and the counters function work. Add a clear warning in the Makefile and in the README development section that `installcheck` resets global settings and is for disposable clusters only.
@@ -403,6 +388,17 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 **Depends on:** 20261008-065635-3 (both edit `scripts/docker-test.sh`)
 **Open questions:** none
 **Status:** blocked-on-deps
+
+### 20261008-092913-3: Qualify the cardinality bounds for caps lowered or enabled after collection
+
+**Description:** This is leftover from item 20261008-065635-11's final review. `docs/extractors.md` ("Caps bound values, not combinations") gives worst-case tag-set counts of N^k, (N+1)^k and (N+2)^k − 1 using the current `cardinality_cap`. Values admitted earlier keep their slots: `cap_check_gen()` returns KEEP for an admitted value before it checks the current cap. Their entries also stay. So after a cap is lowered, or enabled after uncapped collection, without a `_reset()`, the live tag sets can exceed the formula. For example, five strings plus `null` admitted, then the cap reloaded to 2, leaves six tag sets. Qualify the formulas so they hold only when caps have been enforced at those limits since the last `_reset()` or restart. Otherwise, say that the bound uses the number of admitted values per key (which can be larger). Update the matching sentences in `docs/configuration.md` and `DESIGN.md` §6.1.
+
+**Acceptance criteria:**
+- A TAP case in `test/t/035_cap_combinations.pl` admits values at a higher cap, lowers the cap with a reload, and shows that the live tag sets exceed the formula for the new cap. The docs state that limitation.
+
+**Depends on:** 20261008-065635-11
+**Open questions:** none
+**Status:** ready
 
 ---
 

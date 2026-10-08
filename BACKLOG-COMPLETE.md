@@ -1527,6 +1527,21 @@ The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-11: Cardinality pressure guidance: caps vs tag-set combinations
+
+**Description:** DOC-7, SEC-3, SEC-4, PERF-3 and vetter N-1.
+- docs/extractors.md says cardinality caps are counted "server-wide", but by default they are counted per (role, database) (`cardinality_cap_scope = role`). Fix that sentence.
+- Document that per-key caps don't bound tag-set combinations. With k kept keys each capped at N values, a single (role, database, queryid) can still produce up to N^k entries. The vetter reproduced this: cap 5, `max_entries` 100, three default keys, 125 combinations, 25 evictions and zero cap events.
+- Explain how to size for observed combinations; which counters show pressure (`evicted_entries`, `dealloc`, `dropped_records`, `capped_tags`, `cap_table_full`) and what to do when each rises; and the trust implications of the `database`/`server` cap scopes (cross-role membership inference and cap exhaustion). Recommend `role` scope on multi-tenant services.
+
+**Acceptance criteria:**
+- A TAP test reproduces the combination behavior (N^k entries under per-key caps), so the documented claim is pinned down.
+- Docs are updated and cross-linked from docs/configuration.md and the managed-services guide (if -8 has landed; otherwise -8 adds the link).
+
+**Depends on:** 20261008-065635-2 (uses the exported health counters)
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
