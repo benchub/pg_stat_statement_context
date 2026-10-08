@@ -54,7 +54,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261008-065635-3 | Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation | none | no | ready |
 | 20261008-065635-5 | Broader memory-checker coverage | none | no | ready |
 | 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | blocked-on-deps |
-| 20261008-065635-8 | Managed-service operator guide: privileges, parameter groups, troubleshooting | 20261008-065635-2 | no | ready |
 | 20261008-065635-9 | Upgrade, downgrade and uninstall procedures | 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
@@ -269,24 +268,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 **Depends on:** 20261008-065635-3 (both touch the persistence loader and its tests)
 **Open questions:** none
 **Status:** blocked-on-deps
-
-### 20261008-065635-8: Managed-service operator guide: privileges, parameter groups, troubleshooting
-
-**Description:** DOC-1, DOC-2, DOC-3, DOC-8, DOC-13 and SEC-10. The docs assume superuser, `ALTER SYSTEM` and `postgresql.conf`. Add a guide (for example `docs/managed-services.md`, linked from the README) for environments where the administrator is not superuser and settings are applied through a provider's parameter groups:
-- For every GUC, give its context (postmaster/sighup/suset/userset) and say what each implies on a managed service: needs a reboot, needs only a reload, needs superuser or a `GRANT SET` (PG15+), or can be set per session. Get these from `src/guc.c` and `src/cardcap.c`; the vetter counted eight SUSET settings.
-- For the DSL GUCs (`extractors`, `normalize`, regex values), show the raw value as typed into a parameter-group field, with no SQL quoting and no postgresql.conf escaping, next to the existing SQL and conf forms. Use the svc/op custom-format example.
-- Correct the "superuser only" wording for `_reset()` and `_extract()`. EXECUTE is revoked from PUBLIC, so the function owner (whoever ran `CREATE EXTENSION`), superusers and explicitly granted roles can call them. Document the `GRANT EXECUTE` pattern, and which roles can read which views (pg_read_all_stats semantics).
-- Add a SQL-only troubleshooting checklist ("the views are empty", "my utility statements are missing", "my settings change didn't apply", "statistics vanished after a restart"). Each item names the SQL to run (`SHOW`, `_info()` counters, `pg_settings`, `pg_file_settings` where permitted, `regex_compile_failures`, `utility_missing_queryid`), and mentions downloading server logs from the provider for log-only diagnostics.
-- Merge the duplicated GUC context lists, and move the misplaced explanatory sentence the docs review found (DOC-13).
-
-**Acceptance criteria:**
-- Each statement about privileges in the new guide is checked by a TAP test or a scripted psql check run in Docker as a NOSUPERUSER role with CREATEDB/CREATEROLE/pg_monitor (the closest stand-in for `rds_superuser`). Keep the script in the repo (for example under `test/`).
-- Every raw parameter-group example, set through `ALTER SYSTEM` with the equivalent quoting, produces the documented `_extract()` output.
-- All relative links resolve.
-
-**Depends on:** 20261008-065635-2 (the troubleshooting checklist should reference the new counters function)
-**Open questions:** none
-**Status:** ready
 
 ### 20261008-065635-9: Upgrade, downgrade and uninstall procedures
 
