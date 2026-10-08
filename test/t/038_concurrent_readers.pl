@@ -12,7 +12,8 @@
 #     entry is copied under its spinlock, src/store.c pssc_store_foreach()).
 #     This is not an invariant once buckets have expired.
 # The writers run until both readers have finished (pgbench is then
-# terminated; -T only bounds a stuck run), and each reader proves that it
+# terminated, and must have been running then and die of that SIGTERM; -T
+# only bounds a stuck run), and each reader proves that it
 # overlapped them: the hot entry's calls_total advanced between the start
 # and the end of its checks, and the activity reader saw writers' rows in
 # state 'active'.
@@ -24,6 +25,7 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
 use IPC::Run;
+use POSIX qw(WIFSIGNALED WTERMSIG SIGTERM);
 
 my $P = 'pg_stat_statement_context';
 my $CLIENTS = 6;
@@ -131,14 +133,28 @@ my $bench;
 			'-f', $script, 'postgres' ],
 		'>', \$bout, '2>', \$berr);
 }
+# Whether pgbench is still running. IPC::Run's pumpable() is no test: it is
+# true while the output pipes are open, even after the child has exited.
+# reap_nb() waitpid()s it without blocking, recording its status.
+sub writers_running
+{
+	$bench->reap_nb;
+	return scalar $bench->_running_kids;
+}
+# Stops pgbench if it still runs and returns its wait status, and any
+# error from finish().
 sub stop_writers
 {
 	return unless $bench;
-	$bench->signal('TERM') if $bench->pumpable;
+	$bench->signal('TERM') if writers_running();
 	eval { $bench->finish; };
+	my $err = $@;
+	my $status = eval { $bench->full_result };
 	$bench = undef;
+	return ($status, $err);
 }
-END { stop_writers(); }
+# A test that dies midway leaves no pgbench behind; keep the exit status.
+END { local $?; stop_writers(); }
 
 # Startup barrier: the writers run until stopped, so this wait does not
 # shorten the readers' window. Every writer has a row and the 50 long tag
@@ -162,9 +178,13 @@ for my $f (qw(check_activity check_stats))
 		IPC::Run::timeout($PostgreSQL::Test::Utils::timeout_default));
 }
 $_->finish for @readers;
-ok($bench->pumpable, 'the writers ran until both readers finished')
-  or diag "pgbench: $bout $berr";
-stop_writers();
+ok(writers_running(), 'the writers ran until both readers finished')
+  or diag "pgbench had exited: $bout $berr";
+my ($bstatus, $berror) = stop_writers();
+ok(defined $bstatus && $bstatus =~ /^\d+$/ && WIFSIGNALED($bstatus)
+	  && WTERMSIG($bstatus) == SIGTERM && $berror eq '',
+	'pgbench ended only through our SIGTERM')
+  or diag 'pgbench wait status ' . ($bstatus // 'unknown') . ", finish error '$berror': $bout $berr";
 $node->poll_query_until('postgres',
 	q{SELECT count(*) = 0 FROM pg_stat_activity WHERE application_name = 'writer'})
   or die 'writers did not exit';
