@@ -52,7 +52,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | ready |
-| 20261008-065635-9 | Upgrade, downgrade and uninstall procedures | 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
@@ -233,26 +232,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - The CRC-deletion mutation makes 028 fail. The new concurrency test passes reliably: run it 20 times on PG 18 with no failures. Each listed mutation is caught, or the commit explains why it can't be.
 
 **Depends on:** 20261008-065635-3 (both touch the persistence loader and its tests)
-**Open questions:** none
-**Status:** ready
-
-### 20261008-065635-9: Upgrade, downgrade and uninstall procedures
-
-**Description:** DOC-5 and HYG-10. Document the lifecycle in docs (for example a new "Upgrading and uninstalling" section in README.md or `docs/upgrading.md`):
-- a library-only (binary) upgrade vs an SQL-version upgrade (`ALTER EXTENSION ... UPDATE` in each database)
-- which changes need a restart
-- what happens to saved statistics: the dump is discarded when the SQL `default_version`, the dump format, the PG major version, or layout-affecting settings change (see the `src/store.c` header and version checks, about lines 1785–1846 and 2198–2212)
-- `pg_upgrade` behavior
-- how to remove the extension cleanly (`DROP EXTENSION` in each database, remove it from `shared_preload_libraries`, restart, delete the stats file if present)
-- how to identify the loaded build (`pg_get_loaded_modules()` on PG18 after -3; extversion)
-
-Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) on the version discipline: SQL changes go in upgrade scripts after v1.0.0; C entry points are versioned (`_1_0`) and old symbols are kept; bump the dump format version when the layout changes. Add a test that the library refuses or discards a dump carrying a different format version, if one doesn't exist yet.
-
-**Acceptance criteria:**
-- The procedures are documented and were run by hand once in Docker (install, save stats, drop, uninstall; PG 17→18 `pg_upgrade` with the extension). The results are recorded in the item's progress note.
-- The format-version test exists.
-
-**Depends on:** 20261008-065635-2, 20261008-065635-3
 **Open questions:** none
 **Status:** ready
 

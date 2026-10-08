@@ -1620,6 +1620,39 @@ The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-9: Upgrade, downgrade and uninstall procedures
+
+**Description:** DOC-5 and HYG-10. Document the lifecycle in docs (for example a new "Upgrading and uninstalling" section in README.md or `docs/upgrading.md`):
+- a library-only (binary) upgrade vs an SQL-version upgrade (`ALTER EXTENSION ... UPDATE` in each database)
+- which changes need a restart
+- what happens to saved statistics: the dump is discarded when the SQL `default_version`, the dump format, the PG major version, or layout-affecting settings change (see the `src/store.c` header and version checks, about lines 1785–1846 and 2198–2212)
+- `pg_upgrade` behavior
+- how to remove the extension cleanly (`DROP EXTENSION` in each database, remove it from `shared_preload_libraries`, restart, delete the stats file if present)
+- how to identify the loaded build (`pg_get_loaded_modules()` on PG18 after -3; extversion)
+
+Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) on the version discipline: SQL changes go in upgrade scripts after v1.0.0; C entry points are versioned (`_1_0`) and old symbols are kept; bump the dump format version when the layout changes. Add a test that the library refuses or discards a dump carrying a different format version, if one doesn't exist yet.
+
+**Acceptance criteria:**
+- The procedures are documented and were run by hand once in Docker (install, save stats, drop, uninstall; PG 17→18 `pg_upgrade` with the extension). The results are recorded in the item's progress note.
+- The format-version test exists.
+
+**Progress (2026-10-08, manual run in Docker):**
+- Build identification: `pg_get_loaded_modules()` (PG18) reports version 1.0.
+- Reinstalling the same library and restarting keeps the stats.
+- A simulated 1.1 library (different dump format version) discards the dump.
+- Changing `bucket_count` discards the dump; changing `max_entries` keeps it.
+- After an immediate shutdown, the stats are lost (expected).
+- Downgrade: there is no update path. `DROP EXTENSION` needs `CASCADE` while user views depend on the extension's views.
+- Uninstall leaves the `.stat` dump file in place. It is documented as a manual removal.
+- `pg_upgrade` 17→18:
+  - `--check` fails if the new cluster lacks the library.
+  - With the library installed, the upgrade succeeds, but the stats start empty.
+  - A copied-in old dump is discarded because of the PG-major mismatch.
+
+**Depends on:** 20261008-065635-2, 20261008-065635-3
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
