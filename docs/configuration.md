@@ -77,6 +77,7 @@ pg_stat_statement_context.cardinality_cap = 100
 - **`null` is unambiguous**: a client can only send strings (`'null'` and `''` stay strings), so `tags->'route' = 'null'` finds exactly the collapsed statements; `tags->>'route'` is SQL `NULL` for them.
 - **Counters**: each collapsed value is counted in `_info().capped_tags`; [`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract) shows what would collapse without admitting anything.
 - **When**: a value is admitted when its tags are extracted, at `ExecutorStart`, so it takes its place even if the statement then fails. `ExecutorStart` also runs for statements that are never executed or recorded: a portal that is bound but never executed (extended protocol `Bind` without `Execute`) and a plain `EXPLAIN` (without `ANALYZE`). Their values use cap space too. Under concurrency a key can very rarely collapse one value too many while two sessions admit its last values at the same time; it never exceeds its cap. While a `_reset()` clears the whole table (needed about once every million resets, when its generation number wraps around), new values collapse to `null` for that moment.
+- **Values, not combinations**: each key is capped on its own, so with k kept keys capped at N values, one query of one role can still have N^k entries ((N + 1)^k with `null`) without a single cap event. Size `max_entries` for the combinations you observe; see [Caps bound values, not combinations](extractors.md#caps-bound-values-not-combinations) and [Watching for cardinality pressure](extractors.md#watching-for-cardinality-pressure).
 - **Cost**: the check is a lock-free lookup in a shared hash table (a few atomic reads, plus a compare-and-swap for a new value), with no lock taken; see [benchmarks](benchmarks.md#cardinality-caps). With no cap configured, nothing is checked.
 
 ### `cardinality_cap_overrides`
@@ -105,7 +106,7 @@ A key's cap is the same number in every scope (`cardinality_cap = 100` under `ro
 - **Membership oracle.** Once a key is at its cap, a value that another role (or, under `server`, another database) already sent stays a string, while a new one becomes `null`. Any role that can read its own rows can therefore send a candidate value and learn whether someone else sent it. Under `server` a role can also probe a value without filling the key's cap: slot positions follow from the value alone, so it can fill the slots after the candidate's with values of its own and see whether one more value still finds room.
 - **Poisoning.** Any role can use up a key's cap, so every other role's new values become `null` until a `_reset()`.
 
-Use them only when all the roles sharing a scope trust each other.
+Use them only when all the roles sharing a scope trust each other; keep `role` on multi-tenant and managed services (see [Cap scope and trust](extractors.md#cap-scope-and-trust)).
 
 Under `role` (and between databases under `database`), the caps and admitted values of other scopes don't affect a role's values, and the positions of values in the shared table are keyed with a random secret drawn at startup and by every `_reset()`, so a role can't aim its own values at another scope's. What remains shared is the table's size: all scopes share the one table sized by [`cardinality_cap_slots`](#cardinality_cap_slots), and narrower scopes admit more distinct (key, value) pairs in total and use more key slots. When the table is (nearly) full, new values of every scope become `null`, which any role can observe; like `pg_stat_statements.max`, it's a shared limit, so size it for all roles and databases.
 
@@ -340,7 +341,7 @@ Entries are keyed by database and role, so different values don't mix in one ent
 
 `max_entries` counts **(query × context) combinations**, independent of `bucket_count`. Each entry holds its own ring of `bucket_count` counter slots, so 5,000 recurring combinations need 5,000 entries whether they are active in one bucket or in all of them. A combination keeps its entry while any of its buckets is live; once all of its buckets have expired the entry is *dead* and is the first to be reclaimed when space is needed.
 
-Size it to at least the number of distinct (database × user × `queryid` × `toplevel` × tag set) combinations seen within one history window (`bucket_count × bucket_interval`), plus headroom. For example, 400 query fingerprints, each run from about 10 controller/action pairs by one application user, need about 4,000 entries.
+Size it to at least the number of distinct (database × user × `queryid` × `toplevel` × tag set) combinations seen within one history window (`bucket_count × bucket_interval`), plus headroom. For example, 400 query fingerprints, each run from about 10 controller/action pairs by one application user, need about 4,000 entries. [Cardinality caps](#cardinality_cap) don't bound this number: they limit each key's values, not the combinations of keys (see [Caps bound values, not combinations](extractors.md#caps-bound-values-not-combinations)).
 
 Every entry is preallocated in shared memory at startup. With the defaults an entry takes 872 bytes (the tag set, `max_tagset_bytes`, dominates; each bucket adds 24 bytes, and the entry's own counters 48 bytes), plus about 54 bytes of hash-table and eviction overhead, so 10,000 entries use about 8.8 MiB; see [Shared memory sizing](#shared-memory-sizing).
 
@@ -445,7 +446,7 @@ With [`reclaim_worker`](#reclaim_worker) on, a background worker frees dead entr
 How to read them:
 
 - **`reclaimed_entries` grows, `evicted_entries` stays at 0:** the table is sized correctly. Combinations come and go, and the expired ones are recycled.
-- **`evicted_entries` grows:** live history is being lost. Raise `max_entries` (see [above](#max_entries)), or look for a tag with unexpectedly high cardinality (see [Cardinality](extractors.md#allowlist-denylist-and-cardinality)) and [cap](#cardinality_cap) or exclude it. Compare its rate with that of `reclaimed_entries`: the larger its share, the more undersized the table.
+- **`evicted_entries` grows:** live history is being lost. Raise `max_entries` (see [above](#max_entries)), or look for a tag with unexpectedly high cardinality (see [Cardinality](extractors.md#allowlist-denylist-and-cardinality)) and [cap](#cardinality_cap) or exclude it; a cap doesn't stop combinations of capped keys from filling the table (see [Watching for cardinality pressure](extractors.md#watching-for-cardinality-pressure)). Compare its rate with that of `reclaimed_entries`: the larger its share, the more undersized the table.
 - **`dropped_records` is ever non-zero:** calls were lost outright. This only happens when the table is full of live entries *and* a pass could free nothing (in practice, the backend ran out of memory); treat it as severe undersizing, or memory pressure, and act on it.
 
 ```sql

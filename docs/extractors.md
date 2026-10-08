@@ -269,7 +269,7 @@ Tag values are untrusted client input. They are never interpreted, and a bad tag
 5. Apply the global `tags` allowlist, or the `exclude_tags` denylist when `tags = '*'`. Then drop keys longer than 63 bytes (counted in `invalid_tags`; a key that long can never match an allowlist entry, so with an allowlist it is simply not kept).
 6. Normalize the value with the [`normalize`](configuration.md#normalize) rules for its (final) key, in order. A pair whose normalization fails is dropped (counted in the debug function's `normalize_failures`).
 7. Truncate the value to `max_tag_value_len` bytes on a character boundary.
-8. Apply the key's [cardinality cap](configuration.md#cardinality_cap), if it has one: once the key has had its cap of distinct values (counted server-wide, after the steps above), any other value is stored as JSON `null` (counted in `capped_tags`). In `max_tagset_bytes` a `null` value counts as 2 bytes (a string as its length plus 1). Only tags that step 9 keeps are admitted, so a dropped tag never uses up a cap.
+8. Apply the key's [cardinality cap](configuration.md#cardinality_cap), if it has one: once the key has had its cap of distinct values (counted after the steps above, per [`cardinality_cap_scope`](configuration.md#cardinality_cap_scope): by default separately for each (role, database), across all queries), any other value is stored as JSON `null` (counted in `capped_tags`). In `max_tagset_bytes` a `null` value counts as 2 bytes (a string as its length plus 1). Only tags that step 9 keeps are admitted, so a dropped tag never uses up a cap.
 9. Sort and store within `max_tags` and `max_tagset_bytes`: tags are taken in priority order (`tags` list order, or sorted key order with `tags = '*'`). A tag is kept if it still fits; otherwise it is dropped (counted in `dropped_tags`) and the next one is tried, so an oversized tag never pushes out smaller lower-priority ones. This step runs after the extractor chain has chosen its winner (see [chain semantics](#the-extractor-dsl)), so a tag dropped here is not replaced by tags from a skipped extractor. The priority depends only on the key, not on whether the tag came from a comment or from `application_name`.
 
 The [`tags_override`](configuration.md#tags_override) setting's pairs go through the same steps, decoded when the setting is set (step 1), except step 3: there is no extractor, so no `keys` list. For step 4 they use the `rename` lists of the comment `sqlcommenter` extractors, in configuration order (the first rule matching the key applies); other extractors' `rename` lists are ignored, and with no `sqlcommenter` extractor nothing is renamed.
@@ -300,7 +300,51 @@ Every distinct tag set creates a separate entry for each query fingerprint. A ta
    WHERE tags->'route' = 'null';
   ```
 
-  `_info().capped_tags` counts the values collapsed this way.
+  `_info().capped_tags` counts the values collapsed this way. A cap bounds each key on its own, not the number of entries; see [below](#caps-bound-values-not-combinations).
+
+### Caps bound values, not combinations
+
+An entry is one (role, database, `queryid`, `toplevel`, tag set), and a cap limits the values of **one key**, not the tag sets they form together. With k kept keys each capped at N values, one query of one role in one database can still produce N^k entries, and (N + 1)^k once values collapse, since `null` is one more value of each key. All of that happens without a single cap event while every value stays within its cap.
+
+For example, with `cardinality_cap = 5`, `max_entries = 100` and the default keys `action, controller, job`, a client that sends every combination of 5 values of each key to one query creates 5^3 = 125 entries. That overflows the table: 5 eviction passes evict 25 live entries, while `capped_tags` and `cap_table_full` stay at 0. With 7 values of each key and room for them, the same query has 6^3 = 216 entries (5 strings and `null` per key). `test/t/035_cap_combinations.pl` checks these numbers.
+
+Real keys are correlated (an action belongs to one controller, a job sets no action), so the product is an upper bound, and observed tag sets are usually far fewer. Size for what you observe, not for the caps:
+
+- **Size `max_entries` for the observed combinations** in one history window (`bucket_count × bucket_interval`), with headroom; see [Sizing `max_entries`](configuration.md#sizing-max_entries). Count them per query to find the ones that multiply:
+
+  ```sql
+  SELECT userid, dbid, queryid, count(*) AS tag_sets
+    FROM pg_stat_statement_context_totals
+   GROUP BY 1, 2, 3
+   ORDER BY 4 DESC
+   LIMIT 20;
+  ```
+
+- **Use caps to bound the worst case**, not to size the table. Per (role, database, query, `toplevel`), the number of tag sets is at most the product over the kept keys of (cap + 1); keys without a cap are unbounded. Keep that product, times the queries you expect, within reach of `max_entries`, or accept that the oldest combinations are evicted.
+- **Keep few independent keys.** Each added key multiplies the bound by its number of values. A key whose values are determined by another (an action name that is unique per controller) adds no combinations; two unrelated ones multiply.
+
+### Watching for cardinality pressure
+
+The counters are in [`pg_stat_statement_context_counters()`](sql-interface.md#pg_stat_statement_context_counters) (cheap enough for every scrape) and `_info()`; the [exporter recipes](integrations/README.md) export them. What each means when it rises, and what to do:
+
+| Counter | What it counts | When it rises |
+|---------|----------------|---------------|
+| `evicted_entries` | Live entries removed by an [eviction pass](configuration.md#eviction) because reclaiming dead ones did not free 5% of the table. Their history is lost. | Too many combinations for `max_entries`. Find the queries with the most tag sets (above) and the keys with the most values ([query](#allowlist-denylist-and-cardinality)); normalize, cap or stop keeping those keys, or raise `max_entries` (restart). |
+| `dealloc` | Eviction passes, which run when a new combination finds the table full. Each one scans the whole table under an exclusive lock. | Alone (with `reclaimed_entries` rising and `evicted_entries` flat), housekeeping on a table whose combinations come and go; [`reclaim_worker`](configuration.md#reclaim_worker) frees dead entries in the background instead. With `evicted_entries`, as above. |
+| `dropped_records` | Calls not recorded at all: the table was full of live entries and a pass could free nothing (it could not allocate its working memory), or the shared hash table refused the insert. | Severe undersizing or memory pressure: act as for `evicted_entries`, and check the server's memory. |
+| `capped_tags` | Values collapsed to `null` by a [cardinality cap](configuration.md#cardinality_cap) (or because the caps' table was full). | Expected if a key is meant to be capped. A steady rise means a key keeps bringing new values: find it (`tags->'key' = 'null'`), then normalize it, raise its [override](configuration.md#cardinality_cap_overrides), or stop keeping it; its `null` rows can't be attributed. |
+| `cap_table_full` | Values collapsed because the caps' shared table had no room, whatever their key's cap. Also counted in `capped_tags`. | Raise [`cardinality_cap_slots`](configuration.md#cardinality_cap_slots) (restart), or lower the caps; until then new values of every role collapse. `_reset()` empties the table. |
+
+A stable `entries` at `max_entries` is normal (see [Eviction](configuration.md#eviction)); the counters above are what tell pressure apart from housekeeping.
+
+### Cap scope and trust
+
+Caps are counted per [`cardinality_cap_scope`](configuration.md#cardinality_cap_scope). The default, `role`, gives each (role, database) its own caps and admitted values. Under `database` or `server`, roles share them, so any role that can read its own rows can:
+
+- **infer membership**: once a key is at its cap, a value another role already sent stays a string, while an unseen one becomes `null`, so sending a candidate value reveals whether someone else sent it;
+- **exhaust the caps**: fill a key's cap with its own values, so every other role's new values become `null` until a `_reset()`.
+
+Use `role` (the default) on multi-tenant and managed services, and `database` or `server` only when all the roles sharing a scope trust each other. Under every scope the caps' table (`cardinality_cap_slots`) and the entries (`max_entries`) are shared by all roles: one role's combinations can evict other roles' entries, and a full caps table collapses everyone's new values. Size both for all tenants together.
 
 [marginalia]: https://github.com/basecamp/marginalia
 [SQLCommenter]: https://google.github.io/sqlcommenter/
