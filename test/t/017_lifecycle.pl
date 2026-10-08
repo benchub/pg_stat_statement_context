@@ -25,10 +25,14 @@
 #     direction (ours above pgss's; pgss's above ours with the wrong load
 #     order) and the configuration's other invariants (coverage, lifecycle,
 #     presence, utility_missing_queryid) hold on that first run, its
-#     workload is run once more (after a reset) and the second run is
-#     final, with the same bound. A stall is rare and random, so it does
-#     not hit twice; a systematic error (a per-call offset, double
-#     counting) fails again. Widening the bound or tolerating "a few
+#     workload is run again (after a reset), up to $MAX_RUNS runs in all,
+#     with the same bound: each row must be within it in at least one run.
+#     A stall is random, so it does not hit the same row in every run; a
+#     systematic error (a per-call offset, double counting) hits the same
+#     rows every time and fails. Requiring one run with no stall at all
+#     instead (backlog 20261008-120000-1) failed on a host loaded with
+#     several test cells, where a run with a stall somewhere is common: of
+#     two runs, both had one. Widening the bound or tolerating "a few
 #     outliers" instead would hide double counting: only the few utilities
 #     slower than the slack (EXPLAIN ANALYZE) reveal it.
 # The workload: prepared statements over the extended protocol (named
@@ -220,6 +224,7 @@ package main;
 
 my $P = 'pg_stat_statement_context';
 my $UTIL_SLACK_MS = $ENV{PSSC_TEST_UTILITY_SLACK_MS} // 2;
+my $MAX_RUNS = 4;
 
 my $node = PostgreSQL::Test::Cluster->new('lifecycle');
 $node->init;
@@ -777,8 +782,10 @@ sub time_problem
 # If the only problems are utility times beyond the bound in the direction
 # a stall can cause (see the header and time_problem()), and the coverage
 # checks (rows shared, both roles, both databases) and every $checks
-# invariant hold, the workload is reset and run once more, and the second
-# run is final. Otherwise the first run's results are reported: a rerun
+# invariant hold, the workload is reset and run again, up to $MAX_RUNS runs:
+# a row passes if its time was within the bound in any of them, so what
+# remains are the rows beyond it in every run. A rerun with any other
+# problem is final. Otherwise the first run's results are reported: a rerun
 # never replaces a first-run failure other than a stall.
 sub compare
 {
@@ -791,15 +798,25 @@ sub compare
 		  && join(',', sort keys %{ $x->{users} }) eq join(',', sort values %uid)
 		  && join(',', sort keys %{ $x->{dbs} }) eq join(',', sort values %dbid);
 	};
-	if (@{ $c->{bad} } && $c->{stall_only} && $covered->($c)
+	my $runs = 1;
+	while ($runs < $MAX_RUNS && @{ $c->{bad} } && $c->{stall_only} && $covered->($c)
 		&& !grep { $_->[0] ne $_->[1] } @k)
 	{
 		diag("$label: utility time above the bound only, running the workload again:\n"
 			  . join("\n", @{ $c->{bad} }));
+		my $stalled = $c->{stalled};
 		reset_all();
-		run_workload("$label (rerun)");
+		$runs++;
+		run_workload("$label (run $runs)");
 		$c = compare_rows($mode, $sub);
 		@k = $checks ? $checks->($c) : ();
+		if ($c->{stall_only})
+		{
+			# rows beyond the bound in every run so far
+			my @keys = grep { exists $stalled->{$_} } sort keys %{ $c->{stalled} };
+			$c->{stalled} = { map { $_ => $c->{stalled}{$_} } @keys };
+			$c->{bad} = [ map { $c->{stalled}{$_} } @keys ];
+		}
 	}
 	ok($c->{shared} >= 40,
 		"$label: workload produced rows recorded by both ($c->{shared})");
@@ -820,7 +837,7 @@ sub compare_rows
 {
 	my ($mode, $sub) = @_;
 	my @rows = fetch_rows();
-	my (@bad, $shared, $missing_calls);
+	my (@bad, %stalled, $shared, $missing_calls);
 	$shared = $missing_calls = 0;
 	my $stall_only = 1;
 	my (%users, %dbs);
@@ -844,6 +861,7 @@ sub compare_rows
 			{
 				push @bad, "$p: $desc";
 				$stall_only &&= $excess;
+				$stalled{ $r->{key} } = "$p: $desc" if $excess;
 			}
 		}
 		elsif ($r->{ours} >= 0)
@@ -878,6 +896,7 @@ sub compare_rows
 	return {
 		bad => \@bad,
 		stall_only => $stall_only,
+		stalled => \%stalled,
 		shared => $shared,
 		users => \%users,
 		dbs => \%dbs,
