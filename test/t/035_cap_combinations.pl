@@ -13,7 +13,10 @@
 # and null per key), no eviction, and capped_tags counting each collapsed
 # value; with each key also optional, 7^3 - 1 = 342 non-empty tag sets
 # (absent is one more state of each key, the empty set is not recorded with
-# untagged = skip).
+# untagged = skip). The formulas hold only for caps enforced since the last
+# _reset(): after the cap is lowered to 2 (5 values admitted under cap 5) or
+# enabled at 2 after uncapped collection, one query keeps 216 or 144 tag
+# sets, more than (2 + 1)^3 = 27.
 use strict;
 use warnings;
 
@@ -129,6 +132,42 @@ is(sql("SELECT count(*) || ' ' || count(DISTINCT queryid) || ' ' || count(DISTIN
 		  . " FROM ${P}_totals"),
 	'342 1 342 48',
 	'every (absent | null | 5 strings)^3 tag set but the empty one is an entry; 7^2 - 1 lack action');
+
+# The bounds use the current cap only if it has been enforced since the
+# last _reset() (or restart). A lowered cap keeps the values admitted under
+# the higher one: cap_check_gen() returns KEEP for an admitted value before
+# it looks at the cap. 5 values per key admitted under cap 5, then the cap
+# reloaded to 2: each key still has its 5 strings plus null, so 6^3 = 216
+# tag sets, not (2 + 1)^3 = 27. Only the sixth values collapse (3 * 36).
+sql("SELECT ${P}_reset()");
+flood(5);
+$node->append_conf('postgresql.conf', "$P.cardinality_cap = 2\n");
+$node->reload;
+is(sql("SHOW $P.cardinality_cap"), '2', 'cap reloaded to 2');
+flood(6);
+is(counters(), '216 0 0 0 0 108 0',
+	'5 values per key admitted under cap 5, cap lowered to 2: 6^3 = 216 entries, not (2 + 1)^3 = 27');
+is(view_shape(), '216 1 5+1 5+1 5+1',
+	'each key keeps its 5 values admitted under the higher cap, plus null');
+
+# A cap enabled after uncapped collection admits nothing retroactively, but
+# the entries collected while uncapped stay: 5^3 = 125 of them, then under
+# cap 2 the first 2 values per key are admitted and the rest collapse, which
+# adds the 3^3 - 2^3 = 19 tag sets with a null. 144 > 27; each key has
+# 5 strings and null in the view. 3 * 3 * 25 = 225 values collapse.
+sql("SELECT ${P}_reset()");
+$node->append_conf('postgresql.conf', "$P.cardinality_cap = 0\n");
+$node->reload;
+is(sql("SHOW $P.cardinality_cap"), '0', 'cap reloaded to 0 (none)');
+flood(5);
+$node->append_conf('postgresql.conf', "$P.cardinality_cap = 2\n");
+$node->reload;
+is(sql("SHOW $P.cardinality_cap"), '2', 'cap reloaded to 2 again');
+flood(5);
+is(counters(), '144 0 0 0 0 225 0',
+	'cap 2 enabled after uncapped collection: 125 + 19 = 144 entries, not (2 + 1)^3 = 27');
+is(view_shape(), '144 1 5+1 5+1 5+1',
+	'the uncapped values keep their entries next to the 2 admitted values and null');
 
 $node->stop;
 done_testing();
