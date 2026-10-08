@@ -119,7 +119,7 @@ Applying the caps again admits the values kept as strings in that role's scope a
 
 ### `cardinality_cap_slots`
 
-The number of distinct (key, value) pairs the caps can track, server-wide, in a shared table allocated at startup (8 bytes per slot, plus 16 bytes per key slot, one key slot per 16 value slots and at least 64; about 144 kB at the default). It is allocated even while no cap is set, so caps can be turned on with a reload. This memory is not part of `_info().shmem_bytes`; `_info().cap_shmem_bytes` reports its exact size (about 576 MiB at the maximum of 2^26 slots).
+The number of distinct (key, value) pairs the caps can track, server-wide, in a shared table allocated at startup (8 bytes per slot, plus 16 bytes per key slot, one key slot per 16 value slots and at least 64; 147,488 bytes at the default; see [Shared memory sizing](#shared-memory-sizing)). It is allocated even while no cap is set, so caps can be turned on with a reload. This memory is not part of `_info().shmem_bytes`; `_info().cap_shmem_bytes` reports its exact size (about 576 MiB at the maximum of 2^26 slots).
 
 Size it above the sum of the caps of the keys you expect, with headroom (the table is an open-addressing hash table that slows down and fills early when nearly full). Under the default [`cardinality_cap_scope = role`](#cardinality_cap_scope), each (role, database) that sends a key takes up to that key's cap of slots and one key slot of its own, so on a server with many roles or databases, size it for the sum over all of them. When a new value finds no room (or a new key finds no key slot), the value is recorded as `null`, as if over its cap, and counted in both `_info().capped_tags` and `_info().cap_table_full`: the caps fail closed. `pg_stat_statement_context_reset()` empties the table.
 
@@ -146,7 +146,7 @@ The value stored is the raw, validated value: [`normalize`](#normalize), [`max_t
 
 ### `exemplar_memory`
 
-Shared memory for the exemplar values of all entries, allocated at startup when `exemplar_keys` is not empty. It is split evenly: each entry gets `exemplar_memory / max_entries` bytes (rounded down to a multiple of 8), each key an equal share of that, and each value that share minus 2 bytes, at most 256 bytes. `_info().exemplar_value_bytes` shows the result and `_info().exemplar_shmem_bytes` the memory used (included in `shmem_bytes`, never more than `exemplar_memory`).
+Shared memory for the exemplar values of all entries, allocated at startup when `exemplar_keys` is not empty. It is split evenly: each entry gets `exemplar_memory / max_entries` bytes (rounded down to a multiple of 8), each key an equal share of that, and each value that share minus 2 bytes, at most 256 bytes. `_info().exemplar_value_bytes` shows the result and `_info().exemplar_shmem_bytes` the memory used (included in `shmem_bytes`, never more than `exemplar_memory`; see [Shared memory sizing](#shared-memory-sizing)).
 
 A value longer than `exemplar_value_bytes` is **dropped**, not truncated (a truncated trace id identifies nothing): the entry keeps its previous value and `_info().exemplar_values_dropped` is incremented. At the defaults (10000 entries, 2 MB) one key gets 206 bytes and two keys 102 bytes each, enough for a 55-byte `traceparent`.
 
@@ -342,7 +342,76 @@ Entries are keyed by database and role, so different values don't mix in one ent
 
 Size it to at least the number of distinct (database × user × `queryid` × `toplevel` × tag set) combinations seen within one history window (`bucket_count × bucket_interval`), plus headroom. For example, 400 query fingerprints, each run from about 10 controller/action pairs by one application user, need about 4,000 entries.
 
-Shared memory is preallocated at startup. With the defaults an entry takes about 0.9 kB (the tag set, `max_tagset_bytes`, dominates; each bucket adds 24 bytes, and the entry's own counters 48 bytes), so 10,000 entries use about 8.6 MB. `SELECT shmem_bytes FROM pg_stat_statement_context_info();` reports the exact size.
+Every entry is preallocated in shared memory at startup. With the defaults an entry takes 872 bytes (the tag set, `max_tagset_bytes`, dominates; each bucket adds 24 bytes, and the entry's own counters 48 bytes), plus about 54 bytes of hash-table and eviction overhead, so 10,000 entries use about 8.8 MiB; see [Shared memory sizing](#shared-memory-sizing).
+
+## Shared memory sizing
+
+All of the extension's shared memory is requested once, at server start, in three parts. It comes on top of `shared_buffers` and PostgreSQL's own structures (on PostgreSQL 15 and later, `SHOW shared_memory_size` shows the server's total, extension included), and changing any of the settings below needs a restart.
+
+| Part | Reported by | Settings that size it |
+|---|---|---|
+| Statistics store: the entries, their hash table and the eviction array, including the exemplars | `_info().shmem_bytes` (exact) | `max_entries`, `max_tagset_bytes`, `bucket_count`, `exemplar_keys`, `exemplar_memory` |
+| Cardinality-cap table | `_info().cap_shmem_bytes` (exact) | `cardinality_cap_slots` |
+| Activity slots ([`pg_stat_statement_context_activity`](sql-interface.md#pg_stat_statement_context_activity)) | `pg_shmem_allocations` (below) | `MaxBackends`, `max_tagset_bytes` |
+
+`_info().exemplar_shmem_bytes` is part of `shmem_bytes`, not an addition to it. The activity slots are not in `_info()`; a superuser (or a member of `pg_read_all_stats`) can read their exact size, and that of the other named parts, with:
+
+```sql
+SELECT name, size FROM pg_shmem_allocations WHERE name LIKE 'pg_stat_statement_context%';
+```
+
+The total is `shmem_bytes + cap_shmem_bytes + activity`. (The hash table's elements are allocated anonymously, so `pg_shmem_allocations` alone does not add up to `shmem_bytes`.)
+
+### Formula
+
+In bytes, on 64-bit platforms, where `align8(x)` rounds `x` up to a multiple of 8 and `pow2(x)` is the smallest power of two ≥ `x`:
+
+```
+entry      = align8(24 + max_tagset_bytes) + 48 + 24 × bucket_count + exemplar
+element    = entry + 16                         (dynahash element header)
+group      = floor(A / element), A the smallest power of two ≥ 256 with floor(A / element) ≥ 32
+buckets    = pow2(max_entries)
+segments   = max(1, buckets / 256)
+store      = align8(240 + 24 × max_entries)     (header and eviction array)
+           + 848                                (dynahash header)
+           + 8 × max(256, segments)             (directory)
+           + 2048 × segments                    (bucket array, 8 bytes per bucket)
+           + ceil(max_entries / group) × group × element
+cap        = 32 + 8 × (cardinality_cap_slots + 2 × max(64, floor(cardinality_cap_slots / 16)))
+activity   = 16 + MaxBackends × align8(36 + max_tagset_bytes)
+```
+
+- **Exemplars** (0 when `exemplar_keys` is empty): `share = floor(exemplar_memory × 1024 / max_entries)` rounded down to a multiple of 8, `value = min(floor(share / nkeys) − 2, 256)` for `nkeys` exemplar keys, and `exemplar = align8(nkeys × (2 + value))` (0 when `value` would be below 1). `_info().exemplar_value_bytes` is `value` and `_info().exemplar_shmem_bytes` is `max_entries × exemplar`.
+- **MaxBackends** is `max_connections + autovacuum_max_workers + max_worker_processes + max_wal_senders + 1` on PostgreSQL 14–16, `+ 2` on 17 (the slot sync worker), and on 18 `autovacuum_worker_slots` (default 16) replaces `autovacuum_max_workers`: 122, 123 and 136 at the defaults.
+- **Rounding.** `cap` and `activity` are exact, and so is `exemplar_shmem_bytes`. The 240- and 848-byte headers can change by a few bytes between versions, so `store` is exact to within 256 bytes. `test/t/034_shmem_sizing.pl` checks all of this against the server.
+- **Rule of thumb.** Each entry costs about `align8(24 + max_tagset_bytes) + 88 + 24 × bucket_count + exemplar` bytes, plus 8 per hash bucket (`pow2(max_entries)` of them), plus about 3 kB. So `max_tagset_bytes` dominates at the default 12 buckets, and `bucket_count` dominates for long histories (288 buckets take 6,912 bytes per entry).
+
+`scripts/shmem-sizing.pl name=value ...` (e.g. `scripts/shmem-sizing.pl max_entries=50000 bucket_count=288 max_backends=136`) evaluates the formula for other settings.
+
+### Totals for representative settings
+
+Generated by `scripts/shmem-sizing.pl` (MaxBackends 136, the PostgreSQL 18 default at `max_connections = 100`; activity is 7,176 bytes less on 17 and 7,728 bytes less on 14–16):
+
+<!-- shmem-sizing-table:begin (scripts/shmem-sizing.pl --update) -->
+| Settings (others at their defaults) | Store (`shmem_bytes`) | of which exemplars | Cap table (`cap_shmem_bytes`) | Activity | Total |
+|---|---:|---:|---:|---:|---:|
+| Defaults | 9,261,312 (8.8 MiB) | 0 | 147,488 (144 KiB) | 75,088 (73 KiB) | 9,483,888 (9.0 MiB) |
+| 24 h of history: `bucket_count = 288` | 75,719,568 (72.2 MiB) | 0 | 147,488 (144 KiB) | 75,088 (73 KiB) | 75,942,144 (72.4 MiB) |
+| `max_entries = 50000` | 46,130,976 (44.0 MiB) | 0 | 147,488 (144 KiB) | 75,088 (73 KiB) | 46,353,552 (44.2 MiB) |
+| Exemplars on: `exemplar_keys = 'traceparent'` | 11,367,088 (10.8 MiB) | 2,080,000 (2.0 MiB) | 147,488 (144 KiB) | 75,088 (73 KiB) | 11,589,664 (11.1 MiB) |
+| `max_connections = 5000` | 9,261,312 (8.8 MiB) | 0 | 147,488 (144 KiB) | 2,779,888 (2.7 MiB) | 12,188,688 (11.6 MiB) |
+| Small instance: `max_entries = 2000`, `max_tagset_bytes = 256` | 1,356,800 (1.3 MiB) | 0 | 147,488 (144 KiB) | 40,272 (39 KiB) | 1,544,560 (1.5 MiB) |
+<!-- shmem-sizing-table:end -->
+
+### Limits for small instances
+
+The memory is reserved even when the table is empty. As a guide, keep the extension's total under about 2–5% of the instance's RAM, and well below `shared_buffers`:
+
+- **About 1–2 GB of RAM** (e.g. the smallest managed-database classes): the defaults (about 9 MiB) are fine. Don't combine a long history with many entries: `bucket_count = 288` at 10,000 entries is 72 MiB. Lower `max_entries` (2,000 entries at `max_tagset_bytes = 256` is 1.5 MiB in all) or `max_tagset_bytes` first.
+- **4–8 GB:** up to about 100–200 MiB, e.g. 24 h of history at 10,000 entries, or 50,000 entries at 12 buckets.
+- **`cardinality_cap_slots`** costs 9 bytes per slot (576 MiB at the maximum of 2^26 slots); raise it only for caps that need it.
+- **Exemplars** add about `exemplar_memory` (default 2 MiB) to `shmem_bytes`.
+- **Many connections** cost `align8(36 + max_tagset_bytes)` bytes per backend slot (552 at the default), e.g. 2.7 MiB at `max_connections = 5000`.
 
 ## Time buckets
 
