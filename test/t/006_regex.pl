@@ -950,6 +950,27 @@ for my $c ([ 'extractor', "regex(pattern='$MID', keys=slow), sqlcommenter(positi
 	cmp_ok($res{1}[0] - $res{0}[0], '<', $res{0}[0] / 4,
 		"$what: the interrupted attempt's allocations were released ($res{1}[0] vs $res{0}[0] bytes)");
 }
+# A foreign SIGPROF, blocked and pending before the 'expire' injection would
+# arm, is not the injection's: the injection refuses to arm rather than
+# discard it, and it still reaches its own handler (backlog 20261008-150452-1).
+{
+	my $s = session_open();
+	is(sq($s, "SELECT pssc_extract_test_sigprof('install')"), $SIGPROF_SENTINEL,
+		'foreign SIGPROF pending: sentinel SIGPROF handler and timer installed');
+	is(sq($s, "SELECT pssc_extract_test_sigprof('block_pending')"), $SIGPROF_SENTINEL,
+		'foreign SIGPROF pending: blocked, not delivered yet');
+	sq($s, 'SELECT pssc_extract_test_regex_compile_limit(60000)');
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', -1, 'expire', 1)");
+	my (undef, $err) = sq_err($s, "SELECT pssc_extract_test_set_local('$P.extractors', "
+		  . sqlq("regex(pattern='$MID', keys=slow)") . ')');
+	like($err, qr/SIGPROF is blocked/, 'foreign SIGPROF pending: the injection refused to arm');
+	sq($s, "SELECT pssc_extract_test_regex_inject('check', 0, 'expire', 0)");
+	is(sq($s, "SELECT pssc_extract_test_sigprof('unblock')"),
+		'handler=sentinel timer=armed interval=1000000 hits=1',
+		'foreign SIGPROF pending: delivered to its own handler once unblocked');
+	sq($s, "SELECT pssc_extract_test_sigprof('remove')");
+	session_close($s);
+}
 unlike($node->safe_psql('postgres', "SELECT pg_read_file('postgresql.auto.conf')"), qr/zz=|\{0,15\}|\{0,255\}/,
 	'rejected patterns were not written by ALTER SYSTEM');
 is($node->safe_psql('postgres', "SHOW $P.extractors"),

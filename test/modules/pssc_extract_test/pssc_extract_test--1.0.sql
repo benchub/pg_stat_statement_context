@@ -135,8 +135,10 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 -- the 'expire' injection borrows and must give back. 'install' sets a
 -- sentinel handler that counts signals and a 1000 s timer (1000 s interval),
 -- 'remove' the default handler and no timer, 'pending' makes the next give
--- back find an injection SIGPROF pending. Returns the state after the
--- action ('state': none), e.g.
+-- back find an injection SIGPROF pending, 'block_pending' blocks SIGPROF
+-- and raises one (a foreign signal, held pending), 'unblock' unblocks it
+-- (delivering what is pending). Returns the state after the action
+-- ('state': none), e.g.
 -- 'handler=sentinel timer=armed interval=1000000 hits=0'.
 CREATE FUNCTION pssc_extract_test_sigprof(action text) RETURNS text
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;

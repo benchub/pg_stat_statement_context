@@ -364,10 +364,14 @@ cpu_ms(void)
  * are saved then and given back when the engine returns, when the next
  * attempt or injection starts (on PG16+ a stopped compile throws out of the
  * engine), and at the end of the transaction or an aborted subtransaction
- * (an error that left the compile). SIGPROF is blocked meanwhile, and an
- * injection SIGPROF still pending when the timer is given back is dropped,
- * so it never reaches the previous handler. The previous timer gets back
- * what it had left, less the CPU time used meanwhile.
+ * (an error that left the compile). The previous timer is stopped before
+ * the handler is replaced, and a SIGPROF pending then is delivered to the
+ * previous handler first, so whatever is pending at the give back is the
+ * injection's own: it is dropped (SIGPROF is blocked meanwhile), so it never
+ * reaches the previous handler. If SIGPROF is already blocked when arming,
+ * a foreign one could be pending and would be dropped too, so the injection
+ * refuses to arm (ERROR). The previous timer gets back what it had left,
+ * less the CPU time used meanwhile.
  */
 static void (*cpu_expire_now) (void) = NULL;
 static bool cpu_expiry_armed = false;
@@ -467,9 +471,23 @@ cpu_expiry_arm(int ms)
 	sigemptyset(&block);
 	sigaddset(&block, SIGPROF);
 	sigprocmask(SIG_BLOCK, &block, &old);
+
+	/*
+	 * A SIGPROF blocked by someone else may be pending, or become pending,
+	 * and the give back would discard it with the injection's own.
+	 */
+	if (sigismember(&old, SIGPROF))
+		elog(ERROR, "SIGPROF is blocked: the expire injection could discard a foreign SIGPROF");
+	/* stopped first, so no later expiry of it is taken for the injection's */
+	memset(&it, 0, sizeof(it));
+	cpu_expiry_armed_at = cpu_ms();
+	if (setitimer(ITIMER_PROF, &it, &cpu_expiry_old_it) != 0)
+	{
+		sigprocmask(SIG_SETMASK, &old, NULL);
+		elog(ERROR, "could not stop the CPU-time timer: %m");
+	}
 	/* a SIGPROF already pending belongs to the previous handler */
-	if (!sigismember(&old, SIGPROF) && sigpending(&pending) == 0 &&
-		sigismember(&pending, SIGPROF))
+	if (sigpending(&pending) == 0 && sigismember(&pending, SIGPROF))
 	{
 		sigprocmask(SIG_SETMASK, &old, NULL);
 		sigprocmask(SIG_BLOCK, &block, NULL);
@@ -480,16 +498,16 @@ cpu_expiry_arm(int ms)
 	sigemptyset(&sa.sa_mask);
 	if (sigaction(SIGPROF, &sa, &cpu_expiry_old_sa) != 0)
 	{
+		(void) setitimer(ITIMER_PROF, &cpu_expiry_old_it, NULL);
 		sigprocmask(SIG_SETMASK, &old, NULL);
 		elog(ERROR, "could not set the SIGPROF handler: %m");
 	}
-	memset(&it, 0, sizeof(it));
 	it.it_value.tv_sec = ms / 1000;
 	it.it_value.tv_usec = (ms % 1000) * 1000;
-	cpu_expiry_armed_at = cpu_ms();
-	if (setitimer(ITIMER_PROF, &it, &cpu_expiry_old_it) != 0)
+	if (setitimer(ITIMER_PROF, &it, NULL) != 0)
 	{
 		(void) sigaction(SIGPROF, &cpu_expiry_old_sa, NULL);
+		(void) setitimer(ITIMER_PROF, &cpu_expiry_old_it, NULL);
 		sigprocmask(SIG_SETMASK, &old, NULL);
 		elog(ERROR, "could not set the CPU-time timer: %m");
 	}
@@ -1005,6 +1023,21 @@ pssc_extract_test_sigprof(PG_FUNCTION_ARGS)
 	}
 	else if (strcmp(action, "pending") == 0)
 		inj_pending_at_restore = true;
+	else if (strcmp(action, "block_pending") == 0 ||
+			 strcmp(action, "unblock") == 0)
+	{
+		sigset_t	set;
+
+		sigemptyset(&set);
+		sigaddset(&set, SIGPROF);
+		if (action[0] == 'b')
+		{
+			sigprocmask(SIG_BLOCK, &set, NULL);
+			raise(SIGPROF);		/* held pending by the mask */
+		}
+		else
+			sigprocmask(SIG_UNBLOCK, &set, NULL);
+	}
 	else if (strcmp(action, "state") != 0)
 		elog(ERROR, "unknown action \"%s\"", action);
 	if (sigaction(SIGPROF, NULL, &sa) != 0 || getitimer(ITIMER_PROF, &it) != 0)
