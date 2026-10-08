@@ -12,7 +12,7 @@ pgss references are to `contrib/pg_stat_statements/pg_stat_statements.c` in the 
 
 ## 1. Mirrored pg_stat_statements behaviors
 
-The goal is parity: with the same `track` and `track_utility` settings, every recorded `(userid, dbid, queryid, toplevel)` has the same `calls` as pgss (`test/t/017_lifecycle.pl`, `012`, `013`, `035`). Each behavior below is a place where that parity can break when upstream changes.
+The goal is parity: with the same `track` and `track_utility` settings, every recorded `(userid, dbid, queryid, toplevel)` has the same `calls` as pgss (`test/t/017_lifecycle.pl`, `012`, `013`, `036`). Each behavior below is a place where that parity can break when upstream changes.
 
 ### 1.1 Nesting level and `toplevel`
 
@@ -48,9 +48,9 @@ A placeholder (pgss not loaded) falls back to this extension's own settings. If 
 
 | Behavior | This extension | pgss / core |
 |---|---|---|
-| The core queryId (`compute_query_id`) is used unchanged. This extension never computes, changes or zeroes `queryId`. | `pssc_frame_create`, `pssc_utility_frame_init` (`src/context.c`) copy `plannedstmt->queryId` / `pstmt->queryId` | `pgss_post_parse_analyze` zeroes the queryId of EXECUTE when tracking utilities. `pgss_ProcessUtility` zeroes `pstmt->queryId` of every utility it tracks *before* chaining. |
-| queryId 0 is never recorded. A tracked utility that arrives with queryId 0 is counted in `_info().utility_missing_queryid`. | `pssc_ProcessUtility` (`frame->queryId == 0`), `pssc_store_count_utility_missing_queryid` (`src/store.c`) | (pgss stores utilities with `queryId == 0` by hashing the text in `pgss_store` on PG14/15) |
-| Utility queryIds are a hash of the statement text on PG14/15 and a parse-tree jumble on PG16+. Identical utilities therefore share a queryId on PG16+. | Nothing to do; documented in `docs/limitations.md` | core `src/backend/nodes/queryjumblefuncs.c` (PG16+) / `src/backend/utils/misc/queryjumble.c` (`compute_utility_query_id`, PG14/15) |
+| The core queryId (`compute_query_id`) is used unchanged. This extension never computes, changes or zeroes `queryId`. | `pssc_frame_create`, `pssc_utility_frame_init` (`src/context.c`) copy `plannedstmt->queryId` / `pstmt->queryId` | When `pg_stat_statements.track_utility` is on, `pgss_post_parse_analyze` zeroes the queryId of EXECUTE, PREPARE and DEALLOCATE on PG14–16 (`!PGSS_HANDLED_UTILITY`) and of EXECUTE only on PG17+. When `track_utility` is on and `pgss_enabled(level)` holds, `pgss_ProcessUtility` zeroes `pstmt->queryId` of every utility, EXECUTE and PREPARE included, *before* chaining. |
+| queryId 0 is never recorded. A tracked utility that arrives with queryId 0 is counted in `_info().utility_missing_queryid`. | `pssc_ProcessUtility` (`frame->queryId == 0`), `pssc_store_count_utility_missing_queryid` (`src/store.c`) | `pgss_store` returns at once when `queryId == 0`, on PG14–18. pgss records a utility under the queryId core gave it, which `pgss_ProcessUtility` saved (`saved_queryId`) before zeroing `pstmt->queryId`. |
+| Core computes utility queryIds, not pgss. On PG14/15 the queryId is a hash of the statement text, comments included, so each tag set gives a different queryId. On PG16+ it is a parse-tree jumble that ignores comments, so the same utility shares one queryId across tag sets and untagged runs. | Nothing to do; documented in `docs/limitations.md` | core `src/backend/utils/misc/queryjumble.c` (`JumbleQuery` → `compute_utility_query_id`, PG14/15) / `src/backend/nodes/queryjumblefuncs.c` (PG16+) |
 | The queryId is an `int64` on PG18 and a `uint64` on PG14–17. It is stored as `int64`. | `src/store.h` `PsscEntryKey.queryid`, `src/context.h` `PsscFrame.queryId` | PG18 `pgss_store(..., int64 queryId, ...)`; PG14–17 `uint64` |
 | Load order: because pgss zeroes the queryId before chaining, pgss must be listed **before** this extension in `shared_preload_libraries`. A WARNING at startup reports the wrong order. | `src/utility.c`: `pssc_load_order_wrong`, `pssc_utility_check_load_order`; test 014 | `pgss_ProcessUtility` (the comment "Force utility statements to get queryId zero") |
 
@@ -76,8 +76,8 @@ A placeholder (pgss not loaded) falls back to this extension's own settings. If 
 1. Everything under "Every new minor release", between the previous major's branch and the new one.
 2. Re-check each `src/compat.h` macro against the new major. The comment above each `#if` says what to look at. Run `scripts/check-version-guards.sh`.
 3. Check whether pgss changed any of the nesting rules in §1.1 (PG17 merged `exec_nested_level` and `plan_nested_level` into `nesting_level`, which changed planner and utility nesting), the utility list in §1.2 (PG17 dropped `DeallocateStmt` from `PGSS_HANDLED_UTILITY`), the GUC names in §1.3, or the queryId type or jumbling in §1.4 (PG16 jumbles utilities; PG18 made queryId `int64`).
-4. Add the major to the `ci.yml` matrices, `<major>.0` to `.github/workflows/oldest-minors.yml`, and the PGDG package names to `docker/Dockerfile` (pgaudit and pg_hint_plan for 035 usually arrive a few weeks after the release; until then the cell skips them).
-5. Run `test/t/035_hook_coexistence.pl` against the new major's auto_explain, pgaudit, pg_hint_plan and (if you can build it) pg_stat_monitor. These extensions also change their hooks across majors.
+4. Add the major to the `ci.yml` matrices, `<major>.0` to `.github/workflows/oldest-minors.yml`, and the PGDG package names to `docker/Dockerfile` (pgaudit and pg_hint_plan for 036 usually arrive a few weeks after the release; until then the cell skips them).
+5. Run `test/t/036_hook_coexistence.pl` against the new major's auto_explain, pgaudit, pg_hint_plan and (if you can build it) pg_stat_monitor. These extensions also change their hooks across majors.
 
 ## 3. Oldest-minor policy
 
@@ -92,9 +92,9 @@ Reproduce a cell locally with `scripts/docker-test.sh 14.6` (or `15.0`, ...).
 
 ## 4. Coexistence with other hook-using extensions
 
-`test/t/035_hook_coexistence.pl` preloads this extension next to other libraries that install the same hooks. It loads `pg_stat_statements` first, then runs both orders of this extension and the other library. In each order it checks two things. First, the recorded tags and `calls`, including nested statements and a utility, exactly match the expected rows and pgss. Second, the other library's own output is intact.
+`test/t/036_hook_coexistence.pl` preloads this extension next to other libraries that install the same hooks. It loads `pg_stat_statements` first, then runs both orders of this extension and the other library. In each order it checks two things. First, the recorded tags and `calls`, including nested statements and a utility, exactly match the expected rows and pgss. Second, the other library's own output is intact.
 
-| Library | Source in the harness | What 035 checks besides recording |
+| Library | Source in the harness | What 036 checks besides recording |
 |---|---|---|
 | auto_explain | contrib, every harness server (`docker/build-postgres.sh` installs it for source builds) | `log_analyze` plans for each top-level and nested statement |
 | pgaudit | PGDG package `postgresql-N-pgaudit` (`docker/Dockerfile`) | one `AUDIT:` line per statement and nested statement |
@@ -109,6 +109,6 @@ A module that isn't installed is skipped, and the skip is reported on stderr. `d
 shared_preload_libraries = 'pg_stat_statements, pg_stat_monitor, pg_stat_statement_context'
 ```
 
-In that order pgss sits inside pg_stat_monitor and records no utilities. That is pg_stat_monitor's doing and happens without this extension too. 035 pins both orders. The load-order WARNING (`pssc_load_order_wrong`) only knows about pgss.
+In that order pgss sits inside pg_stat_monitor and records no utilities. That is pg_stat_monitor's doing and happens without this extension too. 036 pins both orders. The load-order WARNING (`pssc_load_order_wrong`) only knows about pgss.
 
-When a new release of any of these extensions changes its hooks, re-run 035 against it.
+When a new release of any of these extensions changes its hooks, re-run 036 against it.

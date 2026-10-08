@@ -51,7 +51,7 @@ sub _find_module
 }
 
 # The suffix of another installed module (for example auto_explain or
-# pgaudit, test/t/035_hook_coexistence.pl), or undef when it is not
+# pgaudit, test/t/036_hook_coexistence.pl), or undef when it is not
 # installed in the node's pkglibdir. A module named in PSSC_REQUIRE_MODULES
 # (space-separated; docker/run-tests.sh sets it to what the harness
 # installed) must be present: a missing one is a hard failure rather than a

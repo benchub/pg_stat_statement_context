@@ -14,7 +14,7 @@
 #
 # Besides the server it installs the TAP Perl modules (src/test/perl),
 # pg_regress, pg_stat_statements (for the parity checks of the TAP tests) and
-# auto_explain (for test/t/035_hook_coexistence.pl).
+# auto_explain (for test/t/036_hook_coexistence.pl).
 set -euo pipefail
 
 PG_VERSION=${1:?usage: build-postgres.sh <version> <prefix> [release|assert|valgrind]}

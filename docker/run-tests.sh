@@ -204,7 +204,7 @@ else
 	# installs pg_stat_statements: the TAP tests fail rather than skip
 	# their pgss parity checks if it is missing (test/perl/PsscTest.pm).
 	# Likewise auto_explain (contrib), and the third-party modules the PGDG
-	# image installed (docker/Dockerfile) for test/t/035_hook_coexistence.pl.
+	# image installed (docker/Dockerfile) for test/t/036_hook_coexistence.pl.
 	require_modules=auto_explain
 	if [ -r /usr/local/share/pssc-test-modules ]; then
 		require_modules=$(cat /usr/local/share/pssc-test-modules)
