@@ -260,7 +260,7 @@ SELECT * FROM pg_stat_statement_context_info();
 
 The extraction counters (`invalid_tags`, `dropped_tags`, `heuristic_scans`, `capped_tags`, `cap_table_full`) are collected per backend and added to the shared counters when a statement finishes; `_info()` includes the calling session's own pending counts.
 
-Finding `oldest_bucket` scans every entry under the store's shared lock; [`_counters()`](#pg_stat_statement_context_counters) returns the other columns without it. If the current bucket moves during the scan (at most once per `bucket_seconds`, unless the clock is stepped), the scan starts over, at most 3 times in all. The row is always consistent with its own `current_bucket_start`, which is the current bucket of its last scan: if that one moved too, the store's current bucket is already newer when the row is returned. A cancel interrupts the scan promptly.
+Finding `oldest_bucket` scans every entry under the store's shared lock; [`_counters()`](#pg_stat_statement_context_counters) returns the other columns without it. If the current bucket moves during the scan (at most once per `bucket_seconds`, unless the clock is stepped), the scan starts over, at most 3 times in all. The row is always consistent with its own `current_bucket_start`, which is the current bucket of its last scan: if that one moved too, the store's current bucket is already newer when the row is returned. A cancel, `statement_timeout` or termination interrupts any scan, the last one included, after at most one more entry.
 
 ## `pg_stat_statement_context_reset()`
 

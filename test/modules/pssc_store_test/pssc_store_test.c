@@ -485,8 +485,9 @@ pssc_store_test_stall_next_info_scan(PG_FUNCTION_ARGS)
  * after each entry judged by an _info() scan, under the shared store lock.
  * Counts its calls; for the first max_advances calls advances the debug
  * clock by advance_us and raises the watermark to it (as a concurrent
- * reader would); then sleeps sleep_ms (wait event PgSleep; not cut short by
- * a cancel, whose interrupt is held off under the lock anyway).
+ * reader would); after those, sleeps sleep_ms per call instead (wait event
+ * PgSleep; not cut short by a cancel, whose interrupt is held off under the
+ * lock anyway).
  */
 static int64 scan_calls;
 static int64 scan_advance_us;
@@ -501,6 +502,7 @@ counting_info_scan_hook(void *arg)
 	{
 		((advance_clock_fn) main_sym("pssc_store_debug_advance_clock")) (scan_advance_us);
 		((int64_fn) main_sym("pssc_store_debug_observe_clock")) ();
+		return;
 	}
 	for (int i = 0; i < scan_sleep_ms / 10; i++)
 		(void) WaitLatch(MyLatch, WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 10L,

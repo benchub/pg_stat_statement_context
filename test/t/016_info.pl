@@ -550,6 +550,35 @@ my $big = q{'SELECT 2 /*' || (SELECT string_agg('k' || i || '=''' || repeat('v',
 	ok($elapsed < 5, "promptly, within the pass ($elapsed s, a pass takes 10 s)");
 	unlike($r{out}, qr/\d/, 'no row');
 	sql('SELECT pssc_store_test_set_clock_offset(0)');
+
+	# The last pass gives way to a cancel too: over 50 entries, the hook
+	# moves the watermark after each of the first 100 (passes 1 and 2), and
+	# only then sleeps 200 ms after each, so the backend is sleeping only
+	# in pass 3, a 10 s pass when the cancel arrives.
+	sql("SELECT ${P}_reset()");
+	$b = sql('SELECT reader_bucket + 10 FROM pssc_store_test_buckets()');
+	pin($b);
+	sql("SELECT pssc_store_test_record(q) FROM generate_series(1, 50) q");
+	%r = (out => '', err => '');
+	$h = IPC::Run::start(
+		[ 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-d',
+		  $node->connstr('postgres') . ' application_name=pssc_cancel3',
+		  '-c', "SELECT pssc_store_test_info_scan_hook($us, 200, 100)",
+		  '-c', "SELECT entries FROM ${P}_info()" ],
+		'>', \$r{out}, '2>', \$r{err}, IPC::Run::timeout(180));
+	ok($node->poll_query_until('postgres',
+			q{SELECT EXISTS (SELECT FROM pg_stat_activity
+			  WHERE application_name = 'pssc_cancel3' AND wait_event = 'PgSleep')}),
+		'the third _info() pass is under way');
+	$t0 = time();
+	sql(q{SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+	      WHERE application_name = 'pssc_cancel3'});
+	$h->finish;
+	$elapsed = time() - $t0;
+	like($r{err}, qr/canceling statement due to user request/, 'the third pass is canceled');
+	ok($elapsed < 5, "promptly, within the last pass ($elapsed s, the pass takes 10 s)");
+	unlike($r{out}, qr/\d/, 'no row');
+	sql('SELECT pssc_store_test_set_clock_offset(0)');
 }
 
 # --------------------------------------------------------- _counters()

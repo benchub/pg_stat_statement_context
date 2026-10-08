@@ -1427,9 +1427,12 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 	/*
 	 * The lock holds off interrupts, so a pass gives way to one itself: it
 	 * stops, releases the lock and lets CHECK_FOR_INTERRUPTS() service it
-	 * (a cancel raises ERROR there). Only if the caller could have taken
-	 * the interrupt, or the pass would just start over with it still
-	 * pending.
+	 * (a cancel or termination raises ERROR or FATAL there). Any pass,
+	 * the last one included, gives way to a cancel or termination; the
+	 * last one completes despite any other interrupt, which waits for the
+	 * end of the pass, so that the passes stay bounded. Only if the caller
+	 * could have taken the interrupt, or the pass would just start over
+	 * with it still pending.
 	 */
 	can_interrupt = INTERRUPTS_CAN_BE_PROCESSED();
 
@@ -1456,8 +1459,8 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 		 * INFO_MAX_PASSES. The last pass is kept whatever happens to the
 		 * watermark meanwhile, so oldest_bucket may be up to that
 		 * movement stale when the row is returned (but is never a bucket
-		 * expired at the row's own current_bucket); and it is never cut
-		 * short, so every row comes from a whole pass.
+		 * expired at the row's own current_bucket); and every row comes
+		 * from a whole pass.
 		 */
 		oldest = PSSC_BUCKET_NONE;
 		hash_seq_init(&seq, store_htab);
@@ -1479,8 +1482,9 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 			if (unlikely(info_scan_test_hook != NULL))
 				info_scan_test_hook(info_scan_test_hook_arg);
 
-			if (unlikely(InterruptPending) && can_interrupt &&
-				pass < INFO_MAX_PASSES)
+			/* on WIN32, this also dispatches queued signals */
+			if (unlikely(INTERRUPTS_PENDING_CONDITION()) && can_interrupt &&
+				(pass < INFO_MAX_PASSES || QueryCancelPending || ProcDiePending))
 			{
 				hash_seq_term(&seq);
 				interrupted = true;
@@ -1493,8 +1497,17 @@ pssc_store_get_info(PsscStoreCounters *c, int64 *oldest_bucket)
 		if (!interrupted && (after == current || pass >= INFO_MAX_PASSES))
 			break;
 		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * A cut-short last pass whose cancel did not raise an error (none
+		 * in practice: the statement is running) is made again: every row
+		 * comes from a whole pass.
+		 */
+		if (interrupted && pass >= INFO_MAX_PASSES)
+			pass = INFO_MAX_PASSES - 1;
 	}
 	c->current_bucket = current;
+	CHECK_FOR_INTERRUPTS();
 
 	pfree(ids);
 	*oldest_bucket = oldest;

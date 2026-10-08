@@ -389,8 +389,10 @@ extern PGDLLEXPORT bool pssc_store_get_header(PsscStoreCounters *c);
  * against that watermark, returned as c->current_bucket. If the watermark
  * moved during the scan, the scan is repeated from scratch under a new
  * acquisition, at most 3 passes in all; the last pass is returned even if
- * the watermark moved during it. A pass (but the last) stops for a pending
- * interrupt, releases the lock and services it, so a cancel is prompt.
+ * the watermark moved during it. Any pass stops for a pending cancel or
+ * termination (and a pass but the last for any interrupt), releases the
+ * lock and services it, so a cancel is prompt; a cut-short pass is never
+ * returned.
  * Scans the whole table. false (*c zeroed, *oldest_bucket
  * PSSC_BUCKET_NONE) if the store is not set up.
  */
