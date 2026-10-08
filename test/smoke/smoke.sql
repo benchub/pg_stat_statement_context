@@ -16,19 +16,28 @@
 --     the library is not preloaded);
 --   - _extract() finds the smoke statements' tags under the server's
 --     current extractor configuration (if this role may call it);
---   - the tagged smoke statements, in SQLCommenter and marginalia format,
---     are recorded (each format _extract() recognizes; without _extract(),
---     at least one) and visible to this role in the views;
+--   - recording is on (enabled, track) for this session;
+--   - the tagged smoke statements, run 3 times in SQLCommenter and 3 times
+--     in marginalia format, are each recorded exactly once (every format
+--     _extract() recognizes; without _extract(), at least one format) and
+--     visible to this role in the views;
 --   - pg_file_settings is unchanged (if this role may read it).
--- The statements carry controller and action tags, which the default
+-- The statements carry one tag, controller=pssc_smoke, which the default
 -- extractors (sqlcommenter, marginalia) and tags allowlist (action,
 -- controller, job) keep; with the default untagged = skip, statements
--- without a kept tag are not recorded.
+-- without a kept tag are not recorded. The two formats are two statements
+-- of different shape (so two entries, whatever tags are kept), run one
+-- format after the other, and counted in between. The tag value is fixed,
+-- so repeated runs reuse those two entries per role and database and admit
+-- one value of controller to a cardinality cap; the value pssc_smoke is
+-- reserved for this test. Smoke runs in one database take turns on the
+-- advisory lock (1886614371, 1936551787) ('pssc', 'smok') from their first
+-- count to their last, so the calls counted are their own.
 \set ON_ERROR_STOP 1
 \set QUIET 1
 \set fail 'DO $pssc_smoke$ BEGIN RAISE EXCEPTION ''pg_stat_statement_context smoke test failed''; END $pssc_smoke$;'
-\set stmt_sc 'SELECT ''pssc_smoke'' AS pssc_smoke /*controller=''pssc_smoke'',action=''sqlcommenter''*/'
-\set stmt_mg 'SELECT ''pssc_smoke'' AS pssc_smoke /*controller:pssc_smoke,action:marginalia*/'
+\set stmt_sc 'SELECT ''pssc_smoke'' AS pssc_smoke /*controller=''pssc_smoke''*/'
+\set stmt_mg 'SELECT ''pssc_smoke'' AS pssc_smoke, ''marginalia'' AS pssc_smoke_format /*controller:pssc_smoke*/'
 
 SELECT current_setting('server_version') AS smoke_version,
        current_database() AS smoke_db, current_user AS smoke_user,
@@ -135,6 +144,17 @@ SELECT buckets = :c_buckets AND bucket_seconds = :c_bucket_seconds
 :fail
 \endif
 
+-- Recording is on for this session.
+SELECT :'g_enabled' = 'off' AS rec_off, :'g_track' = 'none' AS track_none \gset
+\if :rec_off
+\echo 'FAIL: pg_stat_statement_context.enabled = off for this session: nothing is recorded'
+:fail
+\endif
+\if :track_none
+\echo 'FAIL: pg_stat_statement_context.track = none for this session: nothing is recorded'
+:fail
+\endif
+
 -- What the current configuration extracts from the smoke statements.
 SELECT has_function_privilege(
          format('%I.pg_stat_statement_context_extract(text, integer, integer)', :'s'),
@@ -164,18 +184,28 @@ SELECT :'x_sc'::boolean OR :'x_mg'::boolean AS x_any \gset
 \echo 'skipped: _extract() not executable by this role (GRANT EXECUTE to check what the configuration extracts)'
 \endif
 
--- Record the smoke statements, three times in each format.
-\set smoke_calls 'SELECT coalesce(sum(calls_total) FILTER (WHERE tags->>''action'' = ''sqlcommenter''), 0) AS calls_sc, coalesce(sum(calls_total) FILTER (WHERE tags->>''action'' = ''marginalia''), 0) AS calls_mg FROM ' :"s" '.pg_stat_statement_context(true, true) WHERE userid = (SELECT oid FROM pg_roles WHERE rolname = current_user) AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND tags->>''controller'' = ''pssc_smoke'''
-:smoke_calls \gset before_
+-- Record the smoke statements, three times in each format, and count the
+-- calls of the smoke entries of this role and database before, between and
+-- after. Each format must add exactly 3, or 0 if the configuration does
+-- not recognize it.
+SELECT pg_advisory_lock(1886614371, 1936551787) AS smoke_locked \gset
+\set smoke_calls 'SELECT coalesce(sum(calls_total), 0) AS calls FROM ' :"s" '.pg_stat_statement_context_totals WHERE userid = (SELECT oid FROM pg_roles WHERE rolname = current_user) AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND tags->>''controller'' = ''pssc_smoke'''
+:smoke_calls \gset c0_
 :stmt_sc \gset smoke_
 :stmt_sc \gset smoke_
 :stmt_sc \gset smoke_
+:smoke_calls \gset c1_
 :stmt_mg \gset smoke_
 :stmt_mg \gset smoke_
 :stmt_mg \gset smoke_
-:smoke_calls \gset after_
-SELECT :after_calls_sc - :before_calls_sc >= 3 AS rec_sc,
-       :after_calls_mg - :before_calls_mg >= 3 AS rec_mg \gset
+:smoke_calls \gset c2_
+SELECT :c1_calls - :c0_calls AS d_sc, :c2_calls - :c1_calls AS d_mg \gset
+SELECT :d_sc = 3 AS rec_sc, :d_mg = 3 AS rec_mg,
+       :d_sc NOT IN (0, 3) OR :d_mg NOT IN (0, 3) AS rec_wrong \gset
+\if :rec_wrong
+\echo 'FAIL: the smoke statements were recorded' :d_sc 'times (SQLCommenter) and' :d_mg 'times (marginalia), expected exactly 3 for each format the configuration recognizes (0 otherwise): another session using controller = pssc_smoke, tags_override, or entries evicted meanwhile?'
+:fail
+\endif
 \if :rec_sc
 \echo 'ok: SQLCommenter smoke statements recorded'
 \endif
@@ -183,23 +213,23 @@ SELECT :after_calls_sc - :before_calls_sc >= 3 AS rec_sc,
 \echo 'ok: marginalia smoke statements recorded'
 \endif
 \if :can_extract
-SELECT (:'x_sc'::boolean AND NOT :'rec_sc'::boolean)
-         OR (:'x_mg'::boolean AND NOT :'rec_mg'::boolean) AS rec_missing \gset
+SELECT :'x_sc'::boolean <> :'rec_sc'::boolean
+         OR :'x_mg'::boolean <> :'rec_mg'::boolean AS rec_missing \gset
 \else
 SELECT NOT (:'rec_sc'::boolean OR :'rec_mg'::boolean) AS rec_missing \gset
 \endif
 \if :rec_missing
-\echo 'FAIL: tagged smoke statements not recorded (calls before/after: SQLCommenter' :before_calls_sc/:after_calls_sc, 'marginalia' :before_calls_mg/:after_calls_mg'): check enabled, track, untagged, tags and extractors above, and capped_tags and dropped_tags in _counters()'
+\echo 'FAIL: tagged smoke statements not recorded as _extract() predicts, or in neither format (calls recorded: SQLCommenter' :d_sc, 'marginalia' :d_mg'): check enabled, track, untagged, tags and extractors above, and capped_tags and dropped_tags in _counters()'
 :fail
 \endif
 
 -- Visible to this role, with queryid and tags.
-SELECT count(*) FILTER (WHERE queryid IS NOT NULL AND calls > 0) > 0 AS vis_ok
+SELECT count(*) FILTER (WHERE calls > 0) > 0 AND bool_and(queryid IS NOT NULL) AS vis_ok
   FROM :"s".pg_stat_statement_context
  WHERE userid = (SELECT oid FROM pg_roles WHERE rolname = current_user)
    AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
    AND tags->>'controller' = 'pssc_smoke' \gset
-SELECT count(*) FILTER (WHERE queryid IS NOT NULL AND calls_total > 0) > 0 AS tot_ok
+SELECT count(*) FILTER (WHERE calls_total > 0) > 0 AND bool_and(queryid IS NOT NULL) AS tot_ok
   FROM :"s".pg_stat_statement_context_totals
  WHERE userid = (SELECT oid FROM pg_roles WHERE rolname = current_user)
    AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
@@ -217,6 +247,7 @@ SELECT count(*) AS act_rows FROM :"s".pg_stat_statement_context_activity \gset
 :fail
 \endif
 \echo 'ok: smoke statements visible in pg_stat_statement_context and _totals; _last_bucket and _activity readable'
+SELECT pg_advisory_unlock(1886614371, 1936551787) AS smoke_unlocked \gset
 
 \if :file_settings_readable
 SELECT md5(coalesce(string_agg(concat_ws('|', sourcefile, sourceline, seqno,

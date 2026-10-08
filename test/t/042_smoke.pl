@@ -66,14 +66,19 @@ sql('ALTER ROLE dba SUPERUSER');
 $node->safe_psql('dbadb', "CREATE EXTENSION $P", extra_params => [ '-U', 'dba' ]);
 sql('ALTER ROLE dba NOSUPERUSER');
 
+sub smoke_cmd
+{
+	my ($role, $db) = @_;
+	return [ 'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1',
+		'-d', $node->connstr($db) . " user=$role", '-f', $script ];
+}
+
 # Runs the smoke script as $role in $db; returns (exit code, stdout, stderr).
 sub smoke
 {
 	my ($role, $db) = @_;
 	my ($out, $err) = ('', '');
-	IPC::Run::run([ 'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1',
-			'-d', $node->connstr($db) . " user=$role", '-f', $script ],
-		'<', \undef, '>', \$out, '2>', \$err);
+	IPC::Run::run(smoke_cmd($role, $db), '<', \undef, '>', \$out, '2>', \$err);
 	my $rc = $? >> 8;
 	note "smoke as $role in $db: exit $rc\n$out$err";
 	return ($rc, $out, $err);
@@ -114,8 +119,9 @@ sub smoke_passes
 	unlike($out . $err, qr/FAIL|ERROR/, "$name: no FAIL or ERROR");
 	like($out, qr/^smoke test passed/m, "$name: reports success");
 	like($out, $_, "$name: reports $_") for @like;
-	ok(smoke_calls($role, $db) >= $calls + 3,
-		"$name: its tagged statements were recorded");
+	# Exactly its 3 statements in each of the 2 formats.
+	is(smoke_calls($role, $db), $calls + 6,
+		"$name: its tagged statements were recorded, each once");
 	is(settings_snapshot(), $before,
 		"$name: postgresql.auto.conf, pg_file_settings and role/database settings unchanged");
 	return $out;
@@ -165,7 +171,79 @@ sql("ALTER ROLE app RESET $P.tags");
 
 sql("ALTER ROLE dba SET $P.enabled = off");
 smoke_fails('dba', 'dbadb', 'recording off, _extract() executable',
-	qr/^FAIL: .*not recorded/m);
+	qr/^FAIL: .*enabled = off/m);
+sql("ALTER ROLE dba RESET $P.enabled");
+sql("ALTER ROLE app SET $P.enabled = off");
+smoke_fails('app', 'appdb', 'recording off, _extract() not executable',
+	qr/^FAIL: .*enabled = off/m);
+sql("ALTER ROLE app RESET $P.enabled");
+sql("ALTER ROLE app SET $P.track = 'none'");
+smoke_fails('app', 'appdb', 'track = none',
+	qr/^FAIL: .*track = none/m);
+sql("ALTER ROLE app RESET $P.track");
+
+# Only controller kept: the two formats are still told apart (by their
+# statements, not by a tag).
+sql("ALTER ROLE dba IN DATABASE dbadb SET $P.tags = 'controller'");
+smoke_passes('dba', 'dbadb', 'tags = controller, _extract() executable',
+	qr/^ok: SQLCommenter smoke statements recorded/m,
+	qr/^ok: marginalia smoke statements recorded/m);
+sql("ALTER ROLE dba IN DATABASE dbadb RESET $P.tags");
+sql("ALTER ROLE app IN DATABASE appdb SET $P.tags = 'controller'");
+smoke_passes('app', 'appdb', 'tags = controller, _extract() not executable');
+sql("ALTER ROLE app IN DATABASE appdb RESET $P.tags");
+
+# Overcounting: with tags_override every statement of the role carries the
+# smoke tag, so the smoke test's own queries add to the counts.
+sql("ALTER ROLE app SET $P.tags_override = 'controller=''pssc_smoke'''");
+smoke_fails('app', 'appdb', 'more calls recorded than run',
+	qr/^FAIL: .*expected exactly 3/m);
+sql("ALTER ROLE app RESET $P.tags_override");
+
+# A run that records nothing while another session runs the smoke
+# statements: smoke runs in one database are serialized by an advisory
+# lock, so the other session's statements cannot land between its counts.
+{
+	sql("ALTER ROLE app IN DATABASE appdb SET $P.tags = 'job'");
+	my %a = (in => '', out => '', err => '');
+	my $ah = IPC::Run::start([ 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1',
+			'-d', $node->connstr('appdb') ],
+		'<', \$a{in}, '>', \$a{out}, '2>', \$a{err}, IPC::Run::timeout(180));
+	my $marker = 0;
+	my $asq = sub {
+		my $m = '__done_' . ++$marker . '__';
+		$a{in} .= "$_[0];\n\\echo $m\n";
+		$ah->pump until $a{out} =~ /^\Q$m\E$/m;
+		die "session error: $a{err}" if $a{err} ne '';
+	};
+	# The other run, as app (its own session records with the default tags).
+	$asq->('SET ROLE app');
+	$asq->('SELECT pg_advisory_lock(1886614371, 1936551787)');
+	my $calls = smoke_calls('app', 'appdb');
+	my ($out, $err) = ('', '');
+	my $bh = IPC::Run::start(smoke_cmd('app', 'appdb'), '<', \undef,
+		'>', \$out, '2>', \$err, IPC::Run::timeout(180));
+	ok($node->poll_query_until('appdb', q{SELECT count(*) > 0 FROM pg_locks l
+		JOIN pg_stat_activity a USING (pid)
+		WHERE l.locktype = 'advisory' AND NOT l.granted AND a.usename = 'app'}),
+		'a smoke run waits while another one holds the smoke lock');
+	$asq->(q{SELECT 'pssc_smoke' AS pssc_smoke /*controller='pssc_smoke'*/})
+	  for 1 .. 3;
+	$asq->(q{SELECT 'pssc_smoke' AS pssc_smoke, 'marginalia' AS pssc_smoke_format /*controller:pssc_smoke*/})
+	  for 1 .. 3;
+	is(smoke_calls('app', 'appdb'), $calls + 6,
+		"the other session's smoke statements were recorded");
+	$asq->('SELECT pg_advisory_unlock(1886614371, 1936551787)');
+	$bh->finish;
+	my $rc = $? >> 8;
+	note "overlapping smoke as app: exit $rc\n$out$err";
+	isnt($rc, 0, 'non-recording run overlapping another: non-zero exit');
+	like($out, qr/^FAIL: .*not recorded/m,
+		'non-recording run overlapping another: reports why');
+	$a{in} .= "\\q\n";
+	$ah->finish;
+	sql("ALTER ROLE app IN DATABASE appdb RESET $P.tags");
+}
 sql("ALTER ROLE dba RESET $P.enabled");
 smoke_passes('dba', 'dbadb', 'dba again, recording back on');
 
