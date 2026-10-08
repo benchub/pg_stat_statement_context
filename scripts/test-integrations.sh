@@ -4,8 +4,9 @@
 #   scripts/test-integrations.sh [--remove-images] [pg-major]   (default 17)
 #
 # On a private Docker network it starts:
-#   pg     PostgreSQL <pg-major> (official image + PGXS, docker/Dockerfile, as in
-#          scripts/docker-test.sh) with the extension built from this checkout,
+#   pg     PostgreSQL <pg-major> (official image + PGXS, docker/Dockerfile: this
+#          checkout's image of scripts/docker-test.sh <pg-major>) with the
+#          extension built from this checkout,
 #          10-second buckets, track = all, and the recipe's monitoring role
 #   load   a sample tagged workload (test/integrations/workload.sql) in a loop;
 #          psql runs it with ON_ERROR_STOP, and the checks fail if it exits
@@ -78,8 +79,7 @@ port() { docker port "$N-$1" "$2/tcp" | head -1; }
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$N-$1" 2>/dev/null)" = true ]; }
 
 step "build the PostgreSQL $PG_MAJOR image"
-PG_IMAGE="pg_stat_statement_context-test:pg${PG_MAJOR}"
-docker build -q --build-arg "PG_MAJOR=${PG_MAJOR}" -t "$PG_IMAGE" "$ROOT/docker" >/dev/null
+PG_IMAGE=$("$ROOT/scripts/docker-test.sh" --build-image "$PG_MAJOR")
 
 for i in "$PE_IMAGE" "$SE_IMAGE" "$OTEL_IMAGE" "$PROM_IMAGE" "$GRAFANA_IMAGE"; do
 	docker image inspect "$i" >/dev/null 2>&1 || { step "pull $i"; docker pull -q "$i" >/dev/null; }

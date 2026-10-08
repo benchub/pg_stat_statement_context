@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs inside the docker/Dockerfile image (pg_stat_statement_context-test:pgN),
+# Runs inside the docker/Dockerfile image (pg_stat_statement_context-test:pgN-<hash>),
 # started by bench/run.sh. Builds and installs the extension from /src, creates
 # a pgbench database, and runs every configuration round-robin (one restart per
 # configuration and run, then a warmup, a stats reset and the measured run).

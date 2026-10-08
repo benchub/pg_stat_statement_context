@@ -46,6 +46,8 @@ jobs:
         run: scripts/check-frozen-sql.sh --self-test
       - name: Frozen SQL check
         run: scripts/check-frozen-sql.sh
+      - name: Docker image tag self-test
+        run: scripts/test-docker-test.sh
 
   linux:
     name: Linux PG${{ matrix.pg }} (PGDG)

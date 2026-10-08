@@ -22,7 +22,7 @@ Options:
 
 `bench/inside.sh` documents the `BENCH_*` environment variables (clients, CPU pinning, IN-list length, boundary window, interference threshold).
 
-The run reuses the image of `scripts/docker-test.sh N` (`pg_stat_statement_context-test:pgN`, built from `docker/Dockerfile` when missing), so it creates no other image. It runs one `docker run --rm` container and leaves nothing behind. Output goes to `tmp/bench-pgN[-quick]/`:
+The run reuses the image of `scripts/docker-test.sh N` (this checkout's `pg_stat_statement_context-test:pgN-<hash>`, built from `docker/Dockerfile`; see `scripts/docker-test.sh` for the tag scheme and `--prune`), so it creates no other image. It runs one `docker run --rm` container and leaves nothing behind. Output goes to `tmp/bench-pgN[-quick]/`:
 
 - `results.md` and `results.json`: the tables below;
 - `runs/*.json`: one summary per run, plus pgbench's own output;

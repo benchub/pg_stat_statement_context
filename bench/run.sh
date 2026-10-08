@@ -12,8 +12,8 @@
 #
 # The full run (20 configurations x 5 rounds x (20 s + 3 s warmup + restart and
 # analysis)) takes about 50 minutes. It uses the same image as
-# scripts/docker-test.sh N (pg_stat_statement_context-test:pgN, built from
-# docker/Dockerfile), so no extra image is created. Server and pgbench run in
+# scripts/docker-test.sh N (this checkout's pg_stat_statement_context-test:pgN-<hash>,
+# built from docker/Dockerfile), so no extra image is created. Server and pgbench run in
 # one --rm container over the Unix socket, each pinned to its own CPUs.
 # Results land in tmp/bench-pgN[-quick]/: results.md (tables), results.json,
 # runs/*.json (per run), env-*.txt. Exits non-zero if any configuration fails
@@ -49,7 +49,7 @@ else
 	RUNS=${RUNS:-5} DURATION=${DURATION:-20} WARMUP=3
 	OUT="$ROOT/tmp/bench-pg${MAJOR}"
 fi
-IMAGE="pg_stat_statement_context-test:pg${MAJOR}"
+IMAGE=$("$ROOT/scripts/docker-test.sh" --print-image "$MAJOR")
 NAME="pssc-bench-pg${MAJOR}-$$"
 
 # Fail fast on the analysis code before spending time on Docker.
@@ -74,7 +74,7 @@ mkdir -p "$OUT"
 	echo "image: $IMAGE"
 } | tee "$OUT/env-host.txt"
 
-docker build -q --build-arg "PG_MAJOR=${MAJOR}" -t "$IMAGE" "$ROOT/docker" >/dev/null
+"$ROOT/scripts/docker-test.sh" --build-image "$MAJOR" >/dev/null
 trap 'docker kill "$NAME" >/dev/null 2>&1 || true' INT TERM
 docker run --rm --name "$NAME" --shm-size=1g \
 	-v "$ROOT:/src:ro" -v "$OUT:/out" \

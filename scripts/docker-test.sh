@@ -17,6 +17,19 @@
 #   scripts/docker-test.sh --print-image [--assert|--valgrind|--valgrind-tap] <version>
 #                                          print the image tag and exit (CI
 #                                          uses it as the build-cache key)
+#   scripts/docker-test.sh --build-image <version>
+#                                          build the image if needed, print
+#                                          its tag and exit (bench/run.sh and
+#                                          scripts/test-integrations.sh)
+#   scripts/docker-test.sh --prune         remove this checkout's PGDG images
+#   scripts/docker-test.sh --prune-stale   remove the PGDG images of checkouts
+#                                          that no longer exist (e.g. removed
+#                                          worktrees)
+# PGDG images (docker/Dockerfile) are per checkout, so that parallel worktrees
+# never run each other's image: pg_stat_statement_context-test:pg<major>-<hash>,
+# where <hash> is a hash of the checkout's absolute path, which the image also
+# records in the label pssc.checkout. --prune and --prune-stale select images
+# by that label only; images of other existing checkouts are never removed.
 # A bare major with --assert/--valgrind means the release of the local
 # postgres:<major> image (pulled if missing), i.e. the same minor as PGDG.
 # Source builds are tagged pg_stat_statement_context-pgsrc:<version>-<flavor>-<hash>,
@@ -31,36 +44,71 @@
 # Logs and regression diffs from a failed run land in tmp/docker-<version>[-<mode>]/.
 set -euo pipefail
 
-usage() { echo "usage: $0 [--assert|--valgrind|--valgrind-tap] [--print-image] <major|major.minor>" >&2; exit 2; }
+usage() {
+	echo "usage: $0 [--assert|--valgrind|--valgrind-tap] [--print-image|--build-image] <major|major.minor>" >&2
+	echo "       $0 --prune|--prune-stale" >&2
+	exit 2
+}
 
 # FLAVOR selects the image (docker/build-postgres.sh flavor), MODE what
 # docker/run-tests.sh runs in it.
 FLAVOR=
 MODE=
 PRINT=0
+BUILD_ONLY=0
+PRUNE=
 while [ $# -gt 0 ]; do
 	case $1 in
 	--assert) FLAVOR=assert MODE=assert ;;
 	--valgrind) FLAVOR=valgrind MODE=valgrind ;;
 	--valgrind-tap) FLAVOR=valgrind MODE=valgrind-tap ;;
 	--print-image) PRINT=1 ;;
+	--build-image) BUILD_ONLY=1 ;;
+	--prune) PRUNE=this ;;
+	--prune-stale) PRUNE=stale ;;
 	-*) usage ;;
 	*) break ;;
 	esac
 	shift
 done
 [ $# -le 1 ] || usage
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
+if command -v sha256sum >/dev/null; then sha() { sha256sum; }; else sha() { shasum -a 256; }; fi
+LABEL=pssc.checkout
+
+# --prune / --prune-stale: remove PGDG images by their checkout label, tagged
+# ones by name and dangling ones (left by rebuilds) by ID.
+if [ -n "$PRUNE" ]; then
+	[ $# -eq 0 ] && [ -z "$FLAVOR" ] && [ "$PRINT$BUILD_ONLY" = 00 ] || usage
+	docker image ls --filter "label=$LABEL" --format '{{.ID}} {{.Repository}}:{{.Tag}}' |
+	while read -r id ref; do
+		path=$(docker image inspect -f "{{index .Config.Labels \"$LABEL\"}}" "$id" 2>/dev/null) || continue
+		[ -n "$path" ] || continue
+		if [ "$PRUNE" = this ]; then
+			[ "$path" = "$ROOT" ] || continue
+		else
+			[ ! -e "$path" ] || continue
+		fi
+		[ "$ref" = "<none>:<none>" ] && ref=$id
+		echo "removing $ref ($path)"
+		docker rmi "$ref" >/dev/null || echo "could not remove $ref" >&2
+	done
+	exit 0
+fi
+
 PG_VER=${1:-17}
 [[ $PG_VER =~ ^[0-9]+(\.[0-9]+)?$ ]] || usage
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 # Plain major without a flavor: PGDG packages (docker/Dockerfile).
 if [ -z "$FLAVOR" ] && [[ $PG_VER != *.* ]]; then
-	IMAGE="pg_stat_statement_context-test:pg${PG_VER}"
+	IMAGE="pg_stat_statement_context-test:pg${PG_VER}-$(printf '%s' "$ROOT" | sha | cut -c1-12)"
 	if [ "$PRINT" = 1 ]; then echo "$IMAGE"; exit 0; fi
+	docker build -q --build-arg "PG_MAJOR=${PG_VER}" --label "$LABEL=$ROOT" \
+		-t "$IMAGE" "$ROOT/docker" >/dev/null
+	if [ "$BUILD_ONLY" = 1 ]; then echo "$IMAGE"; exit 0; fi
+	echo "image: $IMAGE ($(docker image inspect -f '{{.Id}}' "$IMAGE" | cut -c1-19))" >&2
 	OUT="$ROOT/tmp/docker-${PG_VER}"
 	mkdir -p "$OUT"
-	docker build -q --build-arg "PG_MAJOR=${PG_VER}" -t "$IMAGE" "$ROOT/docker" >/dev/null
 	docker run --rm -v "$ROOT:/src:ro" -v "$OUT:/out" -e PSSC_SOAK_STATEMENTS "$IMAGE"
 	exit
 fi
@@ -79,20 +127,20 @@ else
 	[[ $PG_RELEASE == "$PG_MAJOR".* ]] \
 		|| { echo "cannot tell the release of postgres:${PG_MAJOR} (got '$PG_RELEASE')" >&2; exit 1; }
 fi
-if command -v sha256sum >/dev/null; then sha() { sha256sum; }; else sha() { shasum -a 256; }; fi
 HASH=$(cat "$ROOT/docker/Dockerfile.source" "$ROOT/docker/build-postgres.sh" | sha | cut -c1-12)
 IMAGE="pg_stat_statement_context-pgsrc:${PG_RELEASE}-${FLAVOR}-${HASH}"
 if [ "$PRINT" = 1 ]; then echo "$IMAGE"; exit 0; fi
 
-OUT="$ROOT/tmp/docker-${PG_VER}"
-[ "$MODE" = release ] || OUT="$OUT-$MODE"
-mkdir -p "$OUT"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "building $IMAGE (PostgreSQL $PG_RELEASE from source, $FLAVOR)" >&2
 	docker build -q -f "$ROOT/docker/Dockerfile.source" \
 		--build-arg "PG_MAJOR=${PG_MAJOR}" --build-arg "PG_SOURCE_VERSION=${PG_RELEASE}" \
 		--build-arg "PG_FLAVOR=${FLAVOR}" -t "$IMAGE" "$ROOT/docker" >/dev/null
 fi
+if [ "$BUILD_ONLY" = 1 ]; then echo "$IMAGE"; exit 0; fi
+OUT="$ROOT/tmp/docker-${PG_VER}"
+[ "$MODE" = release ] || OUT="$OUT-$MODE"
+mkdir -p "$OUT"
 docker run --rm -v "$ROOT:/src:ro" -v "$OUT:/out" -e "PSSC_TEST_MODE=${MODE}" \
 	-e PSSC_SOAK_STATEMENTS -e PSSC_VALGRIND_TAP_TESTS \
 	--entrypoint /src/docker/run-tests.sh "$IMAGE"

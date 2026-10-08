@@ -153,6 +153,8 @@ scripts/docker-test.sh --assert 17    # source build with --enable-cassert
 scripts/docker-test.sh --valgrind 18  # regression suite with the server under Valgrind
 scripts/docker-test.sh --valgrind-tap 18  # TAP subset (SRFs, eviction, caps, exemplars, persistence, soak) under Valgrind
 PSSC_SOAK_STATEMENTS=200000 scripts/docker-test.sh 18  # longer backend-memory soak (test/t/039_memory_soak.pl)
+scripts/docker-test.sh --prune        # remove this checkout's PGDG test images (tagged pgN-<path hash>)
+scripts/docker-test.sh --prune-stale  # remove the PGDG test images of checkouts that no longer exist
 make unittest                         # standalone scanner/parser unit tests and fuzz corpus
 fuzz/run-libfuzzer.sh -t 600          # libFuzzer (clang, ASan+UBSan) targets in Docker, 10 min each
 fuzz/sql/run.sh -- --duration 600     # regex extractor SQL fuzzer, assert build in Docker
