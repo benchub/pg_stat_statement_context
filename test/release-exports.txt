@@ -1,0 +1,29 @@
+# Symbols the release build of pg_stat_statement_context may export
+# (scripts/check-release-exports.sh; backlog 20261008-065635-3). Everything
+# else is hidden (-fvisibility=hidden); the testing build (make
+# PSSC_TESTING=1) also exports what the TEST-ONLY modules in test/modules/
+# reach.
+
+# Looked up by PostgreSQL when it loads the library.
+Pg_magic_func
+_PG_init
+
+# The reclaim worker's entry point (bgw_function_name, src/reclaim.c).
+pssc_reclaim_worker_main
+
+# The SQL-callable functions (sql/pg_stat_statement_context--*.sql) and
+# their PG_FUNCTION_INFO_V1 records.
+pg_finfo_pg_stat_statement_context_1_0
+pg_finfo_pg_stat_statement_context_activity_1_0
+pg_finfo_pg_stat_statement_context_counters_1_0
+pg_finfo_pg_stat_statement_context_extract
+pg_finfo_pg_stat_statement_context_info_1_0
+pg_finfo_pg_stat_statement_context_last_bucket_1_0
+pg_finfo_pg_stat_statement_context_reset
+pg_stat_statement_context_1_0
+pg_stat_statement_context_activity_1_0
+pg_stat_statement_context_counters_1_0
+pg_stat_statement_context_extract
+pg_stat_statement_context_info_1_0
+pg_stat_statement_context_last_bucket_1_0
+pg_stat_statement_context_reset

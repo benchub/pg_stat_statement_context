@@ -346,6 +346,35 @@ is(sql("SELECT context FROM pg_settings WHERE name = '$P.save'"), 'sighup',
 	}
 }
 
+# --------------------------- a tags_hash that does not match its tags
+# Defense in depth (SEC-7): the loader recomputes every record's tags_hash
+# from its tags. The test driver stores an entry under a wrong tags_hash, so
+# the clean shutdown writes it into a dump whose checksum is valid.
+{
+	sql("SELECT ${P}_reset()");
+	rec(5101);
+	is(rec(q{5102, ARRAY['k', 'v']}), 'inserted', 'an entry with its true tags_hash');
+	my $true_hash = sql(q{SELECT tags_hash FROM pssc_store_test_entries() WHERE queryid = 5102 LIMIT 1});
+	my $bad_hash = ($true_hash + 1) % 4294967296;
+	is(rec(qq{5103, ARRAY['k', 'v'], NULL, 1.0, true, $bad_hash}), 'inserted',
+		'an entry with the same tags under another tags_hash');
+	my $log = restart('fast', sub { ok(-f $DUMP, 'tags_hash: dump written'); });
+	like($log, qr/ignoring invalid data in file ".*$P\.stat"/,
+		'tags_hash: a tags_hash that does not match the tags is rejected with a LOG message');
+	unlike($log, qr/loaded \d+ of \d+ saved entries/, 'tags_hash: nothing is loaded');
+	unlike($log, qr/PANIC|terminated by signal|FATAL/, 'tags_hash: no crash');
+	is(entries(), 0, 'tags_hash: the store starts empty');
+	ok(!-e $DUMP, 'tags_hash: the bad file is removed');
+
+	# Control: the same dump with only true hashes loads.
+	sql("SELECT ${P}_reset()");
+	rec(5101);
+	rec(q{5102, ARRAY['k', 'v']});
+	$log = restart('fast');
+	like($log, qr/loaded 2 of 2 saved entries/, 'tags_hash: true hashes load');
+	is(entries(), 2, 'tags_hash: both entries are back');
+}
+
 # ----------------------------------------------------------- save = off
 {
 	sql("SELECT ${P}_reset()");

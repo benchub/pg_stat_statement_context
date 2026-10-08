@@ -22,6 +22,20 @@ is( $pre->safe_psql('postgres',
 	'1.0', 'CREATE EXTENSION works when preloaded');
 is($pre->safe_psql('postgres', $qid_sql), 't',
 	'EnableQueryId(): compute_query_id = auto computes query IDs when preloaded');
+
+# PG18+: PG_MODULE_MAGIC_EXT names the library and its version (the
+# control file's default_version, which the Makefile passes as
+# PSSC_EXT_VERSION), so pg_get_loaded_modules() identifies it.
+SKIP:
+{
+	skip 'pg_get_loaded_modules() is PostgreSQL 18+', 1 if $pre->pg_version < 18;
+	is( $pre->safe_psql('postgres',
+			q{SELECT string_agg(coalesce(module_name, '?') || '|' || coalesce(version, '?'), ',')
+			  FROM pg_get_loaded_modules()
+			  WHERE file_name ~ '^pg_stat_statement_context\.(so|dylib|dll)$'}),
+		'pg_stat_statement_context|1.0',
+		'pg_get_loaded_modules() shows the module name and version');
+}
 $pre->stop;
 my $log = slurp_file($pre->logfile);
 unlike($log, qr/PANIC|FATAL|terminated by signal/, 'preloaded server log is clean');
