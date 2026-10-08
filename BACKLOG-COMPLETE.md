@@ -1679,6 +1679,18 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 **Open questions:** none
 **Status:** done
 
+### 20261008-092913-2: Isolate Docker test image tags per worktree
+
+**Description:** `scripts/docker-test.sh` tags images as `pg_stat_statement_context-test:pg<major>` for every checkout. When builders work in parallel worktrees (CLAUDE.md §7), one worktree's image build can replace another's between its build and its `docker run`. A test run could then exercise a different branch's Dockerfile or module list. Item 20261008-065635-7 saw this: the shared tags lost their module list file after another worktree rebuilt them. Make image tags unique per checkout, for example by adding a short hash of the checkout path or of the Dockerfile inputs. Keep CI behaviour unchanged, and provide a way to prune stale images.
+
+**Acceptance criteria:**
+- Two worktrees with different Dockerfiles can build and run the same major at the same time, and each run uses its own image. Test this with a script check that derives the tag for two paths and asserts they differ, plus a manual parallel run recorded in the item.
+- `docs/` or `scripts/` usage text explains the tag scheme and the prune command.
+
+**Depends on:** 20261008-065635-3 (both edit `scripts/docker-test.sh`)
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

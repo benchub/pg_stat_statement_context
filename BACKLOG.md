@@ -53,7 +53,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
-| 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | ready |
 | 20261008-120000-1 | Make timing-sensitive TAP checks robust under heavy load | 20261008-065635-6, 20261008-065635-9 | no | ready |
 | 20261008-121828-1 | 038: verify pgbench writers are really alive, and check their exit status | 20261008-065635-6 | no | ready |
 | 20261008-125932-1 | make smoke: no false overcount when rerun after bucket expiry | 20261008-065635-12 | no | ready |
@@ -265,24 +264,13 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 **Status:** blocked-on-deps
 
 
-### 20261008-092913-2: Isolate Docker test image tags per worktree
-
-**Description:** `scripts/docker-test.sh` tags images as `pg_stat_statement_context-test:pg<major>` for every checkout. When builders work in parallel worktrees (CLAUDE.md §7), one worktree's image build can replace another's between its build and its `docker run`. A test run could then exercise a different branch's Dockerfile or module list. Item 20261008-065635-7 saw this: the shared tags lost their module list file after another worktree rebuilt them. Make image tags unique per checkout, for example by adding a short hash of the checkout path or of the Dockerfile inputs. Keep CI behaviour unchanged, and provide a way to prune stale images.
-
-**Acceptance criteria:**
-- Two worktrees with different Dockerfiles can build and run the same major at the same time, and each run uses its own image. Test this with a script check that derives the tag for two paths and asserts they differ, plus a manual parallel run recorded in the item.
-- `docs/` or `scripts/` usage text explains the tag scheme and the prune command.
-
-**Depends on:** 20261008-065635-3 (both edit `scripts/docker-test.sh`)
-**Open questions:** none
-**Status:** ready
-
 ### 20261008-120000-1: Make timing-sensitive TAP checks robust under heavy load
 
 **Description:** Seen on 2026-10-08 while 5 or more Docker cells ran at once on one host. Each passed on rerun.
 - `test/t/006_regex.pl` tests 328 and 332 (item 20261008-065635-1): "normalize rule, check hook: the attempt was stopped mid-compile and retried" and "attempt expired mid-compile, retried". On `--assert 14` it got `1|0` (one attempt, none stopped) instead of `2|1`. It passed in 2 of 2 reruns. The deadline probably didn't fire mid-compile under CPU contention: the compile finished first, or the deadline expired before the compile started. Make the injection deterministic (for example, a test hook that holds the compile until the deadline has fired), rather than relying on wall-clock timing.
 - `test/t/017_lifecycle.pl` utility-time parity with pgss failed once on PGDG 17 (2.42 ms vs 0.01 ms, 2.0 ms slack), despite the rerun logic from 20261006-220356-1. Check whether that rerun path covered this case, and if it did, why it failed anyway.
 - `test/t/040_upgrade_uninstall.pl` (item 20261008-065635-9) excludes every `FATAL` from its "no crash" check. Once 20261008-065635-6 lands with a precise crash-signature check for 028, use the same check in 040.
+- `test/t/001_load.pl` (release build) failed once on PGDG 14 on 2026-10-08, while 3 builders ran Docker cells at the same time. The server log had a `FATAL` from fast shutdown terminating a psql backend that was still connected. It passed on rerun. Use the precise crash check (`no_crash_ok` in `PsscTest.pm`, from 20261008-065635-6) instead of a check that rejects any FATAL, or make sure the clients disconnect before shutdown.
 
 **Acceptance criteria:**
 - Each test passes 20 times in a row on its cell while two other cells run at the same time (to simulate load), and still detects the failure it exists to catch, shown by a mutation.
