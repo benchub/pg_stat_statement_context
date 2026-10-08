@@ -122,6 +122,19 @@ def spread_pct(xs):
     return 0.0 if len(xs) < 2 or not m else (max(xs) - min(xs)) / m * 100.0
 
 
+def run_meta(measured, plan_row):
+    """The metadata of one run: its plan row (scenario, config, block, ...)
+    overlaid with what was measured. The row's check specification is kept as
+    check_spec; "checks" is the measured result."""
+    if not plan_row:
+        return dict(measured)
+    m = dict(plan_row)
+    if "checks" in m:
+        m["check_spec"] = m.pop("checks")
+    m.update(measured)
+    return m
+
+
 def analyze_run(logs, pgbench_out, meta, interval_us, offset_us, window_us):
     ends, lats = [], []
     for path in logs:
@@ -561,7 +574,7 @@ def main(argv):
         meta = json.loads(a.meta)
         if a.plan:
             with open(a.plan) as f:
-                meta.update(json.load(f)[a.seq])
+                meta = run_meta(meta, json.load(f)[a.seq])
         res = analyze_run(a.logs, a.pgbench_out, meta, interval_us,
                           (a.offset_s * 1_000_000) % interval_us, int(round(a.window_ms * 1000)))
         with open(a.out, "w") as f:

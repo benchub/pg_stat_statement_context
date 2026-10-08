@@ -123,7 +123,7 @@ for line in open(os.path.join(out, "runs.jsonl")):
 quiet = ("other containers at start: %s; at end: %s; CPU used outside the benchmark container during each run "
          "measured from the VM's /proc/stat: max %.2f cores, median %.2f (runs over ${BENCH_MAX_FOREIGN:-0.75} cores are retried)") % (
     "${OTHERS_START:-none}", "${OTHERS_END:-none}", max(foreign or [0]), sorted(foreign or [0])[len(foreign or [0]) // 2])
-camp = {"commit": "$COMMIT", "dirty": $DIRTY, "date": "$(date -u +%Y-%m-%d)", "host": """$HOST""",
+camp = {"commit": "$COMMIT", "dirty": "$DIRTY" == "true", "date": "$(date -u +%Y-%m-%d)", "host": """$HOST""",
         "docker": """$DOCKER""", "image": "$IMAGE", "pg_version": c["pg_version"], "kernel": c["kernel"],
         "build": "release (make, no PSSC_TESTING)", "server_cpus": c["server_cpus"], "client_cpus": c["client_cpus"],
         "ncpu": c["ncpu"], "blocks": $BLOCKS, "duration_s": $DURATION, "warmup_s": $WARMUP, "seed": $SEED,

@@ -162,6 +162,16 @@ class Report(unittest.TestCase):
             self.assertAlmostEqual(res["server_cores"], 0.75)
 
 
+class RunMeta(unittest.TestCase):
+    def test_measured_meta_wins_over_plan_row(self):
+        row = {"seq": 3, "scenario": "ro-simple-c5", "config": "ext", "checks": "tagged:1", "block": 2}
+        m = analyze.run_meta({"checks": {"tagged_calls": 10}, "txns": 10}, row)
+        self.assertEqual(m["checks"], {"tagged_calls": 10})
+        self.assertEqual(m["check_spec"], "tagged:1")
+        self.assertEqual((m["scenario"], m["config"], m["block"], m["txns"]), ("ro-simple-c5", "ext", 2, 10))
+        self.assertEqual(analyze.run_meta({"a": 1}, None), {"a": 1})
+
+
 class Stats(unittest.TestCase):
     def test_t_quantile_known(self):
         # Two-sided 95% critical values of Student's t (standard tables).

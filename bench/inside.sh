@@ -60,7 +60,7 @@ EXT=pg_stat_statement_context
 
 # The CPUs this container may use (honors docker run --cpuset-cpus).
 expand_cpus() {
-	local IFS=, part out=()
+	local IFS=$', \n' part out=()
 	for part in $1; do
 		if [[ $part == *-* ]]; then out+=($(seq "${part%-*}" "${part#*-}")); else out+=("$part"); fi
 	done
@@ -311,8 +311,8 @@ check_run() {
 }
 
 # Runs the exporter recipe's queries (docs/integrations/postgres_exporter)
-# every $1 s during the measured run, the first after half an interval (so a
-# 15 s reader reads inside a shorter run too), each from a new connection
+# every $1 s during the measured run, the first after half an interval or
+# half the run, whichever is shorter (so a 15 s reader reads in short runs too), each from a new connection
 # like a scrape; then writes "<reads> <rows returned>".
 READER_OUT=$WORK/reader.out
 start_reader() {
@@ -320,7 +320,8 @@ start_reader() {
 	(
 		start=$(date +%s%N) n=0 rows=0
 		end=$((start + DURATION * 1000000000))
-		next=$((start + every * 500000000))
+		first=$((every < DURATION ? every : DURATION))
+		next=$((start + first * 500000000))
 		while :; do
 			now=$(date +%s%N)
 			[ "$next" -lt "$end" ] || break
