@@ -54,14 +54,13 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261008-065635-3 | Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation | none | no | ready |
 | 20261008-065635-5 | Broader memory-checker coverage | none | no | ready |
 | 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | blocked-on-deps |
-| 20261008-065635-7 | Hook coexistence tests and a pg_stat_statements parity checklist | none | no | ready |
 | 20261008-065635-8 | Managed-service operator guide: privileges, parameter groups, troubleshooting | 20261008-065635-2 | no | ready |
 | 20261008-065635-9 | Upgrade, downgrade and uninstall procedures | 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-11 | Cardinality pressure guidance: caps vs tag-set combinations | 20261008-065635-2 | no | ready |
 | 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
-| 20261008-092913-1 | Warn at startup when pg_stat_monitor is loaded after this extension | 20261008-065635-7 | no | blocked-on-deps |
+| 20261008-092913-1 | Warn at startup when pg_stat_monitor is loaded after this extension | 20261008-065635-7 | no | ready |
 | 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | blocked-on-deps |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
@@ -271,20 +270,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 **Open questions:** none
 **Status:** blocked-on-deps
 
-### 20261008-065635-7: Hook coexistence tests and a pg_stat_statements parity checklist
-
-**Description:** HYG-2, HYG-9, TST-7 and TST-8.
-- The extension chains the planner/executor/utility hooks correctly, but is tested only next to `pg_stat_statements`. Add TAP tests that preload it together with `auto_explain` (contrib, always available; `log_analyze = on`, `log_nested_statements = on`), in both library orders, and check that recording and auto_explain output both still work. In the Docker test images, add `pgaudit`, `pg_hint_plan` and `pg_stat_monitor` where PGDG packages exist for the version. Test each one with pgss first and this extension after it. Skip cleanly (with a visible message) when a package is unavailable.
-- Add a maintainers' checklist (for example `docs/maintaining.md`) listing the pg_stat_statements behaviors this extension mirrors, with file/function references on both sides: nesting rules, which utility statements count, the GUCs read by name, and the queryid handling in `src/compat.h`, `src/utility.c` and `src/context.c`. Say what to re-check when a new PG minor or major version ships.
-- CI tests only the latest minor release of each major (TST-8). Add one extra CI cell per major, on the oldest minor release still published by PGDG (or easily buildable from source), if feasible. If that isn't feasible, document the policy.
-
-**Acceptance criteria:**
-- The coexistence tests pass on PG 14–18 for every package available. The checklist exists and is linked from DESIGN.md §9 / the README development section.
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
-
 ### 20261008-065635-8: Managed-service operator guide: privileges, parameter groups, troubleshooting
 
 **Description:** DOC-1, DOC-2, DOC-3, DOC-8, DOC-13 and SEC-10. The docs assume superuser, `ALTER SYSTEM` and `postgresql.conf`. Add a guide (for example `docs/managed-services.md`, linked from the README) for environments where the administrator is not superuser and settings are applied through a provider's parameter groups:
@@ -405,7 +390,7 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 
 **Depends on:** 20261008-065635-7
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261008-092913-2: Isolate Docker test image tags per worktree
 

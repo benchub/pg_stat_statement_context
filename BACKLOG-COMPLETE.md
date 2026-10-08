@@ -1513,6 +1513,20 @@ The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-7: Hook coexistence tests and a pg_stat_statements parity checklist
+
+**Description:** HYG-2, HYG-9, TST-7 and TST-8.
+- The extension chains the planner/executor/utility hooks correctly, but is tested only next to `pg_stat_statements`. Add TAP tests that preload it together with `auto_explain` (contrib, always available; `log_analyze = on`, `log_nested_statements = on`), in both library orders, and check that recording and auto_explain output both still work. In the Docker test images, add `pgaudit`, `pg_hint_plan` and `pg_stat_monitor` where PGDG packages exist for the version. Test each one with pgss first and this extension after it. Skip cleanly (with a visible message) when a package is unavailable.
+- Add a maintainers' checklist (for example `docs/maintaining.md`) listing the pg_stat_statements behaviors this extension mirrors, with file/function references on both sides: nesting rules, which utility statements count, the GUCs read by name, and the queryid handling in `src/compat.h`, `src/utility.c` and `src/context.c`. Say what to re-check when a new PG minor or major version ships.
+- CI tests only the latest minor release of each major (TST-8). Add one extra CI cell per major, on the oldest minor release still published by PGDG (or easily buildable from source), if feasible. If that isn't feasible, document the policy.
+
+**Acceptance criteria:**
+- The coexistence tests pass on PG 14–18 for every package available. The checklist exists and is linked from DESIGN.md §9 / the README development section.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
