@@ -18,6 +18,7 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use PsscTest;
 
 my $P = 'pg_stat_statement_context';
 
@@ -170,7 +171,7 @@ for my $c ([ 'an older format version', 4, pack('L', $format - 1) ],
 		like($log, qr/The file has format $f, .*expected format $format,/,
 			"$what: the LOG detail gives both formats");
 	}
-	unlike($log, qr/PANIC|terminated by signal/, "$what: no crash");
+	no_crash_ok($log, "$what: no crash");
 	is(calls('keep'), 0, "$what: the store starts empty");
 	ok(!-e $DUMP, "$what: the file is removed");
 }
@@ -224,7 +225,6 @@ run_tagged('stale', 4);
 }
 
 $node->stop;
-unlike(slurp_file($node->logfile), qr/PANIC|terminated by signal/,
-	'the server log is clean');
+no_crash_ok(slurp_file($node->logfile), 'the server log is clean');
 
 done_testing();

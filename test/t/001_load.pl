@@ -5,6 +5,8 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use IPC::Run;
+use PsscTest;
 
 my $qid_sql = q{SELECT coalesce(query_id, 0) <> 0 FROM pg_stat_activity WHERE pid = pg_backend_pid();};
 
@@ -37,9 +39,22 @@ SKIP:
 		'pg_stat_statement_context|1.0',
 		'pg_get_loaded_modules() shows the module name and version');
 }
+# A client still connected at shutdown: its backend logs the benign FATAL
+# "terminating connection due to administrator command" (backlog
+# 20261008-120000-1: under load, even a safe_psql backend can still be
+# exiting when the fast shutdown comes). The log check must not take that
+# for a crash.
+my ($cin, $cout, $cerr) = ("SELECT 'connected';\n", '', '');
+my $client = IPC::Run::start([ 'psql', '-XAtq', '-d', $pre->connstr('postgres') ],
+	'<', \$cin, '>', \$cout, '2>', \$cerr, IPC::Run::timeout(180));
+$client->pump until $cout =~ /^connected$/m;
 $pre->stop;
+$cin .= "\\q\n";
+$client->finish;
 my $log = slurp_file($pre->logfile);
-unlike($log, qr/PANIC|FATAL|terminated by signal/, 'preloaded server log is clean');
+like($log, qr/FATAL:\s+terminating connection due to administrator command/,
+	'a client connected at shutdown was terminated');
+no_crash_ok($log, 'preloaded server log is clean');
 
 # Not preloaded: LOAD must not crash and must not enable query IDs.
 my $nopre = PostgreSQL::Test::Cluster->new('nopreload');
@@ -53,6 +68,6 @@ is($out, "f\n42", 'LOAD without preload is a no-op and the session survives');
 is($nopre->safe_psql('postgres', 'SELECT 1'), '1', 'server still up after LOAD');
 $nopre->stop;
 $log = slurp_file($nopre->logfile);
-unlike($log, qr/PANIC|terminated by signal/, 'no-preload server log is clean');
+no_crash_ok($log, 'no-preload server log is clean');
 
 done_testing();
