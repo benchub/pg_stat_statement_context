@@ -47,7 +47,7 @@ Rows, buffers, WAL, I/O timing, JIT, min/max/mean/stddev and planning time are n
 
 ## Statistics survive only clean restarts
 
-The statistics live in shared memory. With [`save`](configuration.md#save) on (the default) they are saved at a clean shutdown and loaded at the next start, but they are lost after a crash or an immediate shutdown, and when `bucket_interval`, `bucket_count` or the extension version changes. Exemplars are never saved. The history covers only the last `bucket_count × bucket_interval`.
+The statistics live in shared memory. With [`save`](configuration.md#save) on (the default) they are saved at a clean shutdown and loaded at the next start, but they are lost after a crash or an immediate shutdown, and when `bucket_interval`, `bucket_count` or the extension version changes. Exemplars are never saved. The history covers only the last `bucket_count × bucket_interval`. [Upgrading](upgrading.md#what-happens-to-the-saved-statistics) lists every case, including upgrades and `pg_upgrade`.
 
 ## Replicas and failover
 

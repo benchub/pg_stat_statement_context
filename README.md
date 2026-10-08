@@ -69,6 +69,8 @@ CREATE EXTENSION pg_stat_statement_context;
 
 Statistics are collected for **all** databases of the cluster as soon as the library is preloaded; `CREATE EXTENSION` only installs the views and functions.
 
+To upgrade, move to a new PostgreSQL major with `pg_upgrade`, or uninstall, see [docs/upgrading.md](docs/upgrading.md).
+
 ### Load order
 
 `pg_stat_statements` clears the query ID of utility statements (DDL, `VACUUM`, ...) before it calls the next `ProcessUtility` hook, and so does `pg_stat_monitor`. The library listed last installs the outermost hook, so `pg_stat_statement_context` must be listed **after** both of them: `'pg_stat_statements, pg_stat_monitor, pg_stat_statement_context'` (leave out the ones you don't use). If the order is wrong, the server logs at startup, once for each library listed after `pg_stat_statement_context`:
@@ -132,6 +134,7 @@ SELECT pg_stat_statement_context_extract(
 | [docs/limitations.md](docs/limitations.md) | Prepared statements, scanner caveats, PG14/15 utility query IDs, failed statements, statistics across restarts, [replicas and failover](docs/limitations.md#replicas-and-failover) (per-instance histories), PII, managed providers. |
 | [docs/integrations/](docs/integrations/README.md) | Recipes for postgres_exporter, sql_exporter and the OpenTelemetry Collector, a Grafana dashboard, a monitoring role, and the metric semantics (gauges, `toplevel`, cardinality). |
 | [docs/managed-services.md](docs/managed-services.md) | Running without superuser on a managed service: what each GUC's context means with parameter groups, raw parameter-group values for the DSL settings, who can call `_reset()`/`_extract()` and read the views, and a SQL-only troubleshooting checklist. |
+| [docs/upgrading.md](docs/upgrading.md) | Upgrading (library-only vs `ALTER EXTENSION ... UPDATE`), what needs a restart, when saved statistics are discarded, `pg_upgrade`, downgrading, uninstalling cleanly, and identifying the loaded build. |
 | [docs/benchmarks.md](docs/benchmarks.md) | pgbench overhead and latency measurements against pg_stat_statements alone: the method, results for PG 18 and PG 14, findings (bucket boundaries, IN lists, eviction), and how to re-run them. |
 
 ## Testing

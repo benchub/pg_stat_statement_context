@@ -1,10 +1,11 @@
 # Maintaining pg_stat_statement_context
 
-This page is for maintainers. It has three parts:
+This page is for maintainers. It covers:
 
 - the pg_stat_statements (pgss) behaviors this extension mirrors, and where each one lives on both sides;
 - what to re-check when a new PostgreSQL minor or major release ships;
-- how coexistence with other hook-using extensions is tested.
+- how coexistence with other hook-using extensions is tested;
+- the version discipline that keeps upgrades safe.
 
 `DESIGN.md` §3.2, §6.4–6.12 and §9 explain why. This page says *where*.
 
@@ -112,3 +113,11 @@ shared_preload_libraries = 'pg_stat_statements, pg_stat_monitor, pg_stat_stateme
 In that order pgss sits inside pg_stat_monitor and records no utilities. That is pg_stat_monitor's doing and happens without this extension too. 036 pins both orders. The load-order WARNING (`pssc_load_order_wrong`) also reports pg_stat_monitor listed after this extension; `test/t/041_load_order_pgsm.pl` checks it in the server log and, like 036, is skipped unless pg_stat_monitor is installed (and fails if `PSSC_REQUIRE_MODULES` lists it). 014 checks the matcher for pg_stat_monitor without it. If pg_stat_monitor stops zeroing utility queryIds, drop it from `zeroing_libraries`.
 
 When a new release of any of these extensions changes its hooks, re-run 036 against it.
+
+## 5. Version discipline
+
+[docs/upgrading.md](upgrading.md) describes what users see. These rules keep it true:
+
+- **SQL changes go in upgrade scripts.** Since v1.0.0, released install and upgrade scripts are frozen ([DESIGN.md §7](../DESIGN.md#7-sql-interface-v1)). Any change to the SQL surface goes into a new `sql/pg_stat_statement_context--A--B.sql`, together with a `default_version` bump in the `.control` file (the SQL version is the release's `MAJOR.MINOR`). When the version ships, add its scripts to `sql/frozen.sha256`. `scripts/check-frozen-sql.sh` fails if a listed script is edited.
+- **C entry points are versioned, and old symbols are kept.** A function that returns a record or a set carries the SQL version that introduced its signature (`pg_stat_statement_context_1_0`, `_last_bucket_1_0`, `_activity_1_0`, `_info_1_0`, `_counters_1_0`). `_extract` (`jsonb`) and `_reset` (`void`) have fixed signatures and are not versioned. To change a signature or result shape, add a new symbol (`..._1_1`) and point the upgrade script's `CREATE OR REPLACE FUNCTION` at it. Keep the old symbol exported and working: after a restart, the new library serves databases that have not run `ALTER EXTENSION ... UPDATE` yet, and their catalogs still name the old symbol. Add the new symbols to `test/release-exports.txt`. `scripts/check-release-exports.sh` fails if an entry point listed there is missing.
+- **Bump the dump format when the layout changes.** `PSSC_DUMP_FORMAT` (`src/store.c`) must change whenever the statistics file changes: `PsscDumpHeader`, `PsscDumpRecord`, `PsscSlot` (`src/counters.h`), the tag-set encoding, or the record order. The loader also discards files written under another `default_version`, but a patch release keeps the `default_version`. Without a bump, it would read the old layout as the new one, behind a valid checksum. The loader discards a file of any other format (`test/t/040_upgrade_uninstall.pl`, `028_persist.pl`). Keep the header offsets that 028 and 040 patch (asserted with `StaticAssertDecl` in `src/store.c`), and say in the release notes when a release discards saved statistics.

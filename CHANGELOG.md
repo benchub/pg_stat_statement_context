@@ -4,6 +4,10 @@ All notable changes to `pg_stat_statement_context` are recorded here. The format
 
 ## [Unreleased]
 
+### Added
+
+- **Upgrade and uninstall guide** ([docs/upgrading.md](docs/upgrading.md)): library-only and SQL-version upgrades, restarts, when saved statistics are discarded, `pg_upgrade`, downgrading, uninstalling, identifying the loaded build. Maintainers' version discipline in [docs/maintaining.md](docs/maintaining.md#5-version-discipline).
+
 ### Changed
 
 - **Release builds ship no test-only code.** A plain `make` (and the `.deb` packages) builds a library without the debug clock, forced collisions or fault-injection hooks. It exports only `_PG_init`, `Pg_magic_func`, the SQL functions and the reclaim worker's entry point; `scripts/check-release-exports.sh` checks this. `make PSSC_TESTING=1` builds the testing library that the TEST-ONLY modules and the full TAP suite need.
