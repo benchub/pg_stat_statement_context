@@ -16,7 +16,10 @@
 # untagged = skip). The formulas hold only for caps enforced since the last
 # _reset(): after the cap is lowered to 2 (5 values admitted under cap 5) or
 # enabled at 2 after uncapped collection, one query keeps 216 or 144 tag
-# sets, more than (2 + 1)^3 = 27.
+# sets, more than (2 + 1)^3 = 27; so do 5 -> 0 -> 2 without a reset (216,
+# the admissions survive the disabled cap) and a restart at cap 2 with
+# save on (144, the saved entries are restored without a cap check). With
+# save off, the restart restores the bound: 27.
 use strict;
 use warnings;
 
@@ -168,6 +171,53 @@ is(counters(), '144 0 0 0 0 225 0',
 	'cap 2 enabled after uncapped collection: 125 + 19 = 144 entries, not (2 + 1)^3 = 27');
 is(view_shape(), '144 1 5+1 5+1 5+1',
 	'the uncapped values keep their entries next to the 2 admitted values and null');
+
+# Setting a cap to 0 bypasses the caps' table without clearing it: 5 -> 0
+# -> 2 without a _reset() keeps the 5 values admitted under cap 5 and
+# admits no new one. Were the admissions forgotten, cap 2 would admit 1 and
+# 2 of each key only and give 144 tag sets with 3 * 4 * 36 = 432 collapsed.
+sql("SELECT ${P}_reset()");
+$node->append_conf('postgresql.conf', "$P.cardinality_cap = 5\n");
+$node->reload;
+is(sql("SHOW $P.cardinality_cap"), '5', 'cap reloaded to 5');
+flood(5);
+$node->append_conf('postgresql.conf', "$P.cardinality_cap = 0\n");
+$node->reload;
+is(sql("SHOW $P.cardinality_cap"), '0', 'cap reloaded to 0 (none)');
+$node->append_conf('postgresql.conf', "$P.cardinality_cap = 2\n");
+$node->reload;
+is(sql("SHOW $P.cardinality_cap"), '2', 'cap reloaded to 2 after 0');
+flood(6);
+is(counters(), '216 0 0 0 0 108 0',
+	'cap 5 -> 0 -> 2 without a reset: the 5 admitted values are kept, 216 entries, not (2 + 1)^3 = 27');
+is(view_shape(), '216 1 5+1 5+1 5+1',
+	'the admissions made before the cap was disabled still count against cap 2');
+
+# A restart forgets every admission, but with save on the saved entries are
+# loaded back with their tags and no cap check: 125 entries collected at
+# cap 5 survive a restart at cap 2, and cap 2 then admits 1 and 2 of each
+# key, which adds the 19 tag sets with a null as above.
+sql("SELECT ${P}_reset()");
+$node->append_conf('postgresql.conf', "$P.cardinality_cap = 5\n$P.save = on\n");
+$node->reload;
+flood(5);
+$node->append_conf('postgresql.conf', "$P.cardinality_cap = 2\n");
+$node->restart;
+is(counters(), '125 0 0 0 0 0 0',
+	'save on: the 125 entries collected at cap 5 are restored by a restart at cap 2');
+flood(5);
+is(counters(), '144 0 0 0 0 225 0',
+	'restart at cap 2 with restored entries: 125 + 19 = 144 entries, not (2 + 1)^3 = 27');
+is(view_shape(), '144 1 5+1 5+1 5+1',
+	'the restored values keep their entries next to the 2 values admitted after the restart and null');
+
+# With save off nothing is restored, and the restart establishes the bound.
+$node->append_conf('postgresql.conf', "$P.save = off\n");
+$node->restart;
+is(counters(), '0 0 0 0 0 0 0', 'save off: the restart starts with an empty store');
+flood(5);
+is(counters(), '27 0 0 0 0 225 0',
+	'save off, restart at cap 2: (2 + 1)^3 = 27 entries');
 
 $node->stop;
 done_testing();
