@@ -52,15 +52,14 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-1 | Regex compile deadline without signal-handler interception | none | no | ready |
-| 20261008-065635-2 | Bounded, cheap health reads: `_info()` retry bound, counters-only function, exporter recipes | none | no | ready |
 | 20261008-065635-3 | Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation | none | no | ready |
 | 20261008-065635-5 | Broader memory-checker coverage | none | no | ready |
 | 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-7 | Hook coexistence tests and a pg_stat_statements parity checklist | none | no | ready |
-| 20261008-065635-8 | Managed-service operator guide: privileges, parameter groups, troubleshooting | 20261008-065635-2 | no | blocked-on-deps |
+| 20261008-065635-8 | Managed-service operator guide: privileges, parameter groups, troubleshooting | 20261008-065635-2 | no | ready |
 | 20261008-065635-9 | Upgrade, downgrade and uninstall procedures | 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
-| 20261008-065635-11 | Cardinality pressure guidance: caps vs tag-set combinations | 20261008-065635-2 | no | blocked-on-deps |
-| 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | blocked-on-deps |
+| 20261008-065635-11 | Cardinality pressure guidance: caps vs tag-set combinations | 20261008-065635-2 | no | ready |
+| 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
@@ -238,26 +237,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 **Open questions:** none
 **Status:** ready
 
-### 20261008-065635-2: Bounded, cheap health reads: `_info()` retry bound, counters-only function, exporter recipes
-
-**Description:** `pssc_store_get_info()` (`src/store.c` about lines 1392–1451) computes `oldest_bucket` by walking every entry × every bucket slot under the shared store lock. If the watermark moved during the pass, it repeats the whole walk with no iteration limit and no interrupt check (vetter finding N-2). The shipped postgres_exporter recipe (docs/integrations/postgres_exporter/queries.yaml) calls `_info()` three times per scrape, on top of other full scans (about 7 full scans per scrape in all; PERF-1). Fix:
-- Keep `oldest_bucket` exact, but bound the retry: after a small fixed number of passes (e.g. 3), return the result judged against the watermark of the last pass, and document the bounded staleness. Make the walk interruptible, or bound it, so a cancel is serviced promptly. Do not use an unsafe resumable hash iteration across a lock release.
-- Add a cheap counters-only SQL function (for example `pg_stat_statement_context_counters()`, name to be confirmed in review). It returns every `_info()` column that doesn't need the entry walk, takes the lock only for `read_counters_locked()` (or less), and runs in O(1).
-- At the same time, give the `_info()` C entry point a versioned symbol (`..._info_1_0`, like the other SRFs; HYG-4), so later releases can add columns without breaking old catalogs. Add both changes to the unreleased `--1.0.sql` and re-record `sql/frozen.sha256` (owner decision 2026-10-08).
-- Rewrite the exporter recipes in `docs/integrations/` (postgres_exporter, sql_exporter, otel-collector) and the Grafana dashboard so each scrape uses the cheap function for counters, and keeps the number of full-store scans to the minimum needed. Export the cap and exemplar health counters there too: `capped_tags`, `cap_table_full`, `exemplar_values_dropped`, `dropped_records`, `evicted_entries` (DOC-9). Update `test/integrations/check.py` accordingly.
-- Restricted vs public access: give the new function the same ACL as `_info()` (public), unless review finds a reason not to.
-
-**Acceptance criteria:**
-- A deterministic TAP test uses the existing `info_scan_test_hook` (or a new test hook) to keep advancing the watermark during every pass. It shows that `_info()` returns after the bounded number of passes, and fails against the current unbounded loop.
-- A TAP test shows that a `pg_cancel_backend()` during a long `_info()` walk (made long via the hook) cancels it promptly.
-- The new function's values match the corresponding `_info()` columns. A test shows that it does not walk entries: for example a scan-hook counter stays at zero, or timing stays flat as `max_entries` grows.
-- docs/sql-interface.md documents the new function, and docs/integrations recipes use it. `test/integrations/check.py` is updated (it may still not be runnable locally because of the Docker credential helper issue; say so).
-- `scripts/check-frozen-sql.sh` passes with the re-recorded checksum, and the PG 14–18 matrix passes.
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
-
 ### 20261008-065635-3: Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation
 
 **Description:** Findings HYG-3, HYG-8, HYG-12 and SEC-7.
@@ -339,7 +318,7 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 
 **Depends on:** 20261008-065635-2 (the troubleshooting checklist should reference the new counters function)
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261008-065635-9: Upgrade, downgrade and uninstall procedures
 
@@ -374,7 +353,7 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 
 **Depends on:** 20261008-065635-2 (uses the exported health counters)
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261008-065635-12: Managed-server-safe smoke test target
 
@@ -386,7 +365,7 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 
 **Depends on:** 20261008-065635-2
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261008-065635-13: Benchmark requalification on the release commit
 

@@ -1475,6 +1475,26 @@ The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-2: Bounded, cheap health reads: `_info()` retry bound, counters-only function, exporter recipes
+
+**Description:** `pssc_store_get_info()` (`src/store.c` about lines 1392–1451) computes `oldest_bucket` by walking every entry × every bucket slot under the shared store lock. If the watermark moved during the pass, it repeats the whole walk with no iteration limit and no interrupt check (vetter finding N-2). The shipped postgres_exporter recipe (docs/integrations/postgres_exporter/queries.yaml) calls `_info()` three times per scrape, on top of other full scans (about 7 full scans per scrape in all; PERF-1). Fix:
+- Keep `oldest_bucket` exact, but bound the retry: after a small fixed number of passes (e.g. 3), return the result judged against the watermark of the last pass, and document the bounded staleness. Make the walk interruptible, or bound it, so a cancel is serviced promptly. Do not use an unsafe resumable hash iteration across a lock release.
+- Add a cheap counters-only SQL function (for example `pg_stat_statement_context_counters()`, name to be confirmed in review). It returns every `_info()` column that doesn't need the entry walk, takes the lock only for `read_counters_locked()` (or less), and runs in O(1).
+- At the same time, give the `_info()` C entry point a versioned symbol (`..._info_1_0`, like the other SRFs; HYG-4), so later releases can add columns without breaking old catalogs. Add both changes to the unreleased `--1.0.sql` and re-record `sql/frozen.sha256` (owner decision 2026-10-08).
+- Rewrite the exporter recipes in `docs/integrations/` (postgres_exporter, sql_exporter, otel-collector) and the Grafana dashboard so each scrape uses the cheap function for counters, and keeps the number of full-store scans to the minimum needed. Export the cap and exemplar health counters there too: `capped_tags`, `cap_table_full`, `exemplar_values_dropped`, `dropped_records`, `evicted_entries` (DOC-9). Update `test/integrations/check.py` accordingly.
+- Restricted vs public access: give the new function the same ACL as `_info()` (public), unless review finds a reason not to.
+
+**Acceptance criteria:**
+- A deterministic TAP test uses the existing `info_scan_test_hook` (or a new test hook) to keep advancing the watermark during every pass. It shows that `_info()` returns after the bounded number of passes, and fails against the current unbounded loop.
+- A TAP test shows that a `pg_cancel_backend()` during a long `_info()` walk (made long via the hook) cancels it promptly.
+- The new function's values match the corresponding `_info()` columns. A test shows that it does not walk entries: for example a scan-hook counter stays at zero, or timing stays flat as `max_entries` grows.
+- docs/sql-interface.md documents the new function, and docs/integrations recipes use it. `test/integrations/check.py` is updated (it may still not be runnable locally because of the Docker credential helper issue; say so).
+- `scripts/check-frozen-sql.sh` passes with the re-recorded checksum, and the PG 14–18 matrix passes.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
