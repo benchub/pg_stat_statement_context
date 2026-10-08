@@ -58,7 +58,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
 | 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | ready |
-| 20261008-092913-3 | Qualify the cardinality bounds for caps lowered or enabled after collection | 20261008-065635-11 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -332,17 +331,6 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 - `docs/` or `scripts/` usage text explains the tag scheme and the prune command.
 
 **Depends on:** 20261008-065635-3 (both edit `scripts/docker-test.sh`)
-**Open questions:** none
-**Status:** ready
-
-### 20261008-092913-3: Qualify the cardinality bounds for caps lowered or enabled after collection
-
-**Description:** This is leftover from item 20261008-065635-11's final review. `docs/extractors.md` ("Caps bound values, not combinations") gives worst-case tag-set counts of N^k, (N+1)^k and (N+2)^k − 1 using the current `cardinality_cap`. Values admitted earlier keep their slots: `cap_check_gen()` returns KEEP for an admitted value before it checks the current cap. Their entries also stay. So after a cap is lowered, or enabled after uncapped collection, without a `_reset()`, the live tag sets can exceed the formula. For example, five strings plus `null` admitted, then the cap reloaded to 2, leaves six tag sets. Qualify the formulas so they hold only when caps have been enforced at those limits since the last `_reset()` or restart. Otherwise, say that the bound uses the number of admitted values per key (which can be larger). Update the matching sentences in `docs/configuration.md` and `DESIGN.md` §6.1.
-
-**Acceptance criteria:**
-- A TAP case in `test/t/035_cap_combinations.pl` admits values at a higher cap, lowers the cap with a reload, and shows that the live tag sets exceed the formula for the new cap. The docs state that limitation.
-
-**Depends on:** 20261008-065635-11
 **Open questions:** none
 **Status:** ready
 

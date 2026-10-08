@@ -1593,6 +1593,17 @@ The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes
 **Open questions:** none
 **Status:** done
 
+### 20261008-092913-3: Qualify the cardinality bounds for caps lowered or enabled after collection
+
+**Description:** This is leftover from item 20261008-065635-11's final review. `docs/extractors.md` ("Caps bound values, not combinations") gives worst-case tag-set counts of N^k, (N+1)^k and (N+2)^k − 1 using the current `cardinality_cap`. Values admitted earlier keep their slots: `cap_check_gen()` returns KEEP for an admitted value before it checks the current cap. Their entries also stay. So after a cap is lowered, or enabled after uncapped collection, without a `_reset()`, the live tag sets can exceed the formula. For example, five strings plus `null` admitted, then the cap reloaded to 2, leaves six tag sets. Qualify the formulas so they hold only when caps have been enforced at those limits since the last `_reset()` or restart. Otherwise, say that the bound uses the number of admitted values per key (which can be larger). Update the matching sentences in `docs/configuration.md` and `DESIGN.md` §6.1.
+
+**Acceptance criteria:**
+- A TAP case in `test/t/035_cap_combinations.pl` admits values at a higher cap, lowers the cap with a reload, and shows that the live tag sets exceed the formula for the new cap. The docs state that limitation.
+
+**Depends on:** 20261008-065635-11
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
