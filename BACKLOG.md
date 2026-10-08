@@ -50,7 +50,21 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
-| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1 | no | ready |
+| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
+| 20261008-065635-1 | Regex compile deadline without signal-handler interception | none | no | ready |
+| 20261008-065635-2 | Bounded, cheap health reads: `_info()` retry bound, counters-only function, exporter recipes | none | no | ready |
+| 20261008-065635-3 | Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation | none | no | ready |
+| 20261008-065635-4 | Standby, restart and promotion qualification | none | no | ready |
+| 20261008-065635-5 | Broader memory-checker coverage | none | no | ready |
+| 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | blocked-on-deps |
+| 20261008-065635-7 | Hook coexistence tests and a pg_stat_statements parity checklist | none | no | ready |
+| 20261008-065635-8 | Managed-service operator guide: privileges, parameter groups, troubleshooting | 20261008-065635-2 | no | blocked-on-deps |
+| 20261008-065635-9 | Upgrade, downgrade and uninstall procedures | 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
+| 20261008-065635-10 | Consolidated shared-memory sizing guidance | none | no | ready |
+| 20261008-065635-11 | Cardinality pressure guidance: caps vs tag-set combinations | 20261008-065635-2 | no | blocked-on-deps |
+| 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | blocked-on-deps |
+| 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
+| 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -192,9 +206,269 @@ dependencies and is not shown.
 - README install + quick start from a fresh clone on PGDG 14 and 18: PASS.
 - `scripts/test-integrations.sh`: still blocked by the Docker credential helper error.
 
-**Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 (security fix, must land before the tag; the release matrix must be rerun after it); 20261007-133120-1 (per-database settings, owner request 2026-10-07; rerun the matrix after it)
+**Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 (security fix, must land before the tag; the release matrix must be rerun after it); 20261007-133120-1 (per-database settings, owner request 2026-10-07; rerun the matrix after it); 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 (RDS-readiness code/SQL items, owner decision 2026-10-08; rerun the matrix and re-record frozen.sha256 after them)
+**Open questions:** none
+**Status:** blocked-on-deps
+
+---
+
+## RDS-readiness tasks (2026-10-08)
+
+These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an independent vetter; reports were kept in the git-ignored `tmp/review/`). Decisions by the owner on 2026-10-08:
+- Only the code/SQL items (-1, -2, -3) block the v1.0.0 tag (20261005-091225-29). Docs, tests and benchmarks follow later.
+- `v1.0.0` is not tagged, so SQL-surface changes go into the unreleased `--1.0.sql` and `sql/frozen.sha256` is re-recorded, as was done for the 1.1 fold. Check catalog equivalence apart from the intended changes.
+- Benchmarks: the agent writes reproducible scripts and runs them locally in Docker, with caveats. The owner runs them on dedicated Linux x86/Graviton hosts later.
+- `_info()`: keep `oldest_bucket` exact, but bound the retry and add a cheap counters-only function for scrapers.
+- Long-statement scans: measure and document only; no new byte-budget GUC.
+- Per-key caps don't bound tag-set combinations: document it and export the health counters; no new combination-budget feature.
+
+### 20261008-065635-1: Regex compile deadline without signal-handler interception
+
+**Description:** `src/regex_runtime.c` (`compile_deadline_arm`/`_disarm`, about lines 190–330, plus the callers about 400–460) bounds regex compile time. It registers a `USER_TIMEOUT` whose handler sets `QueryCancelPending` and `InterruptPending`. Because that fakes a cancel, it also temporarily replaces the backend's SIGINT and SIGUSR1 handlers with wrappers to tell a "foreign" (genuine) cancel apart from its own, and then clears `QueryCancelPending` by hand. RDS reviewers (SEC-2, HYG-1) flagged the handler replacement and the hand-managed interrupt state as fragile, version-sensitive and unusual next to other extensions. Rework it so that core's signal handlers are never replaced and `QueryCancelPending` is never written:
+- Preferred approach, which the builder must verify on PG 14–18: the deadline handler sets only a private `deadline_fired` flag plus `InterruptPending = true`. PostgreSQL's regex engine polls `INTERRUPTS_PENDING_CONDITION()` (`CANCEL_REQUESTED` in `regcustom.h`) and returns `REG_CANCEL`. After the compile returns, if `deadline_fired` is set, treat the result as a timeout. Then call `CHECK_FOR_INTERRUPTS()` (or leave `InterruptPending` set), so that any genuine cancel, timeout or recovery conflict that arrived meanwhile is processed by core as usual. Confirm that a leftover `InterruptPending` with nothing else pending is harmless.
+- If that turns out to be impossible on some supported version, document exactly why in the code and DESIGN.md, and narrow the current mechanism as much as possible.
+- Also tighten the broad `PG_TRY`/`PG_CATCH` catch-and-continue sites (about lines 623–654, 813–837, 1040–1061; SEC-1). Write down the invariant: the protected code touches only private memory in a scratch context and holds no locks, buffers or resource-owner resources. Rethrow anything outside a short, explicit allowlist of SQLSTATEs (e.g. out of memory, invalid regular expression, program limit exceeded), or justify the policy. Do not add a subtransaction per match.
+
+**Acceptance criteria:**
+- Only test code (if any) calls `sigaction` or writes `QueryCancelPending` in `src/`.
+- The existing regex timeout and cancel tests (test/t/006_regex.pl, 017_lifecycle.pl, etc.) still pass. A new or updated TAP test shows that each of these still behaves correctly during and right after a compile that hits the deadline: a genuine `pg_cancel_backend()`, `statement_timeout`, and (where testable) a recovery-conflict cancel.
+- A pathological pattern is still stopped by the deadline, the backend stays usable, and `regex_compile_failures` counts it.
+- The catch policy is documented in the code. The tests fail if the rework is reverted to swallowing a non-allowlisted error.
+- DESIGN.md and docs/extractors.md (about line 137) are updated if behavior or wording changes. The PG 14–18 matrix passes.
+
+**Depends on:** none
 **Open questions:** none
 **Status:** ready
+
+### 20261008-065635-2: Bounded, cheap health reads: `_info()` retry bound, counters-only function, exporter recipes
+
+**Description:** `pssc_store_get_info()` (`src/store.c` about lines 1392–1451) computes `oldest_bucket` by walking every entry × every bucket slot under the shared store lock. If the watermark moved during the pass, it repeats the whole walk with no iteration limit and no interrupt check (vetter finding N-2). The shipped postgres_exporter recipe (docs/integrations/postgres_exporter/queries.yaml) calls `_info()` three times per scrape, on top of other full scans (about 7 full scans per scrape in all; PERF-1). Fix:
+- Keep `oldest_bucket` exact, but bound the retry: after a small fixed number of passes (e.g. 3), return the result judged against the watermark of the last pass, and document the bounded staleness. Make the walk interruptible, or bound it, so a cancel is serviced promptly. Do not use an unsafe resumable hash iteration across a lock release.
+- Add a cheap counters-only SQL function (for example `pg_stat_statement_context_counters()`, name to be confirmed in review). It returns every `_info()` column that doesn't need the entry walk, takes the lock only for `read_counters_locked()` (or less), and runs in O(1).
+- At the same time, give the `_info()` C entry point a versioned symbol (`..._info_1_0`, like the other SRFs; HYG-4), so later releases can add columns without breaking old catalogs. Add both changes to the unreleased `--1.0.sql` and re-record `sql/frozen.sha256` (owner decision 2026-10-08).
+- Rewrite the exporter recipes in `docs/integrations/` (postgres_exporter, sql_exporter, otel-collector) and the Grafana dashboard so each scrape uses the cheap function for counters, and keeps the number of full-store scans to the minimum needed. Export the cap and exemplar health counters there too: `capped_tags`, `cap_table_full`, `exemplar_values_dropped`, `dropped_records`, `evicted_entries` (DOC-9). Update `test/integrations/check.py` accordingly.
+- Restricted vs public access: give the new function the same ACL as `_info()` (public), unless review finds a reason not to.
+
+**Acceptance criteria:**
+- A deterministic TAP test uses the existing `info_scan_test_hook` (or a new test hook) to keep advancing the watermark during every pass. It shows that `_info()` returns after the bounded number of passes, and fails against the current unbounded loop.
+- A TAP test shows that a `pg_cancel_backend()` during a long `_info()` walk (made long via the hook) cancels it promptly.
+- The new function's values match the corresponding `_info()` columns. A test shows that it does not walk entries: for example a scan-hook counter stays at zero, or timing stays flat as `max_entries` grows.
+- docs/sql-interface.md documents the new function, and docs/integrations recipes use it. `test/integrations/check.py` is updated (it may still not be runnable locally because of the Docker credential helper issue; say so).
+- `scripts/check-frozen-sql.sh` passes with the re-recorded checksum, and the PG 14–18 matrix passes.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
+
+### 20261008-065635-3: Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation
+
+**Description:** Findings HYG-3, HYG-8, HYG-12 and SEC-7.
+- The shipped `.so` contains test-only machinery: a debug clock in shared memory, forced hash collisions, fault-injection and scan test hooks (`*_test_hook`, `pssc_*_test_*`). It also exports about 130 `pssc_*` symbols via `PGDLLEXPORT`, because the test modules in `test/modules/` link against them. Compile the test-only code and the extra exports only in a testing build (for example `make PSSC_TESTING=1`, which defines `PSSC_TESTING`). A default `make`/`make install` produces a release library with no test hooks, exporting only what PostgreSQL needs (`_PG_init`, `Pg_magic_func`, the SQL-callable functions and their `pg_finfo_*`). Have `scripts/docker-test.sh`, `docker/run-tests.sh` and CI build the testing variant for the full suite. Also build the release variant, check its exported-symbol list against a committed allowlist, and run the pg_regress suite plus the TAP tests that need no test module against it. Update the Makefile and `docker/`/`scripts/build-debs.sh`, so that packages are release builds.
+- Build identification: on PG 18+, use `PG_MODULE_MAGIC_EXT(.name = "pg_stat_statement_context", .version = <the version from the Makefile/control file>)`, so that `pg_get_loaded_modules()` identifies the library. Keep plain `PG_MODULE_MAGIC` for 14–17, behind a guard in `src/compat.h`.
+- Upper version guard: `src/compat.h` should `#error` on `PG_VERSION_NUM >= 190000` with a clear message ("not yet validated on PostgreSQL 19"). Make it overridable with an explicit `-DPSSC_ALLOW_UNTESTED_PG`. State "PostgreSQL 14–18" in README.md and the control comment (DOC-14).
+- Recompute `tags_hash` from the loaded tags when reading the persistence file (`src/store.c` loader, about lines 2100–2280). Treat a mismatch like other validation failures: discard with a log message, as today. This is defense in depth (SEC-7).
+
+**Acceptance criteria:**
+- A test (script in `scripts/` run by CI) builds the release variant and fails if `nm -D` shows any symbol outside the allowlist, or any test-hook symbol.
+- The full suite passes on PG 14–18 with the testing build. The pg_regress suite and the module-free TAP tests pass with the release build.
+- On PG 18, `SELECT * FROM pg_get_loaded_modules()` shows the name and version (TAP test). A test shows that the PG 19 guard fires; a compile-only test with a faked `PG_VERSION_NUM` is acceptable.
+- A TAP test in `028_persist.pl` writes a dump whose `tags_hash` doesn't match its tags but whose CRC is valid, and checks that it is rejected and logged. It fails without the recompute.
+- `scripts/check-version-guards.sh` still passes; extend it if needed. README and docs are updated.
+
+**Design notes:** If `PGDLLEXPORT` can't easily be split between the two builds, use a `PSSC_TEST_API` macro that expands to `PGDLLEXPORT` in testing builds and `__attribute__((visibility("hidden")))` otherwise, and build with `-fvisibility=hidden`.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
+
+### 20261008-065635-4: Standby, restart and promotion qualification
+
+**Description:** TST-3 and DOC-4. There is no primary/streaming-standby test. The persistence condition that accepts a clean standby shutdown (`src/store.c` about lines 1874–1875, `DB_SHUTDOWNED_IN_RECOVERY`) can be deleted and `028_persist.pl` still passes. Add a TAP test with a primary and a streaming standby (PostgreSQL::Test::Cluster `init_from_backup` with `has_streaming`) that checks:
+- read-only tagged statements on the standby are recorded in the standby's own store
+- the store is instance-local: the primary's entries don't appear on the standby, and vice versa
+- with `save = on`, a clean standby restart reloads its statistics (the mutation above must make the test fail)
+- after promotion, the new primary keeps recording and its existing in-memory history survives
+- an immediate (crash) shutdown of the standby discards saved statistics as designed
+
+Document the behavior in a new "Replicas and failover" section of docs/limitations.md (or another fitting doc), linked from the README: histories are per instance and not replicated; `shared_preload_libraries` and GUCs must be set on each instance; and what happens on failover.
+
+**Acceptance criteria:**
+- The new TAP test passes on PG 14–18 and fails with the `DB_SHUTDOWNED_IN_RECOVERY` condition removed (state in the commit that this was checked).
+- The docs section exists and is accurate.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
+
+### 20261008-065635-5: Broader memory-checker coverage
+
+**Description:** TST-4, TST-9 and TST-10. Valgrind runs only the pg_regress suite (`docker/run-tests.sh` about lines 188–190 disable TAP under `--valgrind`). The CI SQL fuzz job runs against PGDG builds without assertions (`.github/workflows/ci.yml` about lines 74–78). Long-session memory growth is not tested.
+- Under the existing Valgrind wrapper, run a selected TAP subset that covers the SRFs, eviction, cap races, exemplars and persistence save/reload, for example 007, 009, 024, 028 and 029 (pick a set that finishes in reasonable time). Add it as an opt-in `--valgrind-tap` mode and run it in CI on PG 18.
+- Run the SQL fuzz job against the `--assert` build in CI.
+- Add a bounded-memory soak test: one backend runs, for example, 200k tagged statements in many shapes (nested, utility, prepared, errors), and the test checks that its memory doesn't grow. Use `pg_backend_memory_contexts` (PG14+) to compare TopMemoryContext/CacheMemoryContext totals at fixed points, and allow a small slack. Make it a TAP test that is quick by default and can be run longer via an environment variable.
+- Document the exact coverage in DESIGN.md §9.
+
+**Acceptance criteria:**
+- The new modes run locally via `scripts/docker-test.sh` and are wired into CI, and the TAP subset passes under Valgrind with no errors.
+- The soak test fails if a leak is introduced; check this once with a temporary deliberate per-statement allocation into TopMemoryContext.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
+
+### 20261008-065635-6: Discriminating checksum test and concurrent-reader consistency tests
+
+**Description:** TST-5 and TST-6.
+- `028_persist.pl` about lines 310–318 flips a byte in the middle of the dump. Other validation catches that before the CRC check, so deleting the CRC check (`src/store.c` about line 2272) still passes. Add cases that only the CRC can catch: flip a byte in the checksum itself, and change a counter value inside an entry record so the record stays structurally valid.
+- No test reads the activity view or the stats SRFs while writers run concurrently. Add a TAP stress test: several pgbench clients or background psql sessions run tagged writes while a reader repeatedly checks invariants that hold under concurrency. Examples: in the activity view, each row's tags come from a single publish (have each writer use tags that encode one value twice, and check that the two match); in the SRF, with no expiry (long `bucket_interval`), each entry's `sum(calls)` over live buckets equals `calls_total`. Note: that equality is not a general invariant after expiry.
+- Check (and state in the commit) that the reader tests fail under the reviewer's mutations: removing the activity change-counter retry loop (`src/activity.c` about lines 283–307), and removing the entry spinlock in the snapshot (`src/store.c` about lines 1246–1249). If a mutation can't be detected reliably without being flaky, use deterministic test hooks, or document why.
+
+**Acceptance criteria:**
+- The CRC-deletion mutation makes 028 fail. The new concurrency test passes reliably: run it 20 times on PG 18 with no failures. Each listed mutation is caught, or the commit explains why it can't be.
+
+**Depends on:** 20261008-065635-3 (both touch the persistence loader and its tests)
+**Open questions:** none
+**Status:** blocked-on-deps
+
+### 20261008-065635-7: Hook coexistence tests and a pg_stat_statements parity checklist
+
+**Description:** HYG-2, HYG-9, TST-7 and TST-8.
+- The extension chains the planner/executor/utility hooks correctly, but is tested only next to `pg_stat_statements`. Add TAP tests that preload it together with `auto_explain` (contrib, always available; `log_analyze = on`, `log_nested_statements = on`), in both library orders, and check that recording and auto_explain output both still work. In the Docker test images, add `pgaudit`, `pg_hint_plan` and `pg_stat_monitor` where PGDG packages exist for the version. Test each one with pgss first and this extension after it. Skip cleanly (with a visible message) when a package is unavailable.
+- Add a maintainers' checklist (for example `docs/maintaining.md`) listing the pg_stat_statements behaviors this extension mirrors, with file/function references on both sides: nesting rules, which utility statements count, the GUCs read by name, and the queryid handling in `src/compat.h`, `src/utility.c` and `src/context.c`. Say what to re-check when a new PG minor or major version ships.
+- CI tests only the latest minor release of each major (TST-8). Add one extra CI cell per major, on the oldest minor release still published by PGDG (or easily buildable from source), if feasible. If that isn't feasible, document the policy.
+
+**Acceptance criteria:**
+- The coexistence tests pass on PG 14–18 for every package available. The checklist exists and is linked from DESIGN.md §9 / the README development section.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
+
+### 20261008-065635-8: Managed-service operator guide: privileges, parameter groups, troubleshooting
+
+**Description:** DOC-1, DOC-2, DOC-3, DOC-8, DOC-13 and SEC-10. The docs assume superuser, `ALTER SYSTEM` and `postgresql.conf`. Add a guide (for example `docs/managed-services.md`, linked from the README) for environments where the administrator is not superuser and settings are applied through a provider's parameter groups:
+- For every GUC, give its context (postmaster/sighup/suset/userset) and say what each implies on a managed service: needs a reboot, needs only a reload, needs superuser or a `GRANT SET` (PG15+), or can be set per session. Get these from `src/guc.c` and `src/cardcap.c`; the vetter counted eight SUSET settings.
+- For the DSL GUCs (`extractors`, `normalize`, regex values), show the raw value as typed into a parameter-group field, with no SQL quoting and no postgresql.conf escaping, next to the existing SQL and conf forms. Use the svc/op custom-format example.
+- Correct the "superuser only" wording for `_reset()` and `_extract()`. EXECUTE is revoked from PUBLIC, so the function owner (whoever ran `CREATE EXTENSION`), superusers and explicitly granted roles can call them. Document the `GRANT EXECUTE` pattern, and which roles can read which views (pg_read_all_stats semantics).
+- Add a SQL-only troubleshooting checklist ("the views are empty", "my utility statements are missing", "my settings change didn't apply", "statistics vanished after a restart"). Each item names the SQL to run (`SHOW`, `_info()` counters, `pg_settings`, `pg_file_settings` where permitted, `regex_compile_failures`, `utility_missing_queryid`), and mentions downloading server logs from the provider for log-only diagnostics.
+- Merge the duplicated GUC context lists, and move the misplaced explanatory sentence the docs review found (DOC-13).
+
+**Acceptance criteria:**
+- Each statement about privileges in the new guide is checked by a TAP test or a scripted psql check run in Docker as a NOSUPERUSER role with CREATEDB/CREATEROLE/pg_monitor (the closest stand-in for `rds_superuser`). Keep the script in the repo (for example under `test/`).
+- Every raw parameter-group example, set through `ALTER SYSTEM` with the equivalent quoting, produces the documented `_extract()` output.
+- All relative links resolve.
+
+**Depends on:** 20261008-065635-2 (the troubleshooting checklist should reference the new counters function)
+**Open questions:** none
+**Status:** blocked-on-deps
+
+### 20261008-065635-9: Upgrade, downgrade and uninstall procedures
+
+**Description:** DOC-5 and HYG-10. Document the lifecycle in docs (for example a new "Upgrading and uninstalling" section in README.md or `docs/upgrading.md`):
+- a library-only (binary) upgrade vs an SQL-version upgrade (`ALTER EXTENSION ... UPDATE` in each database)
+- which changes need a restart
+- what happens to saved statistics: the dump is discarded when the SQL `default_version`, the dump format, the PG major version, or layout-affecting settings change (see the `src/store.c` header and version checks, about lines 1785–1846 and 2198–2212)
+- `pg_upgrade` behavior
+- how to remove the extension cleanly (`DROP EXTENSION` in each database, remove it from `shared_preload_libraries`, restart, delete the stats file if present)
+- how to identify the loaded build (`pg_get_loaded_modules()` on PG18 after -3; extversion)
+
+Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) on the version discipline: SQL changes go in upgrade scripts after v1.0.0; C entry points are versioned (`_1_0`) and old symbols are kept; bump the dump format version when the layout changes. Add a test that the library refuses or discards a dump carrying a different format version, if one doesn't exist yet.
+
+**Acceptance criteria:**
+- The procedures are documented and were run by hand once in Docker (install, save stats, drop, uninstall; PG 17→18 `pg_upgrade` with the extension). The results are recorded in the item's progress note.
+- The format-version test exists.
+
+**Depends on:** 20261008-065635-2, 20261008-065635-3
+**Open questions:** none
+**Status:** blocked-on-deps
+
+### 20261008-065635-10: Consolidated shared-memory sizing guidance
+
+**Description:** DOC-6 and PERF-8. The sizing information is spread across the docs, and the worked "about 8.6 MB" example is low (measured: 9,261,312 bytes at the defaults; 75,719,568 bytes at `bucket_count = 288`). Write one sizing section (in docs/configuration.md) with:
+- a formula, derived from `src/store.c` (about lines 230–323), `src/cardcap.c` (about lines 390–465) and `src/activity.c` (about lines 59–93), covering entries × (header + tags + bucket slots), dynahash overhead, exemplars when enabled, the cap table, and the activity slots per `MaxBackends`
+- a table of totals for representative settings: defaults, 24 h of history, `max_entries` 50k, exemplars on, `max_connections` 5000
+- guidance on suitable upper limits for small instances
+
+The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes` should together account for the whole request. If activity memory isn't reported anywhere, either add it to the startup log line (no SQL change), or explain how to compute it.
+
+**Acceptance criteria:**
+- A TAP test checks the documented formula against `_info()` for at least three settings combinations (to within the stated rounding). The docs table is produced by a script or by that test, not typed by hand.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** ready
+
+### 20261008-065635-11: Cardinality pressure guidance: caps vs tag-set combinations
+
+**Description:** DOC-7, SEC-3, SEC-4, PERF-3 and vetter N-1.
+- docs/extractors.md says cardinality caps are counted "server-wide", but by default they are counted per (role, database) (`cardinality_cap_scope = role`). Fix that sentence.
+- Document that per-key caps don't bound tag-set combinations. With k kept keys each capped at N values, a single (role, database, queryid) can still produce up to N^k entries. The vetter reproduced this: cap 5, `max_entries` 100, three default keys, 125 combinations, 25 evictions and zero cap events.
+- Explain how to size for observed combinations; which counters show pressure (`evicted_entries`, `dealloc`, `dropped_records`, `capped_tags`, `cap_table_full`) and what to do when each rises; and the trust implications of the `database`/`server` cap scopes (cross-role membership inference and cap exhaustion). Recommend `role` scope on multi-tenant services.
+
+**Acceptance criteria:**
+- A TAP test reproduces the combination behavior (N^k entries under per-key caps), so the documented claim is pinned down.
+- Docs are updated and cross-linked from docs/configuration.md and the managed-services guide (if -8 has landed; otherwise -8 adds the link).
+
+**Depends on:** 20261008-065635-2 (uses the exported health counters)
+**Open questions:** none
+**Status:** blocked-on-deps
+
+### 20261008-065635-12: Managed-server-safe smoke test target
+
+**Description:** HYG-5. `make installcheck` runs the regression suite, which changes server settings with `ALTER SYSTEM` and then resets them (`test/sql/include/config.sql` about lines 11–17), wiping operator values. 26 of the 32 TAP tests need test-only modules. Neither can be pointed at a provisioned managed instance. Add a `make smoke` (or `installcheck-smoke`) target: it connects to an existing server using the libpq environment, runs as a NOSUPERUSER role with privileges like `rds_superuser`, and changes no global settings. It checks that the library is preloaded, that `CREATE EXTENSION` worked (or creates it if allowed), that `_extract()` behaves (if executable), that tagged statements under the server's current extractor configuration are recorded and visible, and that `_info()` and the counters function work. Add a clear warning in the Makefile and in the README development section that `installcheck` resets global settings and is for disposable clusters only.
+
+**Acceptance criteria:**
+- `make smoke` passes in Docker against a server preloaded with the default configuration, run as a NOSUPERUSER role, and it is exercised in CI. It works whether or not the role may call `_extract()`.
+- A check in the test shows that `pg_file_settings`/`postgresql.auto.conf` is unchanged after the run.
+
+**Depends on:** 20261008-065635-2
+**Open questions:** none
+**Status:** blocked-on-deps
+
+### 20261008-065635-13: Benchmark requalification on the release commit
+
+**Description:** TST-1, TST-2, TST-11, PERF-1, PERF-2, PERF-4, PERF-5 and PERF-11. The numbers in `docs/benchmarks.md` were measured at 22f9e0f, before 19 later commits touched `src/`. They come from a noisy M1 laptop running Docker, and they don't cover prepared statements, writes, high client counts, concurrent readers, multi-entry stores, or long statements. Per the owner's decision (2026-10-08), make the benchmark suite reproducible and complete, run it locally in Docker with clear caveats, and leave the dedicated-hardware runs to the owner.
+- Extend `bench/` with scenarios for:
+  - simple and prepared (`-M prepared`) protocol
+  - read-only and write (pgbench TPC-B-like) workloads
+  - client counts of 1, CPU count, 4× CPU count and (opt-in) 256
+  - pgss-only vs pgss + this extension (untagged skip, tagged, regex/normalize configured)
+  - a pre-populated store with thousands of entries
+  - a periodic reader that runs the exporter recipe's queries every 15 s (and an aggressive 1 s variant)
+  - nested PL/pgSQL loops
+  - long statements (10k-element IN lists, with `position = append` and `position = any`, and with or without a trailing `;`)
+- Record CPU/statement and the p50/p95/p99 latency, plus TPS. Run enough paired, interleaved repetitions to report a confidence interval, not min/max of two pairs.
+- Each run stores its raw results with the commit, the settings and a host description under `bench/results/<date>-<host>/` (committed, small), and `docs/benchmarks.md` is regenerated from them.
+- Add a `bench/README` (or a docs section) with exact instructions for the owner's dedicated Linux x86 and Graviton runs.
+- Rewrite claims in DESIGN.md, the release notes and the README so they match what the data supports. If the local data can't bound the overhead, say so explicitly.
+- Document the long-statement scan costs (`position = any` scans the full text; append without a trailing `;` needs a full `strlen`) and give tuning guidance (`scan_window`, `position`). No new byte-budget GUC (owner decision).
+
+**Acceptance criteria:**
+- `bench/run.sh` (or its successor) runs every scenario from one command. `bench/test_analyze.py` covers the new statistics.
+- `docs/benchmarks.md` is generated from committed raw data at the current commit, and states the caveats. Instructions for dedicated hardware exist.
+
+**Depends on:** 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 (benchmark the code that will ship)
+**Open questions:** none
+**Status:** blocked-on-deps
+
+### 20261008-065635-14: Release-tree and design-doc cleanup
+
+**Description:** DOC-11, DOC-12, DOC-16, HYG-6 and HYG-7.
+- Mark `DESIGN.md` as describing the implemented v1.0, not a "Draft". Fix its stale passages: roadmap items that have shipped, the planner-hook description, and the "Repository layout (proposed)" section. Make sure §11 is still accurate.
+- Make user docs stop pointing into `research/`, `BACKLOG*.md` or other development material, or mark those links clearly as developer references.
+- Add `.gitattributes` `export-ignore` rules so `git archive` and release tarballs leave out agent and planning files (`CLAUDE.md`, `BACKLOG*.md`, `worktrees/`, `tmp/`) and, if the owner agrees in review, `research/` and `bench/results/`. Check that `make`/`make install`/the tests still work from a `git archive` tarball.
+- Remove backlog-ID citations from source comments where they don't help a maintainer. Keep the explanation; drop the ID.
+- Add a short glossary to the README or docs (tag, tag set, context, key, extractor, frame, bucket).
+- HYG-7 (owner action, not agent work): copyright ownership and contributor attestation for an MIT-licensed project developed with AI assistance. Add a `NOTICE`/`AUTHORS` stub and a line in README about who holds the copyright, wording to be supplied by the owner. Leave a TODO for the owner in the item if they haven't supplied it.
+
+**Acceptance criteria:**
+- `git archive HEAD | tar -t` leaves out the listed files. A clean build and `make installcheck` from the extracted tarball pass in Docker.
+- No user doc links to development-only files, unless the link is labeled as such. The DESIGN.md status and sections are accurate.
+
+**Depends on:** 20261008-065635-13 (so DESIGN.md benchmark claims are rewritten once)
+**Open questions:** none
+**Status:** blocked-on-deps
+
 
 ---
 
