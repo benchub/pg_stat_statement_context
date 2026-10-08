@@ -92,6 +92,8 @@ The statistics are kept. Example log line: `loaded 2 of 2 saved entries from "pg
 
 Until step 3 is done in a database, the database has the old version's views and functions, without anything the new version adds.
 
+An upgrade script normally only adds things or extends views with new columns at the end, so your own views and functions over the extension's views keep working. If a release must remove or retype a column, its upgrade script drops and recreates the affected views. `ALTER EXTENSION ... UPDATE` then fails with `cannot drop ... because other objects depend on it` while your own objects depend on those views, and it changes nothing. The release notes say when this applies. Drop your dependent objects before the update and recreate them after it.
+
 ## Downgrading
 
 - **Library:** install the older package and restart. The saved statistics are discarded whenever the SQL version or dump format differs. Downgrading from a library with SQL version `1.1` to one with `1.0` logged `The file has format 1, PostgreSQL 18, extension version "1.1"; expected format 1, PostgreSQL 18, extension version "1.0".` The older library has only the entry points of its own and older SQL versions. A database that was updated to a newer SQL version must be brought back first (next item).
