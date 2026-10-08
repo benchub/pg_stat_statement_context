@@ -3,6 +3,7 @@
 `pg_stat_statement_context` is a PostgreSQL extension that attributes query execution statistics to the **application context** carried in SQL comments, such as the comments emitted by [marginalia], Rails `query_log_tags`, and [SQLCommenter]. Clients without these libraries to decorate their queries with comments can supply the context to `pg_stat_statement_context` via `application_name` or `SET` commands.
 
 The familiar `pg_stat_statements` answers *"which query fingerprints are expensive?"*.
+
 **This** extension answers *"which parts of my application run query fingerprint X, how often, and at what cost?"*.
 
 For example:
@@ -37,6 +38,7 @@ How it works, in short: In the executor and utility hooks, the `pg_stat_statemen
 
 ## Installation
 
+### Compile
 Build and install with PGXS:
 
 ```sh
@@ -46,8 +48,10 @@ make install # may need sudo
 # for a specific server: make PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config install
 ```
 
+### Binaries
 To build Ubuntu 24.04 (noble) `.deb` packages for PostgreSQL 14–18 from PGDG, on amd64 and arm64, run `scripts/build-debs.sh`. It needs Docker, builds the committed tree, and writes the packages to `binaries/`. Each package is named `postgresql-<major>-pg-stat-statement-context`.
 
+### Configure PostgreSQL
 Add the library to `shared_preload_libraries` in `postgresql.conf`. If you use `pg_stat_statements` too, it **must come first**:
 
 ```ini
@@ -84,7 +88,7 @@ Obviously, if you have `compute_query_id = off` instead, `pg_stat_statement_cont
 ## Quick start
 
 With the default configuration, the extension:
-* reads SQLCommenter and marginalia comments appended to the statement
+* reads SQLCommenter and marginalia comments **appended** to the statement
 * keeps the tags `action`, `controller`, and `job`
 * ignores statements that carry none of those tags
 
@@ -98,7 +102,7 @@ SELECT queryid, toplevel, tags, calls, total_exec_time
  ORDER BY calls DESC;
 ```
 
-The first two statements use different comment formats but produce the same tag set, so they land in the same row with `calls = 2`. For the third query, the `request_id` tag isn't in the default allowlist and is therefore ignored. Note that `SELECT 1` and `SELECT 2` are the same query fingerprint (`SELECT $1`). Your query IDs and timings will differ:
+The first two statements use different comment formats but produce the same tag set, so they land in the same row with `calls = 2`. For the third query, the `request_id` tag isn't in the default allowlist and is therefore ignored. Note that `SELECT 1` and `SELECT 2` are the same query fingerprint (`SELECT $1`). Your query IDs and timings will differ, but this should be the shape of what you see:
 
 ```
        queryid       | toplevel |                    tags                    | calls | total_exec_time
@@ -141,8 +145,6 @@ bench/run.sh --major 18 [--quick]     # pgbench overhead benchmarks in Docker (d
 ```
 
 [fuzz/README.md](fuzz/README.md) describes the fuzz targets, their invariants and how to replay a failure.
-
-CI (`.github/workflows/ci.yml`) runs the same `scripts/docker-test.sh` commands for its Linux cells (PG 14–18 from PGDG, assert builds of 14–18, Valgrind on 18), runs `docker/run-tests.sh` directly on macOS against PostgreSQL built by `docker/build-postgres.sh` (after `scripts/test-run-tests.sh`, a quick self-test of the harness on the host), and runs a short fuzz smoke job. The TAP tests use the PG 15+ module names (`PostgreSQL::Test::Cluster`/`Utils`). PG 14 ships them as aliases of `PostgresNode`/`TestLib` from 14.3 but only installs them from 14.6, so 14.0–14.5 can't run the TAP suite.
 
 `DESIGN.md` describes the design and its rationale in detail.
 
