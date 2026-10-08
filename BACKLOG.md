@@ -50,16 +50,15 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
-| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
-| 20261008-065635-3 | Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation | none | no | ready |
+| 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-5 | Broader memory-checker coverage | none | no | ready |
-| 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | blocked-on-deps |
-| 20261008-065635-9 | Upgrade, downgrade and uninstall procedures | 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
+| 20261008-065635-6 | Discriminating checksum test and concurrent-reader consistency tests | 20261008-065635-3 | no | ready |
+| 20261008-065635-9 | Upgrade, downgrade and uninstall procedures | 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-12 | Managed-server-safe smoke test target | 20261008-065635-2 | no | ready |
-| 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | blocked-on-deps |
+| 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
 | 20261008-092913-1 | Warn at startup when pg_stat_monitor is loaded after this extension | 20261008-065635-7 | no | ready |
-| 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | blocked-on-deps |
+| 20261008-092913-2 | Isolate Docker test image tags per worktree | 20261008-065635-3 | no | ready |
 | 20261008-092913-3 | Qualify the cardinality bounds for caps lowered or enabled after collection | 20261008-065635-11 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
@@ -204,7 +203,7 @@ dependencies and is not shown.
 
 **Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 (security fix, must land before the tag; the release matrix must be rerun after it); 20261007-133120-1 (per-database settings, owner request 2026-10-07; rerun the matrix after it); 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 (RDS-readiness code/SQL items, owner decision 2026-10-08; rerun the matrix and re-record frozen.sha256 after them)
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ---
 
@@ -217,27 +216,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - `_info()`: keep `oldest_bucket` exact, but bound the retry and add a cheap counters-only function for scrapers.
 - Long-statement scans: measure and document only; no new byte-budget GUC.
 - Per-key caps don't bound tag-set combinations: document it and export the health counters; no new combination-budget feature.
-
-### 20261008-065635-3: Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation
-
-**Description:** Findings HYG-3, HYG-8, HYG-12 and SEC-7.
-- The shipped `.so` contains test-only machinery: a debug clock in shared memory, forced hash collisions, fault-injection and scan test hooks (`*_test_hook`, `pssc_*_test_*`). It also exports about 130 `pssc_*` symbols via `PGDLLEXPORT`, because the test modules in `test/modules/` link against them. Compile the test-only code and the extra exports only in a testing build (for example `make PSSC_TESTING=1`, which defines `PSSC_TESTING`). A default `make`/`make install` produces a release library with no test hooks, exporting only what PostgreSQL needs (`_PG_init`, `Pg_magic_func`, the SQL-callable functions and their `pg_finfo_*`). Have `scripts/docker-test.sh`, `docker/run-tests.sh` and CI build the testing variant for the full suite. Also build the release variant, check its exported-symbol list against a committed allowlist, and run the pg_regress suite plus the TAP tests that need no test module against it. Update the Makefile and `docker/`/`scripts/build-debs.sh`, so that packages are release builds.
-- Build identification: on PG 18+, use `PG_MODULE_MAGIC_EXT(.name = "pg_stat_statement_context", .version = <the version from the Makefile/control file>)`, so that `pg_get_loaded_modules()` identifies the library. Keep plain `PG_MODULE_MAGIC` for 14–17, behind a guard in `src/compat.h`.
-- Upper version guard: `src/compat.h` should `#error` on `PG_VERSION_NUM >= 190000` with a clear message ("not yet validated on PostgreSQL 19"). Make it overridable with an explicit `-DPSSC_ALLOW_UNTESTED_PG`. State "PostgreSQL 14–18" in README.md and the control comment (DOC-14).
-- Recompute `tags_hash` from the loaded tags when reading the persistence file (`src/store.c` loader, about lines 2100–2280). Treat a mismatch like other validation failures: discard with a log message, as today. This is defense in depth (SEC-7).
-
-**Acceptance criteria:**
-- A test (script in `scripts/` run by CI) builds the release variant and fails if `nm -D` shows any symbol outside the allowlist, or any test-hook symbol.
-- The full suite passes on PG 14–18 with the testing build. The pg_regress suite and the module-free TAP tests pass with the release build.
-- On PG 18, `SELECT * FROM pg_get_loaded_modules()` shows the name and version (TAP test). A test shows that the PG 19 guard fires; a compile-only test with a faked `PG_VERSION_NUM` is acceptable.
-- A TAP test in `028_persist.pl` writes a dump whose `tags_hash` doesn't match its tags but whose CRC is valid, and checks that it is rejected and logged. It fails without the recompute.
-- `scripts/check-version-guards.sh` still passes; extend it if needed. README and docs are updated.
-
-**Design notes:** If `PGDLLEXPORT` can't easily be split between the two builds, use a `PSSC_TEST_API` macro that expands to `PGDLLEXPORT` in testing builds and `__attribute__((visibility("hidden")))` otherwise, and build with `-fvisibility=hidden`.
-
-**Depends on:** none
-**Open questions:** none
-**Status:** ready
 
 ### 20261008-065635-5: Broader memory-checker coverage
 
@@ -267,7 +245,7 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 
 **Depends on:** 20261008-065635-3 (both touch the persistence loader and its tests)
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261008-065635-9: Upgrade, downgrade and uninstall procedures
 
@@ -287,7 +265,7 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 
 **Depends on:** 20261008-065635-2, 20261008-065635-3
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261008-065635-12: Managed-server-safe smoke test target
 
@@ -325,7 +303,7 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 
 **Depends on:** 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 (benchmark the code that will ship)
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261008-065635-14: Release-tree and design-doc cleanup
 
@@ -368,7 +346,7 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 
 **Depends on:** 20261008-065635-3 (both edit `scripts/docker-test.sh`)
 **Open questions:** none
-**Status:** blocked-on-deps
+**Status:** ready
 
 ### 20261008-092913-3: Qualify the cardinality bounds for caps lowered or enabled after collection
 

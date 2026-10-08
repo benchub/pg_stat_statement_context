@@ -1560,6 +1560,27 @@ The `_info()` columns `shmem_bytes`, `cap_shmem_bytes` and `exemplar_shmem_bytes
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-3: Release-build hygiene: test-only code out of the shipped library, exports, build identification, load validation
+
+**Description:** Findings HYG-3, HYG-8, HYG-12 and SEC-7.
+- The shipped `.so` contains test-only machinery: a debug clock in shared memory, forced hash collisions, fault-injection and scan test hooks (`*_test_hook`, `pssc_*_test_*`). It also exports about 130 `pssc_*` symbols via `PGDLLEXPORT`, because the test modules in `test/modules/` link against them. Compile the test-only code and the extra exports only in a testing build (for example `make PSSC_TESTING=1`, which defines `PSSC_TESTING`). A default `make`/`make install` produces a release library with no test hooks, exporting only what PostgreSQL needs (`_PG_init`, `Pg_magic_func`, the SQL-callable functions and their `pg_finfo_*`). Have `scripts/docker-test.sh`, `docker/run-tests.sh` and CI build the testing variant for the full suite. Also build the release variant, check its exported-symbol list against a committed allowlist, and run the pg_regress suite plus the TAP tests that need no test module against it. Update the Makefile and `docker/`/`scripts/build-debs.sh`, so that packages are release builds.
+- Build identification: on PG 18+, use `PG_MODULE_MAGIC_EXT(.name = "pg_stat_statement_context", .version = <the version from the Makefile/control file>)`, so that `pg_get_loaded_modules()` identifies the library. Keep plain `PG_MODULE_MAGIC` for 14–17, behind a guard in `src/compat.h`.
+- Upper version guard: `src/compat.h` should `#error` on `PG_VERSION_NUM >= 190000` with a clear message ("not yet validated on PostgreSQL 19"). Make it overridable with an explicit `-DPSSC_ALLOW_UNTESTED_PG`. State "PostgreSQL 14–18" in README.md and the control comment (DOC-14).
+- Recompute `tags_hash` from the loaded tags when reading the persistence file (`src/store.c` loader, about lines 2100–2280). Treat a mismatch like other validation failures: discard with a log message, as today. This is defense in depth (SEC-7).
+
+**Acceptance criteria:**
+- A test (script in `scripts/` run by CI) builds the release variant and fails if `nm -D` shows any symbol outside the allowlist, or any test-hook symbol.
+- The full suite passes on PG 14–18 with the testing build. The pg_regress suite and the module-free TAP tests pass with the release build.
+- On PG 18, `SELECT * FROM pg_get_loaded_modules()` shows the name and version (TAP test). A test shows that the PG 19 guard fires; a compile-only test with a faked `PG_VERSION_NUM` is acceptable.
+- A TAP test in `028_persist.pl` writes a dump whose `tags_hash` doesn't match its tags but whose CRC is valid, and checks that it is rejected and logged. It fails without the recompute.
+- `scripts/check-version-guards.sh` still passes; extend it if needed. README and docs are updated.
+
+**Design notes:** If `PGDLLEXPORT` can't easily be split between the two builds, use a `PSSC_TEST_API` macro that expands to `PGDLLEXPORT` in testing builds and `__attribute__((visibility("hidden")))` otherwise, and build with `-fvisibility=hidden`.
+
+**Depends on:** none
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
