@@ -262,20 +262,47 @@ smoke_fails('app', 'appdb', 'not preloaded (plain role)',
 $node->stop;
 
 # ------------------------------------------------------------ expiry
-# Short buckets (a 6 s live window) and no reclaim: an entry whose buckets
-# have all expired is hidden from the views, but keeps its lifetime
+# Short buckets (an 8-10 s live window) and no reclaim: an entry whose
+# buckets have all expired is hidden from the views, but keeps its lifetime
 # counters until it is reclaimed, and the next write makes it visible again
 # with them.
 $node = PostgreSQL::Test::Cluster->new('smoke_expiry');
 $node->init;
 $node->append_conf('postgresql.conf', qq{shared_preload_libraries = '$P'
 $P.bucket_interval = '2s'
-$P.bucket_count = 3
+$P.bucket_count = 5
 $P.reclaim_worker = off
 });
 $node->start;
 sql(q{CREATE ROLE app LOGIN; CREATE DATABASE appdb});
 sql("CREATE EXTENSION $P", 'appdb');
+
+my $probe_sc = q{SELECT 'pssc_smoke' AS pssc_smoke /*controller='pssc_smoke'*/};
+my $probe_mg = q{SELECT 'pssc_smoke' AS pssc_smoke, 'marginalia' AS pssc_smoke_format /*controller:pssc_smoke*/};
+
+# The lifetime calls of app's two smoke entries made by the smoke runs,
+# whether or not the entries have expired meanwhile: app calls each probe
+# once to make its entry visible again and reads both in the same session,
+# retrying until both were visible at the read; the probe calls made here
+# are not counted.
+my $probe_calls = 0;
+sub smoke_lifetime
+{
+	for (1 .. 10)
+	{
+		my $r = $node->safe_psql('appdb', qq{$probe_sc;
+			$probe_mg;
+			SELECT count(*) || ' ' || coalesce(sum(calls_total), 0)
+			  FROM ${P}_totals WHERE userid = current_user::regrole
+			   AND tags->>'controller' = 'pssc_smoke'},
+			extra_params => [ '-U', 'app' ]);
+		$probe_calls += 2;
+		my ($n, $sum) = (split /\n/, $r)[-1] =~ /^(\d+) (\d+)$/
+		  or die "unexpected output: $r";
+		return $sum - $probe_calls if $n == 2;
+	}
+	die 'the smoke entries were never both visible';
+}
 
 sub wait_smoke_expired
 {
@@ -284,23 +311,29 @@ sub wait_smoke_expired
 		$_[0]);
 }
 
-smoke_passes('app', 'appdb', 'short buckets, first run');
-my $lifetime = smoke_calls('app', 'appdb');
-is($lifetime, 8, 'short buckets: lifetime calls after one run');
+sub smoke_ok
+{
+	my ($name) = @_;
+	my ($rc, $out, $err) = smoke('app', 'appdb');
+	is($rc, 0, "$name: exit 0");
+	unlike($out . $err, qr/FAIL|ERROR/, "$name: no FAIL or ERROR");
+	like($out, qr/^smoke test passed/m, "$name: reports success");
+}
+
+smoke_ok('short buckets, first run');
+is(smoke_lifetime(), 8, 'short buckets: lifetime calls after one run');
 wait_smoke_expired('the smoke entries expire and are hidden from the views');
 # Rerun with the expired entries not yet reclaimed: they come back with
 # their old calls, which must not be counted as this run's.
-my ($rc, $out, $err) = smoke('app', 'appdb');
-is($rc, 0, 'rerun after the buckets expired: exit 0');
-unlike($out . $err, qr/FAIL|ERROR/, 'rerun after the buckets expired: no FAIL or ERROR');
-like($out, qr/^smoke test passed/m, 'rerun after the buckets expired: reports success');
-is(smoke_calls('app', 'appdb'), $lifetime + 8,
+smoke_ok('rerun after the buckets expired');
+is(smoke_lifetime(), 16,
 	'rerun after the buckets expired: the entries kept their lifetime calls and added 8');
 
 # Entries that expire during a run, after the warm-up (a stall of the
 # whole live window): the run cannot count exactly and says to rerun, not
-# that the statements were overcounted. The run is held before its counts
-# by a lock on the view they read.
+# that the statements were overcounted. The run is held at its first read
+# of the view (the warm-up count, after the warm-up calls of the probes)
+# by a lock on that view.
 {
 	my %a = (in => '', out => '', err => '');
 	my $ah = IPC::Run::start([ 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1',
@@ -318,12 +351,13 @@ is(smoke_calls('app', 'appdb'), $lifetime + 8,
 	my ($bout, $berr) = ('', '');
 	my $bh = IPC::Run::start(smoke_cmd('app', 'appdb'), '<', \undef,
 		'>', \$bout, '2>', \$berr, IPC::Run::timeout(180));
-	ok($node->poll_query_until('appdb', q{SELECT count(*) > 0 FROM pg_locks l
+	ok($node->poll_query_until('appdb', qq{SELECT count(*) > 0 FROM pg_locks l
 		JOIN pg_stat_activity a USING (pid)
-		WHERE l.locktype = 'relation' AND NOT l.granted AND a.usename = 'app'}),
-		'a smoke run waits to read the view');
-	is(smoke_calls('app', 'appdb'), $lifetime + 8 + 2,
-		'it waits after its warm-up call of each format');
+		WHERE l.locktype = 'relation' AND NOT l.granted AND a.usename = 'app'
+		  AND l.relation = '${P}_totals'::regclass
+		  AND a.query LIKE '%calls_total%${P}_totals%'}),
+		'a smoke run waits to count the calls in the view');
+	# Its warm-up calls are counted below, once the entries are back.
 	wait_smoke_expired('its entries expire while it waits');
 	$asq->('COMMIT');
 	$bh->finish;
@@ -334,9 +368,11 @@ is(smoke_calls('app', 'appdb'), $lifetime + 8,
 	unlike($bout, qr/expected exactly 3/, 'entries expired during the run: not reported as overcounting');
 	$a{in} .= "\\q\n";
 	$ah->finish;
+	is(smoke_lifetime(), 24,
+		'the failed run made its warm-up call and its 3 calls of each probe');
 }
-($rc, $out, $err) = smoke('app', 'appdb');
-is($rc, 0, 'and the rerun passes');
+smoke_ok('and the rerun passes');
+is(smoke_lifetime(), 32, 'and the rerun added 8 calls');
 
 $node->stop;
 done_testing();
