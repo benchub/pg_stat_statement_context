@@ -5,6 +5,8 @@
 #   linux         scripts/docker-test.sh <major>             PGDG packages
 #   linux-source  scripts/docker-test.sh --assert <major>    --enable-cassert
 #                 scripts/docker-test.sh --valgrind <major>  server under Valgrind
+#                 scripts/docker-test.sh --valgrind-tap 18   TAP subset under Valgrind
+#                 fuzz/sql/run.sh --assert --pg 18           SQL fuzz (assert cell)
 # Source builds are cached as Docker images (docker save/load), keyed on the
 # image tag, which encodes the release, the flavor and a hash of
 # docker/Dockerfile.source + docker/build-postgres.sh.
@@ -12,7 +14,7 @@
 # macOS cells build PostgreSQL with docker/build-postgres.sh (Homebrew's
 # packages lack the TAP modules), cache the install prefix, and run
 # docker/run-tests.sh on the host.
-# Every cell but valgrind runs the suite twice (docker/run-tests.sh): on the
+# Every cell but the valgrind ones runs the suite twice (docker/run-tests.sh): on the
 # testing build (make PSSC_TESTING=1) with the TEST-ONLY modules, then on the
 # release build, after scripts/check-release-exports.sh has checked its
 # exported symbols against test/release-exports.txt (DESIGN.md §9).
@@ -66,9 +68,11 @@ jobs:
           if-no-files-found: ignore
 
   # Short fuzz smoke run (fuzz/README.md): the libFuzzer targets (clang,
-  # ASan+UBSan, 15 s each, in parallel) and the SQL-level regex extractor
-  # driver against the PGDG PG18 server (30 s). The seeds are printed, so a
-  # failure replays locally with the same commands.
+  # ASan+UBSan, 15 s each, in parallel) and the SQL fuzz oracle's self-test.
+  # The SQL-level regex extractor driver runs against the --enable-cassert
+  # PG18 server in the linux-source PG18 assert cell, which has that image.
+  # The seeds are printed, so a failure replays locally with the same
+  # commands.
   fuzz-smoke:
     name: Fuzz smoke
     runs-on: ubuntu-latest
@@ -79,8 +83,6 @@ jobs:
         run: fuzz/run-libfuzzer.sh -t 15
       - name: SQL fuzz oracle self-test
         run: perl fuzz/sql/regex_fuzz.pl --self-test
-      - name: SQL-level regex fuzz
-        run: fuzz/sql/run.sh --pgdg --pg 18 -- --duration 30
       - name: Upload artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -89,11 +91,10 @@ jobs:
           path: |
             tmp/fuzz/artifacts/
             tmp/fuzz/*.log
-            tmp/fuzz-sql/
           if-no-files-found: ignore
 
   linux-source:
-    name: Linux PG${{ matrix.pg }} (${{ matrix.flavor }})
+    name: Linux PG${{ matrix.pg }} (${{ matrix.mode || matrix.flavor }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -106,6 +107,8 @@ jobs:
           - { pg: 17, flavor: assert }
           - { pg: 18, flavor: assert }
           - { pg: 18, flavor: valgrind }
+          # The TAP subset (docker/run-tests.sh) under Valgrind, same image.
+          - { pg: 18, flavor: valgrind, mode: valgrind-tap }
     env:
       IMAGE_TAR: tmp/ci-cache/pgsrc-image.tar
     steps:
@@ -126,7 +129,11 @@ jobs:
         if: steps.cache.outputs.cache-hit == 'true'
         run: docker load -i "$IMAGE_TAR"
       - name: Run tests
-        run: scripts/docker-test.sh --${{ matrix.flavor }} ${{ matrix.pg }}
+        run: scripts/docker-test.sh --${{ matrix.mode || matrix.flavor }} ${{ matrix.pg }}
+      # fuzz/README.md; 30 s against the cassert server.
+      - name: SQL-level regex fuzz
+        if: ${{ !cancelled() && matrix.pg == 18 && matrix.flavor == 'assert' }}
+        run: fuzz/sql/run.sh --assert --pg 18 -- --duration 30
       - name: Export PostgreSQL build for the cache
         id: export
         if: always() && steps.cache.outputs.cache-hit != 'true'
@@ -146,8 +153,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: linux-pg${{ matrix.pg }}-${{ matrix.flavor }}-logs
-          path: tmp/docker-${{ matrix.pg }}-${{ matrix.flavor }}/
+          name: linux-pg${{ matrix.pg }}-${{ matrix.mode || matrix.flavor }}-logs
+          path: |
+            tmp/docker-${{ matrix.pg }}-${{ matrix.mode || matrix.flavor }}/
+            tmp/fuzz-sql/
           if-no-files-found: ignore
 
   macos:

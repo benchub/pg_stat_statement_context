@@ -110,4 +110,4 @@ Mutants used when the harnesses were written, all caught:
 
 ## CI
 
-The `fuzz-smoke` job in `.github/workflows/ci.yml` runs `fuzz/run-libfuzzer.sh -t 15`, `perl fuzz/sql/regex_fuzz.pl --self-test` and `fuzz/sql/run.sh --pgdg --pg 18 -- --duration 30`. It uploads `tmp/fuzz/` artifacts and logs and `tmp/fuzz-sql/` on failure.
+The `fuzz-smoke` job in `.github/workflows/ci.yml` runs `fuzz/run-libfuzzer.sh -t 15`, `perl fuzz/sql/regex_fuzz.pl --self-test` and uploads `tmp/fuzz/` artifacts and logs on failure. The `linux-source` PG 18 assert cell runs `fuzz/sql/run.sh --assert --pg 18 -- --duration 30` after its tests, against the `--enable-cassert` server, and uploads `tmp/fuzz-sql/` on failure.

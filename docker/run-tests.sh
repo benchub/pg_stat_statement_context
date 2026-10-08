@@ -22,6 +22,13 @@
 #                 pg_regress suite; TAP tests and the release build are
 #                 skipped (they start their own clusters). Fails on any
 #                 Valgrind error.
+#       valgrind-tap  the same Valgrind wrapper for a subset of the TAP tests
+#                 (testing build; their clusters start the wrapped
+#                 postgres): $PSSC_VALGRIND_TAP_TESTS, by default the SRFs,
+#                 eviction, cardinality-cap races, exemplars, persistence
+#                 save/reload and a short memory soak. The LOAD checks,
+#                 pg_regress and the release build are skipped. Fails on any
+#                 Valgrind error.
 set -euo pipefail
 
 EXT=pg_stat_statement_context
@@ -30,6 +37,7 @@ BUILD=${PSSC_BUILD:-/build}
 OUT=${PSSC_OUT:-/out}
 WORK=${PSSC_WORK:-/var/lib/postgresql}
 MODE=${PSSC_TEST_MODE:-pgdg}
+VALGRIND_TAP_TESTS=${PSSC_VALGRIND_TAP_TESTS:-test/t/007_store.pl test/t/009_eviction.pl test/t/024_cardinality_caps.pl test/t/028_persist.pl test/t/029_exemplars.pl test/t/039_memory_soak.pl}
 CRASH_RE="PANIC|terminated by signal"
 PGDATA_DIR=$WORK/pssc-data
 VGLOG=$WORK/valgrind
@@ -69,7 +77,7 @@ stop_server() {
 trap 'stop_server; own_out' EXIT
 
 case $MODE in
-pgdg | release | assert | valgrind) ;;
+pgdg | release | assert | valgrind | valgrind-tap) ;;
 *) echo "unknown PSSC_TEST_MODE '$MODE'" >&2; exit 2 ;;
 esac
 
@@ -133,7 +141,7 @@ step "initdb"
 rm -rf "$PGDATA_DIR"
 as_pg "$PGBIN/initdb" -D "$PGDATA_DIR" --no-sync -A trust >/dev/null || fail "initdb"
 
-if [ "$MODE" = valgrind ]; then
+if [ "$MODE" = valgrind ] || [ "$MODE" = valgrind-tap ]; then
 	step "run the server under Valgrind"
 	command -v valgrind >/dev/null || fail "valgrind not installed"
 	SUPP="$(pg_config --sharedir)/valgrind.supp"
@@ -142,10 +150,17 @@ if [ "$MODE" = valgrind ]; then
 	rm -rf "$VGLOG"
 	mkdir -p "$VGLOG"
 	[ "$(id -u)" = 0 ] && chown postgres:postgres "$VGLOG"
-	# initdb ran without Valgrind (bootstrap under it is very slow).
+	# initdb ran without Valgrind (bootstrap under it is very slow). The TAP
+	# clusters' initdb, and the version and -C probes, bypass it too.
 	[ -e "$PGBIN/postgres.orig" ] || mv "$PGBIN/postgres" "$PGBIN/postgres.orig"
 	cat > "$PGBIN/postgres" <<-WRAPPER
 	#!/bin/sh
+	for a in "\$@"; do
+	  case \$a in
+	  --boot | --single | -V | --version | -C | --check | --describe-config)
+	    exec "$PGBIN/postgres.orig" "\$@" ;;
+	  esac
+	done
 	exec valgrind --quiet --trace-children=yes --track-origins=yes \\
 	  --read-var-info=no --num-callers=40 --leak-check=no --error-limit=no \\
 	  --gen-suppressions=all --suppressions="$SUPP" \\
@@ -154,6 +169,8 @@ if [ "$MODE" = valgrind ]; then
 	WRAPPER
 	chmod 755 "$PGBIN/postgres"
 	export PGCTLTIMEOUT=600
+	# The TAP tests' waits (poll_query_until, IPC::Run timeouts).
+	export PG_TEST_TIMEOUT_DEFAULT=1800
 	# A process exiting through --error-exitcode is a crash too.
 	CRASH_RE="$CRASH_RE|exited with exit code 128"
 	valgrind_check() {
@@ -168,6 +185,28 @@ if [ "$MODE" = valgrind ]; then
 		fi
 		echo "Valgrind: no errors in $n processes ($1)"
 	}
+fi
+
+if [ "$MODE" = valgrind-tap ]; then
+	tapdir="$(dirname "$(pg_config --pgxs)")/../../src/test/perl"
+	[ -f "$tapdir/PostgreSQL/Test/Cluster.pm" ] || fail "TAP tests need PostgreSQL::Test::Cluster in $tapdir"
+	step "TAP subset, servers under Valgrind: $VALGRIND_TAP_TESTS"
+	# The soak test's memory checks hold under Valgrind too; it runs shorter.
+	tap_ok=1
+	as_pg env PSSC_REQUIRE_PGSS=1 PSSC_REQUIRE_TESTING_BUILD=1 \
+		PSSC_SOAK_STATEMENTS="${PSSC_SOAK_STATEMENTS:-4000}" \
+		make installcheck PSSC_TESTING=1 REGRESS= PROVE_TESTS="$VALGRIND_TAP_TESTS" \
+		|| tap_ok=0
+	# First, so a Valgrind error that made a test fail is shown.
+	valgrind_check "TAP subset"
+	[ "$tap_ok" = 1 ] || fail "TAP subset under Valgrind"
+	# A backend that exited through --error-exitcode (the clusters' own
+	# crash tests kill backends on purpose, so only this pattern counts).
+	if grep -E "exited with exit code 128" "$BUILD"/tmp_check/log/*.log; then
+		fail "Valgrind error exit in a TAP server log"
+	fi
+	step "ALL PASSED ($(pg_config --version), mode: $MODE)"
+	exit 0
 fi
 
 step "LOAD without shared_preload_libraries"

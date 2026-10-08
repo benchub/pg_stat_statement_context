@@ -9,7 +9,12 @@
 #                                          -DUSE_VALGRIND; the regression suite
 #                                          runs with the server under Valgrind
 #                                          (src/tools/valgrind.supp), TAP skipped
-#   scripts/docker-test.sh --print-image [--assert|--valgrind] <version>
+#   scripts/docker-test.sh --valgrind-tap 18
+#                                          same image; a subset of the TAP
+#                                          tests (PSSC_VALGRIND_TAP_TESTS in
+#                                          docker/run-tests.sh) with their
+#                                          servers under Valgrind
+#   scripts/docker-test.sh --print-image [--assert|--valgrind|--valgrind-tap] <version>
 #                                          print the image tag and exit (CI
 #                                          uses it as the build-cache key)
 # A bare major with --assert/--valgrind means the release of the local
@@ -20,18 +25,24 @@
 # docker/run-tests.sh is mounted from the repository for source builds. It
 # tests the testing build (make PSSC_TESTING=1) with every test, then the
 # release build (exported symbols, pg_regress, TAP tests without TEST-ONLY
-# modules); valgrind runs only the testing build.
-# Logs and regression diffs from a failed run land in tmp/docker-<version>[-<flavor>]/.
+# modules); valgrind and valgrind-tap run only the testing build.
+# PSSC_SOAK_STATEMENTS (test/t/039_memory_soak.pl) and PSSC_VALGRIND_TAP_TESTS
+# are passed to the container when set.
+# Logs and regression diffs from a failed run land in tmp/docker-<version>[-<mode>]/.
 set -euo pipefail
 
-usage() { echo "usage: $0 [--assert|--valgrind] [--print-image] <major|major.minor>" >&2; exit 2; }
+usage() { echo "usage: $0 [--assert|--valgrind|--valgrind-tap] [--print-image] <major|major.minor>" >&2; exit 2; }
 
+# FLAVOR selects the image (docker/build-postgres.sh flavor), MODE what
+# docker/run-tests.sh runs in it.
 FLAVOR=
+MODE=
 PRINT=0
 while [ $# -gt 0 ]; do
 	case $1 in
-	--assert) FLAVOR=assert ;;
-	--valgrind) FLAVOR=valgrind ;;
+	--assert) FLAVOR=assert MODE=assert ;;
+	--valgrind) FLAVOR=valgrind MODE=valgrind ;;
+	--valgrind-tap) FLAVOR=valgrind MODE=valgrind-tap ;;
 	--print-image) PRINT=1 ;;
 	-*) usage ;;
 	*) break ;;
@@ -50,12 +61,13 @@ if [ -z "$FLAVOR" ] && [[ $PG_VER != *.* ]]; then
 	OUT="$ROOT/tmp/docker-${PG_VER}"
 	mkdir -p "$OUT"
 	docker build -q --build-arg "PG_MAJOR=${PG_VER}" -t "$IMAGE" "$ROOT/docker" >/dev/null
-	docker run --rm -v "$ROOT:/src:ro" -v "$OUT:/out" "$IMAGE"
+	docker run --rm -v "$ROOT:/src:ro" -v "$OUT:/out" -e PSSC_SOAK_STATEMENTS "$IMAGE"
 	exit
 fi
 
 # Source build (docker/Dockerfile.source).
-MODE=${FLAVOR:-release}
+FLAVOR=${FLAVOR:-release}
+MODE=${MODE:-release}
 PG_MAJOR=${PG_VER%%.*}
 if [[ $PG_VER == *.* ]]; then
 	PG_RELEASE=$PG_VER
@@ -69,16 +81,18 @@ else
 fi
 if command -v sha256sum >/dev/null; then sha() { sha256sum; }; else sha() { shasum -a 256; }; fi
 HASH=$(cat "$ROOT/docker/Dockerfile.source" "$ROOT/docker/build-postgres.sh" | sha | cut -c1-12)
-IMAGE="pg_stat_statement_context-pgsrc:${PG_RELEASE}-${MODE}-${HASH}"
+IMAGE="pg_stat_statement_context-pgsrc:${PG_RELEASE}-${FLAVOR}-${HASH}"
 if [ "$PRINT" = 1 ]; then echo "$IMAGE"; exit 0; fi
 
-OUT="$ROOT/tmp/docker-${PG_VER}${FLAVOR:+-$FLAVOR}"
+OUT="$ROOT/tmp/docker-${PG_VER}"
+[ "$MODE" = release ] || OUT="$OUT-$MODE"
 mkdir -p "$OUT"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-	echo "building $IMAGE (PostgreSQL $PG_RELEASE from source, $MODE)" >&2
+	echo "building $IMAGE (PostgreSQL $PG_RELEASE from source, $FLAVOR)" >&2
 	docker build -q -f "$ROOT/docker/Dockerfile.source" \
 		--build-arg "PG_MAJOR=${PG_MAJOR}" --build-arg "PG_SOURCE_VERSION=${PG_RELEASE}" \
-		--build-arg "PG_FLAVOR=${MODE}" -t "$IMAGE" "$ROOT/docker" >/dev/null
+		--build-arg "PG_FLAVOR=${FLAVOR}" -t "$IMAGE" "$ROOT/docker" >/dev/null
 fi
 docker run --rm -v "$ROOT:/src:ro" -v "$OUT:/out" -e "PSSC_TEST_MODE=${MODE}" \
+	-e PSSC_SOAK_STATEMENTS -e PSSC_VALGRIND_TAP_TESTS \
 	--entrypoint /src/docker/run-tests.sh "$IMAGE"

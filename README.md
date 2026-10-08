@@ -145,6 +145,8 @@ scripts/docker-test.sh 17             # testing build: every test; release build
 scripts/docker-test.sh 15.0           # same, against an exact release built from source
 scripts/docker-test.sh --assert 17    # source build with --enable-cassert
 scripts/docker-test.sh --valgrind 18  # regression suite with the server under Valgrind
+scripts/docker-test.sh --valgrind-tap 18  # TAP subset (SRFs, eviction, caps, exemplars, persistence, soak) under Valgrind
+PSSC_SOAK_STATEMENTS=200000 scripts/docker-test.sh 18  # longer backend-memory soak (test/t/039_memory_soak.pl)
 make unittest                         # standalone scanner/parser unit tests and fuzz corpus
 fuzz/run-libfuzzer.sh -t 600          # libFuzzer (clang, ASan+UBSan) targets in Docker, 10 min each
 fuzz/sql/run.sh -- --duration 600     # regex extractor SQL fuzzer, assert build in Docker
