@@ -54,7 +54,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | 20261008-065635-13 | Benchmark requalification on the release commit | 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
 | 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | blocked-on-deps |
 | 20261008-120000-1 | Make timing-sensitive TAP checks robust under heavy load | 20261008-065635-6, 20261008-065635-9 | no | ready |
-| 20261008-121828-1 | 038: verify pgbench writers are really alive, and check their exit status | 20261008-065635-6 | no | ready |
 | 20261008-125932-1 | make smoke: no false overcount when rerun after bucket expiry | 20261008-065635-12 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
@@ -276,26 +275,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - Each test passes 20 times in a row on its cell while two other cells run at the same time (to simulate load), and still detects the failure it exists to catch, shown by a mutation.
 
 **Depends on:** 20261008-065635-6, 20261008-065635-9
-**Open questions:** none
-**Status:** ready
-
-### 20261008-121828-1: 038: verify pgbench writers are really alive, and check their exit status
-
-**Description:** Left over from the round-2 review of 20261008-065635-6.
-- `test/t/038_concurrent_readers.pl` asserts that the pgbench writers are still running after both readers finish. It uses `IPC::Run::pumpable`.
-- `pumpable` returns true while output pipes are open, even if the child has already exited. The reviewer confirmed this: a child that exited with status 42 still tested as pumpable.
-- `stop_writers()` discards both the exit status and any `finish()` exception.
-- As a result, if pgbench died early (after the counters had already risen) the test could still pass.
-
-Fix:
-- Check real liveness, for example a non-blocking `waitpid`/`kill 0` on the pgbench PID, or `$h->pump_nb` followed by `$h->result`.
-- After the deliberate signal, check the final status, and fail on any exit that the signal did not cause.
-
-**Acceptance criteria:**
-- A mutation where pgbench exits early (for example a short `-T`, or a writer script that errors) makes 038 fail.
-- 038 passes unmutated on PG 14–18, testing and release builds.
-
-**Depends on:** 20261008-065635-6
 **Open questions:** none
 **Status:** ready
 

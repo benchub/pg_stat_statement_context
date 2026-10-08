@@ -1691,6 +1691,26 @@ Add a developer note (in DESIGN.md §7 or docs/maintaining.md if -7 created it) 
 **Open questions:** none
 **Status:** done
 
+### 20261008-121828-1: 038: verify pgbench writers are really alive, and check their exit status
+
+**Description:** Left over from the round-2 review of 20261008-065635-6.
+- `test/t/038_concurrent_readers.pl` asserts that the pgbench writers are still running after both readers finish. It uses `IPC::Run::pumpable`.
+- `pumpable` returns true while output pipes are open, even if the child has already exited. The reviewer confirmed this: a child that exited with status 42 still tested as pumpable.
+- `stop_writers()` discards both the exit status and any `finish()` exception.
+- As a result, if pgbench died early (after the counters had already risen) the test could still pass.
+
+Fix:
+- Check real liveness, for example a non-blocking `waitpid`/`kill 0` on the pgbench PID, or `$h->pump_nb` followed by `$h->result`.
+- After the deliberate signal, check the final status, and fail on any exit that the signal did not cause.
+
+**Acceptance criteria:**
+- A mutation where pgbench exits early (for example a short `-T`, or a writer script that errors) makes 038 fail.
+- 038 passes unmutated on PG 14–18, testing and release builds.
+
+**Depends on:** 20261008-065635-6
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
