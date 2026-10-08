@@ -153,6 +153,15 @@ extern PSSC_TEST_API int pssc_regex_compile_limit_ms;
  * engine itself is interrupted mid-compile. No-op when not armed.
  */
 extern PSSC_TEST_API void pssc_regex_test_expire_in(int ms);
+
+/*
+ * TEST-ONLY: makes an armed compile time limit expire right now, as its
+ * timer would (no-op when not armed). Async-signal-safe: it only sets
+ * flags, so the test module calls it from a CPU-time timer's signal
+ * handler, to interrupt the engine after a given amount of its work rather
+ * than of wall-clock time, which on a loaded host varies from run to run.
+ */
+extern PSSC_TEST_API void pssc_regex_test_expire_now(void);
 #endif
 
 /* pssc_regex_compile() results besides the engine's return codes. */

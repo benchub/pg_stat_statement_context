@@ -120,8 +120,14 @@ AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 CREATE FUNCTION pssc_extract_test_regex_engine_ms() RETURNS float8
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 
--- How long into the attempt the 'expire' injection makes the compile time
--- limit expire (default 300 ms), in this backend. Returns the old value.
+-- The same engine call's CPU time, in ms (NULL as above).
+CREATE FUNCTION pssc_extract_test_regex_engine_cpu_ms() RETURNS float8
+AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
+
+-- How much CPU time the engine uses before the 'expire' injection makes the
+-- compile time limit expire (default 300 ms), in this backend: a share of
+-- the engine's work, unlike wall-clock time not stretched by a loaded host.
+-- Returns the old value.
 CREATE FUNCTION pssc_extract_test_regex_expire_ms(ms int) RETURNS int
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT;
 

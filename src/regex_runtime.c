@@ -379,11 +379,22 @@ pssc_regex_test_expire_in(int ms)
 	if (deadline_armed)
 		enable_timeout_after(compile_timeout_id, ms);
 }
+
+void
+pssc_regex_test_expire_now(void)
+{
+	compile_deadline_handler();
+}
 #endif
 #else
 #ifdef PSSC_TESTING
 void
 pssc_regex_test_expire_in(int ms)
+{
+}
+
+void
+pssc_regex_test_expire_now(void)
 {
 }
 #endif

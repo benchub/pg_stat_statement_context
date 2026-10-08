@@ -11,6 +11,7 @@
 #include "postgres.h"
 
 #include <signal.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "catalog/pg_type.h"
@@ -298,7 +299,8 @@ typedef enum InjectAction
 	INJ_LATEWAIT,				/* deadline, then wait 1 s without CFI, then CFI */
 	INJ_LATECONFLICT,			/* deadline, then a recovery conflict, then CFI */
 	INJ_LATEREGCONFLICT,		/* deadline, then a recovery conflict, REG_CANCEL */
-	INJ_EXPIRE,					/* let the engine run; the limit expires mid-compile */
+	INJ_EXPIRE,					/* let the engine run; the limit expires mid-compile,
+								 * after inj_expire_ms of CPU time */
 	INJ_EXPIREAFTER,			/* the limit expires once the engine has returned */
 	INJ_LIMIT,					/* throw ERRCODE_PROGRAM_LIMIT_EXCEEDED */
 	INJ_REGERR,					/* throw ERRCODE_INVALID_REGULAR_EXPRESSION */
@@ -317,14 +319,16 @@ static int	inj_engine_entered = 0; /* of those, engine calls let run */
 static int	inj_engine_ok = 0;	/* engine calls that returned REG_OKAY */
 static bool inj_expire_after = false;	/* INJ_EXPIREAFTER fired, engine running */
 static instr_time inj_engine_start;	/* the engine call let run last */
+static double inj_engine_cpu_start;
 static double inj_engine_ms = -1;	/* wall time of the last that completed */
+static double inj_engine_cpu_ms = -1;	/* and its CPU time */
 
 /* REG_CANCEL of the PG14/15 engine (21); PG16+ throws instead. */
 #define PSSC_TEST_REG_CANCEL 21
 
 /*
- * INJ_EXPIRE: the compile time limit expires this long into the attempt
- * (pssc_extract_test_regex_expire_ms()).
+ * INJ_EXPIRE: the compile time limit expires once the engine has used this
+ * much CPU time (pssc_extract_test_regex_expire_ms()).
  */
 static int	inj_expire_ms = 300;
 
@@ -338,6 +342,54 @@ cpu_ms(void)
 		return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
 #endif
 	return GetCurrentTimestamp() / 1000.0;
+}
+
+/*
+ * INJ_EXPIRE's timer. Interrupting the engine a given wall-clock time into
+ * the compile, calibrated from a clean compile's wall time, is not
+ * reproducible on a loaded host: a calibration slowed by other processes
+ * puts the expiry past the end of a later, faster compile (and the reverse
+ * puts it near the start). So the expiry is in the backend's CPU time
+ * (ITIMER_PROF: user and system time of the process), i.e. after a given
+ * share of the engine's work, whatever else runs on the host. Its SIGPROF
+ * handler makes the armed limit expire right away, as the limit's own
+ * timer would (pssc_regex_test_expire_now() only sets flags). Armed right
+ * before the engine runs, disarmed when it returns or at the next
+ * injection.
+ */
+static void (*cpu_expire_now) (void) = NULL;
+
+static void
+cpu_expiry_handler(SIGNAL_ARGS)
+{
+	if (cpu_expire_now != NULL)
+		cpu_expire_now();
+}
+
+static void
+cpu_expiry_set(int ms)
+{
+#ifndef WIN32
+	struct itimerval it;
+
+	memset(&it, 0, sizeof(it));
+	if (ms > 0)
+	{
+		struct sigaction sa;
+
+		memset(&sa, 0, sizeof(sa));
+		sa.sa_handler = cpu_expiry_handler;
+		sa.sa_flags = SA_RESTART;
+		sigemptyset(&sa.sa_mask);
+		if (sigaction(SIGPROF, &sa, NULL) != 0)
+			elog(ERROR, "could not set the SIGPROF handler: %m");
+		cpu_expire_now = (void (*) (void)) main_sym("pssc_regex_test_expire_now");
+		it.it_value.tv_sec = ms / 1000;
+		it.it_value.tv_usec = (ms % 1000) * 1000;
+	}
+	if (setitimer(ITIMER_PROF, &it, NULL) != 0)
+		elog(ERROR, "could not set the CPU-time timer: %m");
+#endif
 }
 
 /*
@@ -498,6 +550,7 @@ inject_hook(int phase, int index)
 	if (rc == REG_OKAY)
 	{
 		inj_engine_entered++;
+		inj_engine_cpu_start = cpu_ms();
 		INSTR_TIME_SET_CURRENT(inj_engine_start);
 	}
 	return rc;
@@ -518,10 +571,13 @@ inject_engine_hook(int phase, int index, int rc)
 		instr_time	now;
 
 		INSTR_TIME_SET_CURRENT(now);
+		inj_engine_cpu_ms = cpu_ms() - inj_engine_cpu_start;
 		INSTR_TIME_SUBTRACT(now, inj_engine_start);
 		inj_engine_ms = INSTR_TIME_GET_MILLISEC(now);
 		inj_engine_ok++;
 	}
+	if (inj_action == INJ_EXPIRE)
+		cpu_expiry_set(0);
 	if (inj_expire_after)
 	{
 		void		(*expire) (int) = (void (*) (int)) main_sym("pssc_regex_test_expire_in");
@@ -643,12 +699,8 @@ inject_action(void)
 			CHECK_FOR_INTERRUPTS();
 			return REG_OKAY;
 		case INJ_EXPIRE:
-			{
-				void		(*expire) (int) = (void (*) (int)) main_sym("pssc_regex_test_expire_in");
-
-				expire(inj_expire_ms);
-				return REG_OKAY;
-			}
+			cpu_expiry_set(inj_expire_ms);
+			return REG_OKAY;
 		case INJ_EXPIREAFTER:
 			inj_expire_after = true;
 			return REG_OKAY;
@@ -722,6 +774,8 @@ pssc_extract_test_regex_inject(PG_FUNCTION_ARGS)
 	inj_engine_ok = 0;
 	inj_expire_after = false;
 	inj_engine_ms = -1;
+	inj_engine_cpu_ms = -1;
+	cpu_expiry_set(0);
 	*hook = a == INJ_NONE ? NULL : inject_hook;
 	*ehook = a == INJ_NONE ? NULL : inject_engine_hook;
 	PG_RETURN_VOID();
@@ -773,6 +827,16 @@ pssc_extract_test_regex_engine_ms(PG_FUNCTION_ARGS)
 	if (inj_engine_ms < 0)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(inj_engine_ms);
+}
+
+/* The same engine call's CPU time, in ms; NULL as above. */
+PG_FUNCTION_INFO_V1(pssc_extract_test_regex_engine_cpu_ms);
+Datum
+pssc_extract_test_regex_engine_cpu_ms(PG_FUNCTION_ARGS)
+{
+	if (inj_engine_ms < 0)
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(inj_engine_cpu_ms);
 }
 
 PG_FUNCTION_INFO_V1(pssc_extract_test_regex_expire_ms);
