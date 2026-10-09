@@ -291,6 +291,87 @@ class Compare(unittest.TestCase):
             [(707.0, 700.0), (714.0, 700.0), (721.0, 700.0)])["mean"])
 
 
+class DuplicateKeys(unittest.TestCase):
+    def test_duplicate_run_rejected(self):
+        runs = [_run("s", "pgss", "pgss", 1, 100.0), _run("s", "ext", "pgss", 1, 90.0),
+                _run("s", "ext", "pgss", 1, 80.0)]          # same (scenario, config, block) twice
+        with self.assertRaises(ValueError):
+            analyze.compare(runs)
+        with self.assertRaises(ValueError):
+            analyze.absolute(runs)
+
+
+def _core_rows():
+    """compare() rows for three core scenarios, with known CIs."""
+    rows = []
+    for sc, cpu, tps in (("ro-simple-c1", (2.0, 1.0, 3.0), (-5.0, -8.0, -2.0)),
+                         ("rw-prepared-c5", (3.0, 2.5, 3.5), (1.0, -1.0, 3.0)),
+                         ("ro-prepared-c20", (-5.0, -25.0, 14.0), (14.0, -31.0, 91.0))):
+        rows.append({"scenario": sc, "config": "ext", "n": 10,
+                     "cpu_stmt_diff_us": {"n": 10, "mean": cpu[0], "lo": cpu[1], "hi": cpu[2]},
+                     "tps": {"n": 10, "mean": tps[0], "lo": tps[1], "hi": tps[2]},
+                     "cpu_rel": {"n": 10, "mean": 5.0, "lo": 1.0, "hi": 9.0}})
+    # not core: ignored
+    rows.append(dict(rows[0], scenario="ro-simple-c5", config="ext-regex-normalize"))
+    rows.append(dict(rows[0], scenario="nested-simple-c5", config="ext"))
+    return rows
+
+
+class Headline(unittest.TestCase):
+    def test_tagged_headline_splits_resolved(self):
+        h = analyze.tagged_headline(_core_rows())
+        self.assertEqual(h["total"], 3)
+        self.assertEqual([r["scenario"] for r in h["resolved"]], ["ro-simple-c1", "rw-prepared-c5"])
+        self.assertEqual([r["scenario"] for r in h["unresolved"]], ["ro-prepared-c20"])
+        self.assertEqual(h["cpu_mean"], (2.0, 3.0))
+        self.assertEqual(h["cpu_ci"], (1.0, 3.5))
+        self.assertEqual(h["tps_mean"], (-5.0, 1.0))
+        self.assertEqual(h["tps_ci"], (-8.0, 3.0))
+
+    def test_render_headline_names_unresolved_with_bounds(self):
+        txt = analyze.render_headline(_core_rows())
+        self.assertIn("2 of 3", txt)
+        self.assertIn("+2.0 to +3.0 µs", txt)
+        self.assertIn("+1.0 to +3.5 µs", txt)
+        self.assertIn("ro-prepared-c20", txt)
+        self.assertIn("+14.0", txt)              # its upper bound is stated
+        self.assertNotIn("ro-simple-c5", txt)
+
+    def test_build_doc_fills_headline(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.mkdir(os.path.join(root, "2026-10-08-h"))
+            Campaign()._write(os.path.join(root, "2026-10-08-h"))
+            doc = analyze.build_doc("{{headline}}\n\n{{campaigns}}\n", root)
+            self.assertNotIn("{{headline}}", doc)
+            self.assertIn("2 of 2", doc.split("## Campaign")[0])
+
+    def test_multiple_comparison_count(self):
+        rows = [{"p50": {"lo": 1.0, "hi": 2.0}, "p95": {"lo": -1.0, "hi": 2.0}, "p99": {"lo": -3.0, "hi": -1.0}},
+                {"p50": {"lo": None, "hi": None}, "p95": {"lo": -1.0, "hi": 1.0}, "p99": {"lo": -1.0, "hi": 1.0}}]
+        self.assertEqual(analyze.latency_exclusions(rows), (2, 5))
+
+
+class Simultaneous(unittest.TestCase):
+    def test_compare_conf_widens(self):
+        runs = []
+        for b, (d, l) in enumerate([(2.0, 1.1), (3.0, 1.3), (4.0, 1.2), (3.5, 1.25)], 1):
+            runs += [_run("s", "pgss", "pgss", b, 100.0, cpu=100.0, p99=1.0),
+                     _run("s", "ext", "pgss", b, 100.0, cpu=100.0 + d, p99=l)]
+        a = analyze.compare(runs)[0]
+        b = analyze.compare(runs, conf=0.999)[0]
+        self.assertLess(b["p99"]["lo"], a["p99"]["lo"])
+        self.assertGreater(b["cpu_stmt_diff_us"]["hi"], a["cpu_stmt_diff_us"]["hi"])
+        self.assertAlmostEqual(b["cpu_stmt_diff_us"]["hi"],
+                               analyze.mean_ci([2.0, 3.0, 4.0, 3.5], 0.999)["hi"])
+
+    def test_render_marks_simultaneous(self):
+        with tempfile.TemporaryDirectory() as d:
+            Campaign()._write(d)
+            md = analyze.render_campaign(d)
+            self.assertIn("simultaneous", md)
+            self.assertIn("exclude zero", md)
+
+
 class Campaign(unittest.TestCase):
     def _write(self, d, notes="Notes for this campaign."):
         runs = []
@@ -416,6 +497,19 @@ class Plan(unittest.TestCase):
                      ("inlist-simple-c5", "inlist0-ext"), ("inlist-simple-c5", "inlist0-ext-any"),
                      ("evict-simple-c5", "ext-max10000")]:
             self.assertIn(want, cfgs)
+
+    def test_client_counts_deduplicated(self):
+        for ncpu, high, want in ((1, False, [1, 4]), (64, True, [1, 64, 256]), (5, True, [1, 5, 20, 256])):
+            scs = scenarios.scenarios(ncpu=ncpu, duration=12, high_clients=high)
+            names = [s["name"] for s in scs]
+            self.assertEqual(len(names), len(set(names)), (ncpu, names))
+            self.assertEqual([s["clients"] for s in scs if s["name"].startswith("ro-simple-")], want)
+            plan = scenarios.make_plan(scs, 2, 1)
+            keys = [(r["scenario"], r["config"], r["block"]) for r in plan]
+            self.assertEqual(len(keys), len(set(keys)), ncpu)
+        c1 = {c["name"] for s in scenarios.scenarios(ncpu=1, duration=12) if s["name"] == "ro-simple-c1"
+              for c in s["configs"]}
+        self.assertTrue({"pgss", "ext", "plain-ext", "ext-store5k"} <= c1)
 
     def test_baselines(self):
         for s in scenarios.scenarios(ncpu=4, duration=12, high_clients=True):

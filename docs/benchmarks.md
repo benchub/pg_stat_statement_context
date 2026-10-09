@@ -7,21 +7,23 @@ What pg_stat_statement_context costs on top of `pg_stat_statements` alone, measu
 
 ## Summary
 
-From the 2026-10-09 campaign (PG 18.6, release build, Docker on an Apple M1 Max; 10 paired blocks of 15 s runs; 95% confidence intervals):
+From the newest campaign below (2026-10-09: PG 18.6, release build, Docker on an Apple M1 Max; 10 paired blocks of 15 s runs). Intervals are pointwise 95% confidence intervals; see [What the data can and cannot bound](#what-the-data-can-and-cannot-bound) for how to read them.
 
-| What | Extra server CPU per statement vs `pg_stat_statements` alone | Notes |
+**A tagged statement** (sqlcommenter comment, 2 kept tags, default settings) over the twelve core workloads (simple and prepared protocol, read-only and TPC-B-like, 1, N and 4N clients), generated from the data: **+2.4 to +3.8 µs** of server CPU per statement in the 10 of 12 core workloads where the interval excludes zero (their 95% CIs lie within +0.6 to +5.2 µs; +3.6% to +10.3% of the baseline's CPU; ΔTPS means -7.3% to +1.5%, CIs within -16.2% to +12.2%). Not resolved, so bounded only by the upper end of the interval: `ro-prepared-c20` -5.5 µs [-25.4, +14.5] (ΔTPS +14.5% [-31.7, +91.7]); `ro-simple-c5` +2.4 µs [-0.4, +5.1] (ΔTPS -0.2% [-7.7, +7.9]). In the core workloads the extension's latency effect showed up at the median (p50 +2% to +10% where resolved); no p99 interval of a core workload excludes zero, and their upper ends reach +7% to +78%, so the local data does not bound the tail.
+
+| What | Extra server CPU per statement vs `pg_stat_statements` alone | Latency (paired, pointwise) |
 |---|---|---|
-| A tagged statement (sqlcommenter comment, 2 kept tags), defaults | **+2.4 to +3.8 µs** (means over 12 workloads: simple/prepared, read-only/TPC-B, 1/5/20 clients; every informative interval lies within −0.4 to +5.2 µs) | +4–10% of a cached point select's CPU; TPS −7% to +2% |
-| An untagged statement (no comment, `untagged = skip`) | +1.0 µs [+0.1, +1.9] (prepared) to +2.4 µs [+1.1, +3.7] (simple); not resolved for TPC-B | |
-| A `regex` extractor merged with sqlcommenter, plus a `normalize` rule | +7.8 to +9.8 µs | |
-| 5,000 other entries in the store; the exporter recipe scraped every 15 s | +3.3 and +3.0 µs | in the range of the defaults (not paired against them) |
-| The exporter recipe scraped every 1 s | +4.5 µs [+3.6, +5.5] | p99 +19% [+6, +33] |
-| 1 s buckets (a rollover every second) | +4.6 µs [+3.4, +5.9] | no latency concentration at bucket boundaries |
-| Nested PL/pgSQL, `track = all` | +1.1 µs (`nested_tags = inherit`), +1.8 µs (`scan`) per statement | with `track = top`, +7 µs per call of a function running 16 statements |
-| A 59 kB `IN` list (≈ 5.8 ms of server CPU each) | not resolved: `position = any` +0.2 ms [−0.6, +1.0] | a residual bias of ~5% between runs hides smaller effects |
-| Sustained eviction (a new tag set every statement, `max_entries = 10000`) | +5.6 µs [+4.3, +6.8] | **p99 +60% [+38, +84]** |
+| An untagged statement (no comment, `untagged = skip`) | +1.0 µs [+0.1, +1.9] (prepared) to +2.4 µs [+1.1, +3.7] (simple); not resolved for TPC-B (+1.5 µs [−0.1, +3.0]) | p50 +3% [+2, +5] (simple); p99 not resolved |
+| A `regex` extractor merged with sqlcommenter, plus a `normalize` rule | +7.8 to +9.8 µs | p50 +7% to +15%; p99 not resolved |
+| 5,000 other entries in the store; the exporter recipe scraped every 15 s | +3.3 and +3.0 µs (not paired against the defaults) | not resolved |
+| The exporter recipe scraped every 1 s | +4.5 µs [+3.6, +5.5] | p50 +4% [+2, +7]; **p99 +19% [+6, +33]** |
+| 1 s buckets (a rollover every second) | +4.6 µs [+3.4, +5.9] | p50 +4% [+3, +6]; p99 +14% [−3, +33] not resolved; no latency concentration at bucket boundaries |
+| Nested PL/pgSQL, `track = all` | +1.1 µs (`nested_tags = inherit`), +1.8 µs (`scan`) per statement | **p99 +18% [+3.5, +35]** (`inherit`), **+26% [+11, +44]** (`scan`) |
+| Nested PL/pgSQL, `track = top` | +0.4 µs per statement (+7 µs per call of a function running 16 statements) | p50 +4% [+3, +6]; p99 not resolved |
+| A 59 kB `IN` list (≈ 5.8 ms of server CPU each) | not resolved: `position = any` +0.2 ms [−0.6, +1.0] | not resolved; a residual bias of ~5% between runs hides smaller effects |
+| Sustained eviction (a new tag set every statement, `max_entries = 10000`) | +5.6 µs [+4.3, +6.8] | **p99 +60% [+38, +84]**, also under the simultaneous correction |
 
-What this supports: on this host, the extension's cost is a few microseconds of CPU per statement. That matters for sub-millisecond point queries (single-digit percent) and is negligible for statements that take milliseconds. What it does not support: any statement about other hardware, or about overheads below about 1 µs per statement or 5% of a long statement. Dedicated-hardware runs are needed for those; see [bench/README.md](../bench/README.md#dedicated-hardware).
+What this supports: on this host, the extension's cost is a few microseconds of CPU per statement. That matters for sub-millisecond point queries (single-digit percent of their CPU) and is negligible for statements that take milliseconds. Tail latency rises measurably with `track = all`, an aggressive 1 s scrape, and sustained eviction. What it does not support: any statement about other hardware, a bound on the tail latency of the default configuration, or overheads below about 1 µs per statement or 5% of a long statement. Dedicated-hardware runs are needed for those; see [bench/README.md](../bench/README.md#dedicated-hardware).
 
 ## Scenarios
 
@@ -49,7 +51,7 @@ Every run is checked, and the run fails if a check fails: the preload list, that
 - **Blocks.** A block runs every configuration once. Within a block, the scenarios come in a random order, and so do the configurations within a scenario; the seed is recorded. A configuration and its baseline from the same block form a **pair**, so slow drift over the campaign affects both sides of a pair alike, and the random order keeps a fixed position from favoring either side.
 - **Server CPU per statement.** The CPU time (user + system) of the postmaster and all its children during the measured run, from `/proc/<pid>/stat` (including the children that exited, through the postmaster's `cutime`/`cstime`), divided by the transactions, and by the statements per transaction (1 for `ro`, 7 for `rw` including `BEGIN`/`END`, 17 for `nested`). This is the most direct measure of what the extension adds: it counts the work and ignores the time a backend waits. It includes pgss's and PostgreSQL's own work, and the reader's queries in the reader configurations.
 - **Latency.** p50, p95 and p99 of transaction latency, nearest-rank over every transaction of the run, from pgbench's per-transaction log. Only the per-run summaries are kept, not the logs.
-- **Statistics.** For each pair, the difference (configuration − baseline) of the CPU per statement, and the log ratio of TPS and of each latency percentile. The tables show the **mean over the pairs and its 95% confidence interval** (Student t with n − 1 degrees of freedom); ratios are shown as percentages (exp(mean log ratio) − 1). The verdict says *costlier* or *cheaper* when the interval excludes zero, and *not resolved* when it includes zero. Then its upper end is the largest overhead the data is consistent with, not a measurement of it. These intervals assume the pairs are independent and roughly normal. With a few pairs, one bad block widens them a lot; the raw per-run values are in `runs.jsonl`.
+- **Statistics.** For each pair, the difference (configuration − baseline) of the CPU per statement, and the log ratio of TPS and of each latency percentile. The tables show the **mean over the pairs and its 95% confidence interval** (Student t with n − 1 degrees of freedom); ratios are shown as percentages (exp(mean log ratio) − 1). The verdict says *costlier* or *cheaper* when the interval excludes zero, and *not resolved* when it includes zero. Then its upper end is the largest overhead the data is consistent with, not a measurement of it. These intervals assume the pairs are independent and roughly normal. With a few pairs, one bad block widens them a lot; the raw per-run values are in `runs.jsonl`. The tables also mark (†) the differences that survive a Bonferroni correction over the whole table.
 - **Interference.** The container sees the VM-wide `/proc/stat`. For each run, the CPU time used outside the container (VM busy time minus the container cgroup's usage) is recorded. A run where it exceeds 0.75 cores is repeated, up to 3 attempts. Before the campaign, `docker ps` must show no other containers; `campaign.json` records the check. Pauses of the macOS host or of the VM are not visible from inside and remain as noise.
 - **Bucket boundaries.** Buckets start at multiples of the interval since 2000-01-01, so with 1 s buckets every whole second is a boundary. A transaction is *near* a boundary when its execution overlaps ±5 ms of a whole second. Every configuration is analyzed on the same grid; the ones without 1 s buckets are controls.
 
@@ -58,7 +60,9 @@ Every run is checked, and the run fails if a check fails: the preload list, that
 - A *costlier* or *cheaper* verdict means the effect is real on this host, within its interval. A *not resolved* verdict bounds the effect only by the interval's upper end, on this host.
 - Nothing here bounds the overhead on other hardware: a different CPU, cache size, memory latency or kernel changes both the absolute costs and the ratio. The CPU per statement is the more portable number, as it does not depend on how saturated the server is.
 - The `ro` statements are cheap, cached point selects: the worst case for relative overhead. Statements that do real work see proportionally less.
-- Latency percentiles in a VM include host pauses. A p99 difference smaller than the run-to-run spread of the baseline is not resolved even when the interval excludes zero by a little.
+- **How to read an interval.** Each interval is computed from the n paired differences and assumes the pairs are independent and their differences (or log ratios) roughly normal. Under those assumptions, an interval that excludes zero is evidence of an effect even when the effect is much smaller than the run-to-run spread of the baseline (the *TPS spread* column): drift between blocks hits both sides of a pair and cancels in the difference. That is the point of pairing, so the spread is not a threshold.
+- **VM noise.** Pauses of the macOS host, vCPU migration between performance and efficiency cores, and the VM's own housekeeping hit either side of a pair at random; with the randomized order they widen the intervals rather than shift them. They do make the differences of p95 and p99 heavy-tailed, so the t interval is only approximate there, and one bad block can move it. Pairing also does not remove every systematic difference: `inlist-ext` came out about 5% *cheaper* than its baseline, which no mechanism explains. Effects of a few percent from this host deserve confirmation on dedicated hardware.
+- **Pointwise versus simultaneous.** Each interval is a pointwise 95% interval: across many comparisons, about 5% of them exclude zero by chance even when nothing changed. The latency table states how many of its intervals exclude zero against that expectation. Its † marks the intervals that still exclude zero when all of the table's intervals are made simultaneous (Bonferroni: each at 1 − 0.05/M); those are unlikely to be chance findings of the whole table. An interval without † that excludes zero is still the best estimate of its effect, but a single one of them could be a chance finding, so weigh it with related results (for example, the CPU cost of the same configuration).
 - Not measured: `untagged = record`, `prepend` mode, the `marginalia` and `appname` extractors on their own, `cardinality_cap` (see the microbenchmark below), exemplars, `reclaim_worker`, very large `max_entries`, network latency between client and server, and PostgreSQL majors other than the one each campaign names (run `bench/run.sh --major N` for those).
 
 ## Long statements: scan costs and tuning
@@ -129,75 +133,78 @@ Earlier pgbench A/B runs of both features, in the previous version of this page,
 - **Quiet-machine check:** other containers at start: none; at end: none; CPU used outside the benchmark container during each run measured from the VM's /proc/stat: max 0.51 cores, median 0.00 (runs over 0.75 cores are retried)
 - **Raw data:** [`bench/results/2026-10-09-apple-m1-max-docker/`](../bench/results/2026-10-09-apple-m1-max-docker/)
 
+**Tagged statements, default configuration** (generated from the table below): **+2.4 to +3.8 µs** of server CPU per statement in the 10 of 12 core workloads where the interval excludes zero (their 95% CIs lie within +0.6 to +5.2 µs; +3.6% to +10.3% of the baseline's CPU; ΔTPS means -7.3% to +1.5%, CIs within -16.2% to +12.2%). Not resolved, so bounded only by the upper end of the interval: `ro-simple-c5` +2.4 µs [-0.4, +5.1] (ΔTPS -0.2% [-7.7, +7.9]); `ro-prepared-c20` -5.5 µs [-25.4, +14.5] (ΔTPS +14.5% [-31.7, +91.7]).
+
 Notes on this campaign (written after the run; the tables below are generated from the raw data).
 
 - **Quiet machine.** `docker ps` listed no containers just before the start, and `run.sh` recorded none at the start and at the end. Inside the VM, the CPU used outside the benchmark container stayed at 0 for nearly every run (2 of 500 runs above 0.25 cores, the highest 0.51); no run was retried. The macOS host ran its usual desktop processes; their effect is not visible from inside the VM.
-- **Noise.** The baselines' TPS varied between blocks by 13–134% of the median (the *TPS spread* column; usually 25–45%), so absolute TPS from this host means little. Pairing within blocks removes most of it: the CPU-per-statement deltas of the tagged configurations agree across the twelve core scenarios. The exception is `ro-prepared-c20`, whose baseline spread of 134% makes its interval uninformative.
-- **Tagged statements.** Ten of the twelve core scenarios resolve a cost, with means of +2.4 to +3.8 µs of server CPU per statement. The intervals of all eleven informative scenarios lie between −0.4 and +5.2 µs. Relative to the baseline's 28–73 µs per statement, that is +4% to +10% of server CPU, and TPS changed by −7% to +2%.
+- **Noise.** The baselines' TPS varied between blocks by 13–134% of the median (the *TPS spread* column; usually 25–45%), so absolute TPS from this host means little. Pairing within blocks removes most of it: the CPU-per-statement deltas of the tagged configurations agree across eleven of the twelve core scenarios. The exception is `ro-prepared-c20`, whose baseline spread of 134% makes its interval uninformative.
+- **Tagged statements.** Ten of the twelve core scenarios resolve a cost, with means of +2.4 to +3.8 µs of server CPU per statement and intervals within +0.6 to +5.2 µs: +3.6% to +10.3% of the baseline's server CPU, with TPS means of −7.3% to +1.5%. Two are not resolved: `ro-simple-c5`, +2.4 µs [−0.4, +5.1], and `ro-prepared-c20`, −5.5 µs [−25.4, +14.5] with TPS +14.5% [−31.7, +91.7]; the latter's baseline TPS spread of 134% makes it uninformative, and it bounds the cost only below +14.5 µs. The headline at the top of this campaign is generated from the same data.
 - **Untagged statements** (`plain-*`: no comment, `untagged = skip`): +2.4 µs [+1.1, +3.7] with the simple protocol, +1.0 µs [+0.1, +1.9] prepared, and not resolved for `rw` (+1.5 µs [−0.1, +3.0]). Even a statement without a comment pays for the hooks, the comment scan and the frame bookkeeping.
 - **`ext-store5k` and `ext-reader15s`** measured +3.3 and +3.0 µs, in the range of the default configuration in the same scenario (+2.4 µs [−0.4, +5.1]). They were not paired against `ext` directly, so the data cannot resolve a difference of 1–2 µs between them.
 - **Long statements.** `inlist-ext` (append, heuristic) came out *cheaper* than pgss alone: −291 µs [−532, −49] of 5.8 ms. No mechanism makes the extension save work, so this shows a residual bias of about 5% between interleaved runs of these 6 ms statements, larger than the effect being measured. The `any` scans are not resolved: +195 µs [−626, +1016] with `;` and +317 µs [−177, +812] without. So this campaign bounds the full scan of a 59 kB statement only to below about 1 ms (the previous version of this page measured about 0.5 ms on the same host), and cannot separate the `strlen` of `inlist0` from zero.
-- **Eviction** at `max_entries = 10000` with a new tag set on every statement: +5.6 µs [+4.3, +6.8] per statement, and p99 +60% [+38, +84]. This is the one sizable latency effect, as before.
+- **Eviction** at `max_entries = 10000` with a new tag set on every statement: +5.6 µs [+4.3, +6.8] per statement, and p99 +60% [+38, +84], the largest latency effect and one that survives the simultaneous correction.
+- **Other tail-latency effects.** Pointwise p99 intervals that exclude zero: `nested-simple-c5` with `track = all`, +18% [+3.5, +35] (`inherit`) and +26% [+11, +44] (`scan`, whose p95 +21% survives the simultaneous correction), and the 1 s exporter reader, +19% [+6, +33]. Each comes with a resolved CPU cost of the same configuration, so they are probably real on this host. No p99 interval of the default tagged configuration in the core scenarios excludes zero.
 - The c20 `rw` scenarios are dominated by row-lock waits on `pgbench_branches` (scale 10, 10 branches): their p95 and p99 measure the queueing, not the extension.
 
 ### Cost per statement and throughput
 
-Each configuration against pg_stat_statements alone on the same script, paired by block. Mean change and its 95% CI (Student t over the pairs). Server CPU is the CPU time of all PostgreSQL processes during the measured run, divided by the transactions and by the statements per transaction. The verdict is on the CPU per statement: *not resolved* means the interval includes zero, and its upper end is the largest overhead the data is consistent with.
+Each configuration against pg_stat_statements alone on the same script, paired by block. Mean change and its 95% CI (Student t over the pairs). Server CPU is the CPU time of all PostgreSQL processes during the measured run, divided by the transactions and by the statements per transaction. The verdict is on the CPU per statement: *not resolved* means the interval includes zero, and its upper end is the largest overhead the data is consistent with. Each interval is pointwise; † marks a CPU difference that also excludes zero when all 30 CPU intervals of this table are made simultaneous (Bonferroni, each at 99.83%).
 
 | Scenario | Configuration | pairs | pgss CPU µs/stmt | ΔCPU µs/stmt [95% CI] | ΔCPU % [95% CI] | ΔTPS % [95% CI] | Verdict (CPU per statement) |
 |---|---|---:|---:|---:|---:|---:|---|
 | ro-simple-c1 | `ext` + extension, tagged, defaults | 10 | 44.50 | +3.25 [+1.32, +5.19] | +7.7% [+2.9, +12.7] | -4.4% [-10.8, +2.6] | costlier: +1.32 µs to +5.19 µs |
 | ro-simple-c5 | `ext` + extension, tagged, defaults | 10 | 51.26 | +2.38 [-0.37, +5.13] | +4.7% [-0.3, +10.0] | -0.2% [-7.7, +7.9] | not resolved: between -0.37 µs and +5.13 µs |
 | ro-simple-c5 | `plain-ext` + extension, untagged (untagged = skip) | 10 | 51.35 | +2.39 [+1.10, +3.68] | +4.6% [+2.2, +7.0] | -2.5% [-5.1, +0.3] | costlier: +1.10 µs to +3.68 µs |
-| ro-simple-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 10 | 51.26 | +9.80 [+7.65, +11.95] | +18.8% [+14.5, +23.3] | -8.1% [-12.9, -3.1] | costlier: +7.65 µs to +11.95 µs |
+| ro-simple-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 10 | 51.26 | +9.80 [+7.65, +11.95] † | +18.8% [+14.5, +23.3] | -8.1% [-12.9, -3.1] | costlier: +7.65 µs to +11.95 µs |
 | ro-simple-c5 | `ext-store5k` + extension, store pre-populated with 5000 entries | 10 | 51.26 | +3.26 [+1.31, +5.21] | +6.3% [+2.8, +10.0] | -2.4% [-6.9, +2.3] | costlier: +1.31 µs to +5.21 µs |
 | ro-simple-c5 | `ext-reader15s` + extension, exporter queries every 15 s | 10 | 51.26 | +3.00 [+1.36, +4.64] | +5.9% [+2.8, +9.0] | -1.9% [-6.6, +2.9] | costlier: +1.36 µs to +4.64 µs |
-| ro-simple-c5 | `ext-reader1s` + extension, exporter queries every 1 s | 10 | 51.26 | +4.53 [+3.55, +5.52] | +8.7% [+6.7, +10.7] | -5.8% [-8.2, -3.4] | costlier: +3.55 µs to +5.52 µs |
-| ro-simple-c5 | `ext-1s-buckets` + extension, 1 s buckets (a rollover every second) | 10 | 51.26 | +4.64 [+3.35, +5.93] | +8.7% [+6.7, +10.8] | -5.6% [-8.4, -2.6] | costlier: +3.35 µs to +5.93 µs |
-| ro-simple-c20 | `ext` + extension, tagged, defaults | 10 | 39.24 | +3.84 [+3.23, +4.44] | +9.9% [+8.0, +11.8] | -7.3% [-10.2, -4.3] | costlier: +3.23 µs to +4.44 µs |
+| ro-simple-c5 | `ext-reader1s` + extension, exporter queries every 1 s | 10 | 51.26 | +4.53 [+3.55, +5.52] † | +8.7% [+6.7, +10.7] | -5.8% [-8.2, -3.4] | costlier: +3.55 µs to +5.52 µs |
+| ro-simple-c5 | `ext-1s-buckets` + extension, 1 s buckets (a rollover every second) | 10 | 51.26 | +4.64 [+3.35, +5.93] † | +8.7% [+6.7, +10.8] | -5.6% [-8.4, -2.6] | costlier: +3.35 µs to +5.93 µs |
+| ro-simple-c20 | `ext` + extension, tagged, defaults | 10 | 39.24 | +3.84 [+3.23, +4.44] † | +9.9% [+8.0, +11.8] | -7.3% [-10.2, -4.3] | costlier: +3.23 µs to +4.44 µs |
 | ro-prepared-c1 | `ext` + extension, tagged, defaults | 10 | 29.78 | +2.60 [+1.06, +4.14] | +8.7% [+3.3, +14.4] | -3.4% [-9.4, +3.0] | costlier: +1.06 µs to +4.14 µs |
-| ro-prepared-c5 | `ext` + extension, tagged, defaults | 10 | 37.31 | +3.45 [+2.74, +4.16] | +9.1% [+7.2, +11.1] | -4.4% [-7.6, -1.0] | costlier: +2.74 µs to +4.16 µs |
+| ro-prepared-c5 | `ext` + extension, tagged, defaults | 10 | 37.31 | +3.45 [+2.74, +4.16] † | +9.1% [+7.2, +11.1] | -4.4% [-7.6, -1.0] | costlier: +2.74 µs to +4.16 µs |
 | ro-prepared-c5 | `plain-ext` + extension, untagged (untagged = skip) | 10 | 37.54 | +0.96 [+0.06, +1.86] | +2.6% [+0.2, +5.0] | +2.8% [-3.0, +9.0] | costlier: +0.06 µs to +1.86 µs |
-| ro-prepared-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 10 | 37.31 | +9.44 [+8.20, +10.68] | +25.1% [+21.4, +28.9] | -11.8% [-15.1, -8.3] | costlier: +8.20 µs to +10.68 µs |
+| ro-prepared-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 10 | 37.31 | +9.44 [+8.20, +10.68] † | +25.1% [+21.4, +28.9] | -11.8% [-15.1, -8.3] | costlier: +8.20 µs to +10.68 µs |
 | ro-prepared-c20 | `ext` + extension, tagged, defaults | 10 | 25.73 | -5.46 [-25.39, +14.46] | -1.3% [-27.8, +35.0] | +14.5% [-31.7, +91.7] | not resolved: between -25.39 µs and +14.46 µs |
-| rw-simple-c1 | `ext` + extension, tagged, defaults | 10 | 40.41 | +2.80 [+1.82, +3.79] | +7.3% [+4.5, +10.2] | -4.8% [-8.1, -1.4] | costlier: +1.82 µs to +3.79 µs |
+| rw-simple-c1 | `ext` + extension, tagged, defaults | 10 | 40.41 | +2.80 [+1.82, +3.79] † | +7.3% [+4.5, +10.2] | -4.8% [-8.1, -1.4] | costlier: +1.82 µs to +3.79 µs |
 | rw-simple-c5 | `ext` + extension, tagged, defaults | 10 | 55.39 | +2.74 [+0.63, +4.85] | +5.0% [+1.1, +9.0] | -4.4% [-16.2, +9.0] | costlier: +0.63 µs to +4.85 µs |
 | rw-simple-c5 | `plain-ext` + extension, untagged (untagged = skip) | 10 | 54.52 | +1.45 [-0.08, +2.98] | +2.7% [-0.2, +5.8] | -1.1% [-3.7, +1.6] | not resolved: between -0.08 µs and +2.98 µs |
-| rw-simple-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 10 | 55.39 | +7.81 [+5.20, +10.42] | +14.1% [+9.2, +19.1] | -4.4% [-9.9, +1.3] | costlier: +5.20 µs to +10.42 µs |
-| rw-simple-c20 | `ext` + extension, tagged, defaults | 10 | 73.48 | +2.64 [+1.30, +3.98] | +3.6% [+1.8, +5.5] | +1.5% [-8.3, +12.2] | costlier: +1.30 µs to +3.98 µs |
-| rw-prepared-c1 | `ext` + extension, tagged, defaults | 10 | 27.83 | +2.84 [+2.26, +3.42] | +10.3% [+8.5, +12.1] | -5.4% [-7.1, -3.6] | costlier: +2.26 µs to +3.42 µs |
-| rw-prepared-c5 | `ext` + extension, tagged, defaults | 10 | 44.10 | +2.40 [+1.21, +3.60] | +5.5% [+2.7, +8.3] | -4.1% [-8.8, +0.8] | costlier: +1.21 µs to +3.60 µs |
-| rw-prepared-c20 | `ext` + extension, tagged, defaults | 10 | 61.47 | +2.82 [+1.82, +3.81] | +4.5% [+2.9, +6.2] | -3.3% [-6.5, +0.1] | costlier: +1.82 µs to +3.81 µs |
-| nested-simple-c5 | `ext` + extension, defaults (track = top) | 10 | 6.88 | +0.41 [+0.29, +0.54] | +5.9% [+4.0, +7.8] | -3.6% [-6.8, -0.4] | costlier: +0.29 µs to +0.54 µs |
-| nested-simple-c5 | `ext-all-inherit` + extension, track = all, nested_tags = inherit | 10 | 7.51 | +1.07 [+0.84, +1.30] | +13.8% [+11.4, +16.3] | -9.7% [-12.3, -7.1] | costlier: +0.84 µs to +1.30 µs |
-| nested-simple-c5 | `ext-all-scan` + extension, track = all, nested_tags = scan | 10 | 7.51 | +1.84 [+1.64, +2.03] | +24.0% [+21.3, +26.8] | -15.9% [-18.1, -13.6] | costlier: +1.64 µs to +2.03 µs |
+| rw-simple-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 10 | 55.39 | +7.81 [+5.20, +10.42] † | +14.1% [+9.2, +19.1] | -4.4% [-9.9, +1.3] | costlier: +5.20 µs to +10.42 µs |
+| rw-simple-c20 | `ext` + extension, tagged, defaults | 10 | 73.48 | +2.64 [+1.30, +3.98] † | +3.6% [+1.8, +5.5] | +1.5% [-8.3, +12.2] | costlier: +1.30 µs to +3.98 µs |
+| rw-prepared-c1 | `ext` + extension, tagged, defaults | 10 | 27.83 | +2.84 [+2.26, +3.42] † | +10.3% [+8.5, +12.1] | -5.4% [-7.1, -3.6] | costlier: +2.26 µs to +3.42 µs |
+| rw-prepared-c5 | `ext` + extension, tagged, defaults | 10 | 44.10 | +2.40 [+1.21, +3.60] † | +5.5% [+2.7, +8.3] | -4.1% [-8.8, +0.8] | costlier: +1.21 µs to +3.60 µs |
+| rw-prepared-c20 | `ext` + extension, tagged, defaults | 10 | 61.47 | +2.82 [+1.82, +3.81] † | +4.5% [+2.9, +6.2] | -3.3% [-6.5, +0.1] | costlier: +1.82 µs to +3.81 µs |
+| nested-simple-c5 | `ext` + extension, defaults (track = top) | 10 | 6.88 | +0.41 [+0.29, +0.54] † | +5.9% [+4.0, +7.8] | -3.6% [-6.8, -0.4] | costlier: +0.29 µs to +0.54 µs |
+| nested-simple-c5 | `ext-all-inherit` + extension, track = all, nested_tags = inherit | 10 | 7.51 | +1.07 [+0.84, +1.30] † | +13.8% [+11.4, +16.3] | -9.7% [-12.3, -7.1] | costlier: +0.84 µs to +1.30 µs |
+| nested-simple-c5 | `ext-all-scan` + extension, track = all, nested_tags = scan | 10 | 7.51 | +1.84 [+1.64, +2.03] † | +24.0% [+21.3, +26.8] | -15.9% [-18.1, -13.6] | costlier: +1.64 µs to +2.03 µs |
 | inlist-simple-c5 | `inlist-ext` 10k IN list + ';': position = append (heuristic tail scan) | 10 | 5832.32 | -290.84 [-532.40, -49.28] | -4.6% [-8.1, -1.0] | +5.1% [+1.0, +9.4] | cheaper: -532.40 µs to -49.28 µs |
 | inlist-simple-c5 | `inlist-ext-any` 10k IN list + ';': position = any (full scan) | 10 | 5832.32 | +195.25 [-625.74, +1016.25] | +2.7% [-8.7, +15.5] | -4.2% [-18.5, +12.6] | not resolved: between -625.74 µs and +1016.25 µs |
 | inlist-simple-c5 | `inlist0-ext` 10k IN list, no ';': position = append (strlen + tail scan) | 10 | 5905.25 | -685.81 [-2075.48, +703.86] | -8.3% [-22.5, +8.5] | +13.3% [-12.4, +46.5] | not resolved: between -2075.48 µs and +703.86 µs |
 | inlist-simple-c5 | `inlist0-ext-any` 10k IN list, no ';': position = any (full scan) | 10 | 5905.25 | +317.48 [-176.61, +811.58] | +3.4% [-0.9, +7.8] | -3.2% [-6.7, +0.4] | not resolved: between -176.61 µs and +811.58 µs |
-| evict-simple-c5 | `ext-max10000` + extension, a new tag set every statement, max_entries = 10000 (sustained eviction) | 10 | 53.16 | +5.57 [+4.32, +6.83] | +10.6% [+8.5, +12.7] | -6.8% [-9.6, -3.9] | costlier: +4.32 µs to +6.83 µs |
+| evict-simple-c5 | `ext-max10000` + extension, a new tag set every statement, max_entries = 10000 (sustained eviction) | 10 | 53.16 | +5.57 [+4.32, +6.83] † | +10.6% [+8.5, +12.7] | -6.8% [-9.6, -3.9] | costlier: +4.32 µs to +6.83 µs |
 
 ### Latency
 
-Transaction latency percentiles from pgbench's per-transaction log, per run; change against the paired baseline run, mean and 95% CI over the pairs.
+Transaction latency percentiles from pgbench's per-transaction log, per run; change against the paired baseline run, mean and 95% CI over the pairs. 34 of these 90 pointwise intervals exclude zero; if no configuration changed latency, about 4 would by chance. † marks an interval that still excludes zero when all 90 are made simultaneous (Bonferroni, each at 99.944%): those effects are unlikely to be chance findings of this many comparisons, though they remain subject to the VM caveats above.
 
 | Scenario | Configuration | pgss p50 / p95 / p99 ms | Δp50 % [95% CI] | Δp95 % [95% CI] | Δp99 % [95% CI] |
 |---|---|---:|---:|---:|---:|
 | ro-simple-c1 | `ext` + extension, tagged, defaults | 0.071 / 0.110 / 0.157 | +3.7% [-3.6, +11.5] | +3.1% [-5.9, +13.1] | +7.3% [-4.4, +20.3] |
 | ro-simple-c5 | `ext` + extension, tagged, defaults | 0.091 / 0.127 / 0.171 | +1.8% [-3.3, +7.1] | -2.8% [-16.3, +12.7] | -5.2% [-23.5, +17.6] |
 | ro-simple-c5 | `plain-ext` + extension, untagged (untagged = skip) | 0.090 / 0.138 / 0.202 | +3.3% [+1.8, +4.8] | +3.8% [-3.2, +11.3] | +1.3% [-11.7, +16.2] |
-| ro-simple-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 0.091 / 0.127 / 0.171 | +9.9% [+6.4, +13.5] | +8.5% [-3.0, +21.4] | +9.5% [-8.1, +30.4] |
+| ro-simple-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 0.091 / 0.127 / 0.171 | +9.9% [+6.4, +13.5] † | +8.5% [-3.0, +21.4] | +9.5% [-8.1, +30.4] |
 | ro-simple-c5 | `ext-store5k` + extension, store pre-populated with 5000 entries | 0.091 / 0.127 / 0.171 | +2.8% [-0.2, +6.0] | +1.4% [-7.4, +10.9] | +0.5% [-12.5, +15.5] |
 | ro-simple-c5 | `ext-reader15s` + extension, exporter queries every 15 s | 0.091 / 0.127 / 0.171 | +2.9% [-0.2, +6.0] | +0.4% [-8.2, +9.9] | -0.0% [-13.7, +15.8] |
 | ro-simple-c5 | `ext-reader1s` + extension, exporter queries every 1 s | 0.091 / 0.127 / 0.171 | +4.2% [+1.7, +6.8] | +9.1% [+1.6, +17.2] | +18.6% [+5.5, +33.4] |
-| ro-simple-c5 | `ext-1s-buckets` + extension, 1 s buckets (a rollover every second) | 0.091 / 0.127 / 0.171 | +4.3% [+3.1, +5.5] | +8.1% [+0.5, +16.2] | +13.6% [-3.1, +33.3] |
-| ro-simple-c20 | `ext` + extension, tagged, defaults | 0.139 / 0.318 / 0.508 | +9.6% [+7.7, +11.6] | +7.8% [+2.3, +13.6] | +6.7% [-2.7, +17.0] |
+| ro-simple-c5 | `ext-1s-buckets` + extension, 1 s buckets (a rollover every second) | 0.091 / 0.127 / 0.171 | +4.3% [+3.1, +5.5] † | +8.1% [+0.5, +16.2] | +13.6% [-3.1, +33.3] |
+| ro-simple-c20 | `ext` + extension, tagged, defaults | 0.139 / 0.318 / 0.508 | +9.6% [+7.7, +11.6] † | +7.8% [+2.3, +13.6] | +6.7% [-2.7, +17.0] |
 | ro-prepared-c1 | `ext` + extension, tagged, defaults | 0.057 / 0.089 / 0.132 | +5.1% [-2.4, +13.3] | +1.2% [-4.9, +7.8] | -0.1% [-11.9, +13.3] |
 | ro-prepared-c5 | `ext` + extension, tagged, defaults | 0.076 / 0.122 / 0.172 | +5.2% [+2.8, +7.5] | +5.4% [-1.1, +12.2] | +6.5% [-2.9, +16.7] |
 | ro-prepared-c5 | `plain-ext` + extension, untagged (untagged = skip) | 0.077 / 0.131 / 0.188 | +0.1% [-1.9, +2.1] | -6.5% [-16.8, +5.0] | -12.5% [-28.3, +6.8] |
-| ro-prepared-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 0.076 / 0.122 / 0.172 | +15.2% [+11.2, +19.3] | +15.2% [+4.4, +27.1] | +15.5% [-1.5, +35.5] |
+| ro-prepared-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 0.076 / 0.122 / 0.172 | +15.2% [+11.2, +19.3] † | +15.2% [+4.4, +27.1] | +15.5% [-1.5, +35.5] |
 | ro-prepared-c20 | `ext` + extension, tagged, defaults | 0.097 / 0.249 / 0.449 | -12.8% [-49.3, +50.0] | -15.5% [-55.2, +59.6] | -1.0% [-30.7, +41.5] |
-| rw-simple-c1 | `ext` + extension, tagged, defaults | 0.480 / 0.642 / 0.798 | +4.3% [+2.5, +6.1] | +1.9% [-2.9, +7.0] | +0.2% [-6.0, +6.8] |
+| rw-simple-c1 | `ext` + extension, tagged, defaults | 0.480 / 0.642 / 0.798 | +4.3% [+2.5, +6.1] † | +1.9% [-2.9, +7.0] | +0.2% [-6.0, +6.8] |
 | rw-simple-c5 | `ext` + extension, tagged, defaults | 0.952 / 1.647 / 2.207 | +2.5% [+0.8, +4.2] | +11.7% [-19.1, +54.1] | +6.9% [-35.9, +78.1] |
 | rw-simple-c5 | `plain-ext` + extension, untagged (untagged = skip) | 0.949 / 1.627 / 2.139 | +1.1% [-0.5, +2.8] | +0.4% [-3.2, +4.1] | -0.7% [-9.2, +8.6] |
 | rw-simple-c5 | `ext-regex-normalize` + extension, regex extractor (merge) and a normalize rule | 0.952 / 1.647 / 2.207 | +7.4% [+3.7, +11.3] | +1.9% [-6.1, +10.5] | -8.3% [-24.9, +11.9] |
@@ -205,14 +212,14 @@ Transaction latency percentiles from pgbench's per-transaction log, per run; cha
 | rw-prepared-c1 | `ext` + extension, tagged, defaults | 0.394 / 0.517 / 0.623 | +8.3% [+1.4, +15.8] | +5.2% [+2.0, +8.5] | +2.6% [-9.3, +16.1] |
 | rw-prepared-c5 | `ext` + extension, tagged, defaults | 0.866 / 1.573 / 2.122 | +2.7% [+1.3, +4.2] | +2.7% [-0.7, +6.2] | +11.8% [-15.2, +47.4] |
 | rw-prepared-c20 | `ext` + extension, tagged, defaults | 2.885 / 11.680 / 20.468 | +3.2% [+0.7, +5.8] | +3.0% [-1.4, +7.6] | +4.4% [-1.7, +10.8] |
-| nested-simple-c5 | `ext` + extension, defaults (track = top) | 0.151 / 0.230 / 0.350 | +4.5% [+2.9, +6.0] | +4.8% [-3.0, +13.4] | -2.3% [-16.4, +14.2] |
-| nested-simple-c5 | `ext-all-inherit` + extension, track = all, nested_tags = inherit | 0.165 / 0.234 / 0.359 | +10.5% [+8.6, +12.4] | +11.2% [+4.4, +18.5] | +18.1% [+3.5, +34.9] |
-| nested-simple-c5 | `ext-all-scan` + extension, track = all, nested_tags = scan | 0.165 / 0.234 / 0.359 | +17.8% [+15.7, +20.0] | +21.1% [+13.8, +28.8] | +26.4% [+11.2, +43.7] |
+| nested-simple-c5 | `ext` + extension, defaults (track = top) | 0.151 / 0.230 / 0.350 | +4.5% [+2.9, +6.0] † | +4.8% [-3.0, +13.4] | -2.3% [-16.4, +14.2] |
+| nested-simple-c5 | `ext-all-inherit` + extension, track = all, nested_tags = inherit | 0.165 / 0.234 / 0.359 | +10.5% [+8.6, +12.4] † | +11.2% [+4.4, +18.5] | +18.1% [+3.5, +34.9] |
+| nested-simple-c5 | `ext-all-scan` + extension, track = all, nested_tags = scan | 0.165 / 0.234 / 0.359 | +17.8% [+15.7, +20.0] † | +21.1% [+13.8, +28.8] † | +26.4% [+11.2, +43.7] |
 | inlist-simple-c5 | `inlist-ext` 10k IN list + ';': position = append (heuristic tail scan) | 5.831 / 6.997 / 9.224 | -3.7% [-6.6, -0.7] | -9.5% [-17.0, -1.3] | -13.6% [-23.6, -2.3] |
 | inlist-simple-c5 | `inlist-ext-any` 10k IN list + ';': position = any (full scan) | 5.831 / 6.997 / 9.224 | +0.4% [-5.3, +6.4] | +9.9% [-24.4, +59.8] | +10.6% [-32.0, +79.9] |
 | inlist-simple-c5 | `inlist0-ext` 10k IN list, no ';': position = append (strlen + tail scan) | 5.848 / 7.228 / 9.160 | -10.8% [-29.0, +12.0] | -17.2% [-44.9, +24.4] | -19.3% [-49.4, +28.6] |
 | inlist-simple-c5 | `inlist0-ext-any` 10k IN list, no ';': position = any (full scan) | 5.848 / 7.228 / 9.160 | +1.5% [+0.5, +2.4] | +6.3% [-4.7, +18.6] | +12.2% [-9.4, +38.8] |
-| evict-simple-c5 | `ext-max10000` + extension, a new tag set every statement, max_entries = 10000 (sustained eviction) | 0.093 / 0.142 / 0.207 | +5.7% [+4.2, +7.3] | +8.3% [+1.9, +15.2] | +59.6% [+38.3, +84.2] |
+| evict-simple-c5 | `ext-max10000` + extension, a new tag set every statement, max_entries = 10000 (sustained eviction) | 0.093 / 0.142 / 0.207 | +5.7% [+4.2, +7.3] † | +8.3% [+1.9, +15.2] | +59.6% [+38.3, +84.2] † |
 
 ### Absolute values
 

@@ -273,9 +273,21 @@ def verdict(ci, higher_is_better=False, unit="%", fmt="%+.1f"):
     return "not resolved: between %s and %s" % (f(lo), f(hi))
 
 
-def compare(runs):
+def _check_unique(runs):
+    """Runs are keyed by (scenario, config, block); a duplicate would silently
+    replace another run's data."""
+    seen = set()
+    for r in runs:
+        k = (r["scenario"], r["config"], r["block"])
+        if k in seen:
+            raise ValueError("duplicate run for scenario %s, config %s, block %s" % k)
+        seen.add(k)
+
+
+def compare(runs, conf=0.95):
     """One row per (scenario, configuration) that is not its own baseline,
-    paired with the baseline's run of the same block."""
+    paired with the baseline's run of the same block; intervals at level conf."""
+    _check_unique(runs)
     order, by = [], {}
     for r in runs:
         k = (r["scenario"], r["config"])
@@ -298,19 +310,85 @@ def compare(runs):
                "n": len(pairs), "stmts_per_txn": first.get("stmts_per_txn", 1),
                "base_tps": median([b["tps"] for _, b in pairs]) if pairs else None,
                "base_cpu_us_per_stmt": median_none([b.get("cpu_us_per_stmt") for _, b in pairs]),
-               "tps": ratio_ci([(m["tps"], b["tps"]) for m, b in pairs]),
-               "cpu_rel": ratio_ci([(m.get("cpu_us_per_txn"), b.get("cpu_us_per_txn")) for m, b in pairs]),
+               "tps": ratio_ci([(m["tps"], b["tps"]) for m, b in pairs], conf),
+               "cpu_rel": ratio_ci([(m.get("cpu_us_per_txn"), b.get("cpu_us_per_txn")) for m, b in pairs], conf),
                "cpu_diff_us": mean_ci([m["cpu_us_per_txn"] - b["cpu_us_per_txn"] for m, b in pairs
                                        if m.get("cpu_us_per_txn") is not None
-                                       and b.get("cpu_us_per_txn") is not None]),
+                                       and b.get("cpu_us_per_txn") is not None], conf),
                "cpu_stmt_diff_us": mean_ci([m["cpu_us_per_stmt"] - b["cpu_us_per_stmt"] for m, b in pairs
                                             if m.get("cpu_us_per_stmt") is not None
-                                            and b.get("cpu_us_per_stmt") is not None])}
+                                            and b.get("cpu_us_per_stmt") is not None], conf)}
         for p in ("p50", "p95", "p99"):
             row["base_" + p + "_ms"] = median_none([get(b, "all", p + "_ms") for _, b in pairs])
-            row[p] = ratio_ci([(get(m, "all", p + "_ms"), get(b, "all", p + "_ms")) for m, b in pairs])
+            row[p] = ratio_ci([(get(m, "all", p + "_ms"), get(b, "all", p + "_ms")) for m, b in pairs], conf)
         rows.append(row)
     return rows
+
+
+CORE = re.compile(r"^(ro|rw)-(simple|prepared)-c\d+$")
+
+
+def _excludes_zero(ci):
+    return bool(ci) and ci.get("lo") is not None and (ci["lo"] > 0 or ci["hi"] < 0)
+
+
+def tagged_headline(rows):
+    """The default tagged configuration (`ext`) over the core scenarios, split
+    into those whose CPU-per-statement interval excludes zero and the rest."""
+    core = [r for r in rows if r["config"] == "ext" and CORE.match(r["scenario"])]
+    res = [r for r in core if _excludes_zero(r["cpu_stmt_diff_us"])]
+    unres = [r for r in core if not _excludes_zero(r["cpu_stmt_diff_us"])]
+    rng = lambda xs: (min(xs), max(xs)) if xs else None
+    return {"total": len(core), "resolved": res, "unresolved": unres,
+            "cpu_mean": rng([r["cpu_stmt_diff_us"]["mean"] for r in res]),
+            "cpu_ci": rng([r["cpu_stmt_diff_us"]["lo"] for r in res] + [r["cpu_stmt_diff_us"]["hi"] for r in res]),
+            "tps_mean": rng([r["tps"]["mean"] for r in res if r["tps"].get("mean") is not None]),
+            "tps_ci": rng([r["tps"][k] for r in res for k in ("lo", "hi") if r["tps"].get(k) is not None]),
+            "cpu_rel_mean": rng([r["cpu_rel"]["mean"] for r in res if r.get("cpu_rel")
+                                 and r["cpu_rel"].get("mean") is not None])}
+
+
+def render_headline(rows):
+    h = tagged_headline(rows)
+    if not h["total"]:
+        return "No core scenario with the tagged configuration in this campaign."
+    f = lambda v: "%+.1f" % v
+    out = []
+    if h["resolved"]:
+        out.append("**%s to %s µs** of server CPU per statement in the %d of %d core workloads where the "
+                   "interval excludes zero (their 95%% CIs lie within %s to %s µs; %s%% to %s%% of the "
+                   "baseline's CPU; ΔTPS means %s%% to %s%%, CIs within %s%% to %s%%)" % (
+                       f(h["cpu_mean"][0]), f(h["cpu_mean"][1]), len(h["resolved"]), h["total"],
+                       f(h["cpu_ci"][0]), f(h["cpu_ci"][1]),
+                       f(h["cpu_rel_mean"][0]) if h["cpu_rel_mean"] else "?",
+                       f(h["cpu_rel_mean"][1]) if h["cpu_rel_mean"] else "?",
+                       f(h["tps_mean"][0]), f(h["tps_mean"][1]), f(h["tps_ci"][0]), f(h["tps_ci"][1])))
+    else:
+        out.append("No core workload resolved a cost (0 of %d)" % h["total"])
+    if h["unresolved"]:
+        parts = []
+        for r in h["unresolved"]:
+            c, t = r["cpu_stmt_diff_us"], r["tps"]
+            if c.get("lo") is None:
+                parts.append("`%s` (fewer than 2 pairs)" % r["scenario"])
+                continue
+            parts.append("`%s` %s µs [%s, %s] (ΔTPS %s%% [%s, %s])" % (
+                r["scenario"], f(c["mean"]), f(c["lo"]), f(c["hi"]), f(t["mean"]),
+                f(t["lo"]) if t.get("lo") is not None else "?", f(t["hi"]) if t.get("hi") is not None else "?"))
+        out.append("Not resolved, so bounded only by the upper end of the interval: " + "; ".join(parts))
+    return ". ".join(out) + "."
+
+
+def latency_exclusions(rows):
+    """(intervals that exclude zero, intervals) over the p50/p95/p99 columns."""
+    n = k = 0
+    for r in rows:
+        for p in ("p50", "p95", "p99"):
+            ci = r.get(p)
+            if ci and ci.get("lo") is not None:
+                n += 1
+                k += _excludes_zero(ci)
+    return k, n
 
 
 def _dig(r, path):
@@ -328,6 +406,7 @@ def median_none(xs):
 
 def absolute(runs):
     """Medians over blocks per (scenario, configuration)."""
+    _check_unique(runs)
     order, by = [], {}
     for r in runs:
         k = (r["scenario"], r["config"])
@@ -444,14 +523,25 @@ def render_campaign(d):
     ]
     out += ["- **%s:** %s" % (k, v) for k, v in meta if v is not None]
     out.append("")
+    out += ["**Tagged statements, default configuration** (generated from the table below): "
+            + render_headline(cmp_rows), ""]
     if notes:
         out += [notes, ""]
+    # Bonferroni: every interval of a table at level 1 - 0.05/M holds simultaneously with 95% confidence.
+    m_cpu = sum(1 for r in cmp_rows if (r["cpu_stmt_diff_us"] or {}).get("lo") is not None)
+    lat_k, m_lat = latency_exclusions(cmp_rows)
+    sim_cpu = {(r["scenario"], r["config"]): r for r in compare(runs, 1 - 0.05 / max(m_cpu, 1))}
+    sim_lat = {(r["scenario"], r["config"]): r for r in compare(runs, 1 - 0.05 / max(m_lat, 1))}
+    dag = lambda sim, r, k: " †" if _excludes_zero(sim[(r["scenario"], r["config"])][k]) else ""
     out += ["### Cost per statement and throughput", "",
             "Each configuration against pg_stat_statements alone on the same script, paired by block. "
-            "Mean change and its 95% CI (Student t over the pairs). Server CPU is the CPU time of all "
+            "Mean change and its 95%% CI (Student t over the pairs). Server CPU is the CPU time of all "
             "PostgreSQL processes during the measured run, divided by the transactions and by the "
             "statements per transaction. The verdict is on the CPU per statement: *not resolved* means the "
-            "interval includes zero, and its upper end is the largest overhead the data is consistent with.",
+            "interval includes zero, and its upper end is the largest overhead the data is consistent with. "
+            "Each interval is pointwise; † marks a CPU difference that also excludes zero when all %d CPU "
+            "intervals of this table are made simultaneous (Bonferroni, each at %.2f%%)." % (
+                m_cpu, 100 * (1 - 0.05 / max(m_cpu, 1))),
             "",
             "| Scenario | Configuration | pairs | pgss CPU µs/stmt | ΔCPU µs/stmt [95% CI] | ΔCPU % [95% CI] "
             "| ΔTPS % [95% CI] | Verdict (CPU per statement) |",
@@ -459,18 +549,24 @@ def render_campaign(d):
     for r in cmp_rows:
         out.append("| %s | %s | %d | %s | %s | %s | %s | %s |" % (
             r["scenario"], lab(r), r["n"], _f(r["base_cpu_us_per_stmt"], "%.2f"),
-            _ci(r["cpu_stmt_diff_us"], "%+.2f", ""), _ci(r["cpu_rel"]), _ci(r["tps"]),
+            _ci(r["cpu_stmt_diff_us"], "%+.2f", "") + dag(sim_cpu, r, "cpu_stmt_diff_us"), _ci(r["cpu_rel"]),
+            _ci(r["tps"]),
             verdict(r["cpu_stmt_diff_us"], unit=" µs", fmt="%+.2f")))
     out += ["", "### Latency", "",
             "Transaction latency percentiles from pgbench's per-transaction log, per run; change against the "
-            "paired baseline run, mean and 95% CI over the pairs.", "",
+            "paired baseline run, mean and 95%% CI over the pairs. %d of these %d pointwise intervals exclude "
+            "zero; if no configuration changed latency, about %.0f would by chance. † marks an interval that "
+            "still excludes zero when all %d are made simultaneous (Bonferroni, each at %.3f%%): those effects "
+            "are unlikely to be chance findings of this many comparisons, though they remain subject to the "
+            "VM caveats above." % (lat_k, m_lat, 0.05 * m_lat, m_lat, 100 * (1 - 0.05 / max(m_lat, 1))), "",
             "| Scenario | Configuration | pgss p50 / p95 / p99 ms | Δp50 % [95% CI] | Δp95 % [95% CI] "
             "| Δp99 % [95% CI] |",
             "|---|---|---:|---:|---:|---:|"]
     for r in cmp_rows:
         out.append("| %s | %s | %s / %s / %s | %s | %s | %s |" % (
             r["scenario"], lab(r), _f(r["base_p50_ms"]), _f(r["base_p95_ms"]), _f(r["base_p99_ms"]),
-            _ci(r["p50"]), _ci(r["p95"]), _ci(r["p99"])))
+            _ci(r["p50"]) + dag(sim_lat, r, "p50"), _ci(r["p95"]) + dag(sim_lat, r, "p95"),
+            _ci(r["p99"]) + dag(sim_lat, r, "p99")))
     out += ["", "### Absolute values", "",
             "Medians over blocks. Absolute numbers describe this host only.", "",
             "| Scenario | Configuration | runs | TPS | TPS spread | server cores | CPU µs/txn | CPU µs/stmt "
@@ -519,7 +615,13 @@ def campaign_dirs(root):
 def build_doc(template, root):
     if "{{campaigns}}" not in template:
         raise ValueError("template has no {{campaigns}} marker")
-    body = "\n".join(render_campaign(d) for d in campaign_dirs(root))
+    dirs = campaign_dirs(root)
+    body = "\n".join(render_campaign(d) for d in dirs)
+    if "{{headline}}" in template:
+        if not dirs:
+            raise ValueError("{{headline}} needs at least one campaign")
+        _, runs, _ = load_campaign(dirs[0])
+        template = template.replace("{{headline}}", render_headline(compare(runs)))
     return GENERATED + template.replace("{{campaigns}}", body.rstrip("\n"))
 
 

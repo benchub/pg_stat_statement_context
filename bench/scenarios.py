@@ -102,7 +102,8 @@ def _cfg(name, baseline, preload, script, label, settings=(), checks=(), extra="
 def scenarios(ncpu, duration, high_clients=False):
     """The scenario matrix. ncpu is the number of CPUs the server runs on."""
     out = []
-    clients = [1, ncpu, 4 * ncpu] + ([256] if high_clients else [])
+    # Deduplicated: with ncpu = 1, 1 and ncpu coincide; with 64 CPUs, 4 * ncpu is 256.
+    clients = list(dict.fromkeys([1, ncpu, 4 * ncpu] + ([256] if high_clients else [])))
     for wl, stmts, tagged in (("ro", 1, 1), ("rw", 7, 5)):
         for proto in ("simple", "prepared"):
             for c in clients:
