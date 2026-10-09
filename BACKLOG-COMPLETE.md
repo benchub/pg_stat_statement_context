@@ -1791,6 +1791,29 @@ Fix:
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-14: Release-tree and design-doc cleanup
+
+**Description:** DOC-11, DOC-12, DOC-16, HYG-6 and HYG-7.
+- Mark `DESIGN.md` as describing the implemented v1.0, not a "Draft". Fix its stale passages: roadmap items that have shipped, the planner-hook description, and the "Repository layout (proposed)" section. Make sure §11 is still accurate.
+- Make user docs stop pointing into `research/`, `BACKLOG*.md` or other development material, or mark those links clearly as developer references.
+- Add `.gitattributes` `export-ignore` rules so `git archive` and release tarballs leave out agent and planning files (`CLAUDE.md`, `BACKLOG*.md`, `worktrees/`, `tmp/`) and, if the owner agrees in review, `research/` and `bench/results/`. Check that `make`/`make install`/the tests still work from a `git archive` tarball.
+- Remove backlog-ID citations from source comments where they don't help a maintainer. Keep the explanation; drop the ID.
+- Add a short glossary to the README or docs (tag, tag set, context, key, extractor, frame, bucket).
+- HYG-7 (owner action, not agent work): copyright ownership and contributor attestation for an MIT-licensed project developed with AI assistance. Add a `NOTICE`/`AUTHORS` stub and a line in README about who holds the copyright, wording to be supplied by the owner. Leave a TODO for the owner in the item if they haven't supplied it.
+
+**Acceptance criteria:**
+- `git archive HEAD | tar -t` leaves out the listed files. A clean build and `make installcheck` from the extracted tarball pass in Docker.
+- No user doc links to development-only files, unless the link is labeled as such. The DESIGN.md status and sections are accurate.
+
+**Owner decisions (2026-10-08):**
+- Release tarballs leave out `research/`, as well as the agent and planning files.
+- `bench/results/` stays in tarballs, so `docs/benchmarks.md` can be regenerated from them.
+- No copyright wording was supplied. Add the NOTICE/AUTHORS stub and the README line with a clearly marked `TODO(owner)` placeholder for the copyright holder.
+
+**Depends on:** 20261008-065635-13 (so DESIGN.md benchmark claims are rewritten once)
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.

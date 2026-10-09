@@ -51,7 +51,6 @@ on `(userid, dbid, queryid, toplevel)` (DESIGN.md §5.1, §7).
 | ID | Title | Depends on | Has open questions | Status |
 |----|-------|------------|--------------------|--------|
 | 20261005-091225-29 | v1 release readiness | 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1, 20261007-133120-1, 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 | no | ready |
-| 20261008-065635-14 | Release-tree and design-doc cleanup | 20261008-065635-13 | no | ready |
 | 20261005-091225-45 | Roadmap: distribution packaging and provider outreach | 20261005-091225-29 | no | blocked-on-deps |
 | 20261005-091225-46 | Roadmap: upstream proposal for a statement-comment hook | 20261005-091225-26, 20261005-091225-29 | no | blocked-on-deps |
 
@@ -214,30 +213,6 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - `_info()`: keep `oldest_bucket` exact, but bound the retry and add a cheap counters-only function for scrapers.
 - Long-statement scans: measure and document only; no new byte-budget GUC.
 - Per-key caps don't bound tag-set combinations: document it and export the health counters; no new combination-budget feature.
-
-### 20261008-065635-14: Release-tree and design-doc cleanup
-
-**Description:** DOC-11, DOC-12, DOC-16, HYG-6 and HYG-7.
-- Mark `DESIGN.md` as describing the implemented v1.0, not a "Draft". Fix its stale passages: roadmap items that have shipped, the planner-hook description, and the "Repository layout (proposed)" section. Make sure §11 is still accurate.
-- Make user docs stop pointing into `research/`, `BACKLOG*.md` or other development material, or mark those links clearly as developer references.
-- Add `.gitattributes` `export-ignore` rules so `git archive` and release tarballs leave out agent and planning files (`CLAUDE.md`, `BACKLOG*.md`, `worktrees/`, `tmp/`) and, if the owner agrees in review, `research/` and `bench/results/`. Check that `make`/`make install`/the tests still work from a `git archive` tarball.
-- Remove backlog-ID citations from source comments where they don't help a maintainer. Keep the explanation; drop the ID.
-- Add a short glossary to the README or docs (tag, tag set, context, key, extractor, frame, bucket).
-- HYG-7 (owner action, not agent work): copyright ownership and contributor attestation for an MIT-licensed project developed with AI assistance. Add a `NOTICE`/`AUTHORS` stub and a line in README about who holds the copyright, wording to be supplied by the owner. Leave a TODO for the owner in the item if they haven't supplied it.
-
-**Acceptance criteria:**
-- `git archive HEAD | tar -t` leaves out the listed files. A clean build and `make installcheck` from the extracted tarball pass in Docker.
-- No user doc links to development-only files, unless the link is labeled as such. The DESIGN.md status and sections are accurate.
-
-**Owner decisions (2026-10-08):**
-- Release tarballs leave out `research/`, as well as the agent and planning files.
-- `bench/results/` stays in tarballs, so `docs/benchmarks.md` can be regenerated from them.
-- No copyright wording was supplied. Add the NOTICE/AUTHORS stub and the README line with a clearly marked `TODO(owner)` placeholder for the copyright holder.
-
-**Depends on:** 20261008-065635-13 (so DESIGN.md benchmark claims are rewritten once)
-**Open questions:** none
-**Status:** ready
-
 
 ---
 
