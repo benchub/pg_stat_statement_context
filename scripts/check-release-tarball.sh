@@ -68,6 +68,7 @@ git archive --format=tar HEAD | tar -xf - -C "$DIR"
 [ ! -e "$DIR/.git" ] || { echo "FAIL: extracted tree has .git" >&2; exit 1; }
 
 if command -v python3 >/dev/null; then
+	mkdir -p "$DIR/tmp"
 	python3 "$DIR/bench/analyze.py" doc --results "$DIR/bench/results" \
 		--template "$DIR/bench/benchmarks.md.in" --out "$DIR/tmp/benchmarks.md"
 	cmp -s "$DIR/tmp/benchmarks.md" "$DIR/docs/benchmarks.md" \
