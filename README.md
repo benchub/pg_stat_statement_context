@@ -48,7 +48,7 @@ make install # may need sudo
 # for a specific server: make PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config install
 ```
 
-This builds the release library. `make PSSC_TESTING=1` builds a testing library instead. It adds test-only hooks and exports the internal API that the TEST-ONLY modules in `test/modules/` need, so don't install it on a production server. See [DESIGN.md §9](DESIGN.md#9-testing-strategy).
+This builds the release library. `make PSSC_TESTING=1` builds a testing library instead. It adds test-only hooks and exports the internal API that the TEST-ONLY modules in `test/modules/` need, so don't install it on a production server. Developer reference: [DESIGN.md §9](DESIGN.md#9-testing-strategy).
 
 ### Binaries
 To build Ubuntu 24.04 (noble) `.deb` packages for PostgreSQL 14–18 from PGDG, on amd64 and arm64, run `scripts/build-debs.sh`. It needs Docker, builds the committed tree, and writes the packages to `binaries/`. Each package is named `postgresql-<major>-pg-stat-statement-context`.
@@ -137,7 +137,7 @@ SELECT pg_stat_statement_context_extract(
 | [docs/upgrading.md](docs/upgrading.md) | Upgrading (library-only vs `ALTER EXTENSION ... UPDATE`), what needs a restart, when saved statistics are discarded, `pg_upgrade`, downgrading, uninstalling cleanly, and identifying the loaded build. |
 | [docs/benchmarks.md](docs/benchmarks.md) | Overhead against pg_stat_statements alone (CPU per statement, TPS, p50/p95/p99 with 95% confidence intervals), generated from the raw results in `bench/results/`: the scenarios, the method, what the data can and cannot bound, and the scan costs of long statements. [bench/README.md](bench/README.md) explains how to run it, including on dedicated hardware. |
 
-## Testing
+## Testing and development
 
 **Warning:** `make installcheck` changes server settings with `ALTER SYSTEM` and then resets them, wiping any value set that way, and most of its TAP tests need TEST-ONLY modules: run it only against a disposable cluster. To check a provisioned server, including a managed service such as Amazon RDS, run `make smoke` instead (see [Smoke test](docs/managed-services.md#smoke-test)): it needs only psql, runs as any role and changes no setting.
 
@@ -159,18 +159,29 @@ make unittest                         # standalone scanner/parser unit tests and
 fuzz/run-libfuzzer.sh -t 600          # libFuzzer (clang, ASan+UBSan) targets in Docker, 10 min each
 fuzz/sql/run.sh -- --duration 600     # regex extractor SQL fuzzer, assert build in Docker
 scripts/test-integrations.sh 17       # exporter recipes + Grafana dashboard, end to end in Docker
+scripts/check-release-tarball.sh 18   # release tarball (git archive HEAD): contents, then every test from it in Docker
 bench/run.sh [--major 18] [--dry-run]  # pgbench overhead benchmarks in Docker (bench/README.md)
 ```
 
-[docs/maintaining.md](docs/maintaining.md) lists the pg_stat_statements behaviors this extension mirrors, what to re-check when a new PostgreSQL release ships, the coexistence tests with other hook-using extensions, and the oldest-minor CI policy.
+Developer references (they ship with the source but are written for maintainers):
 
-[fuzz/README.md](fuzz/README.md) describes the fuzz targets, their invariants and how to replay a failure.
+- [docs/maintaining.md](docs/maintaining.md) lists the pg_stat_statements behaviors this extension mirrors, what to re-check when a new PostgreSQL release ships, the coexistence tests with other hook-using extensions, and the oldest-minor CI policy.
+- [fuzz/README.md](fuzz/README.md) describes the fuzz targets, their invariants and how to replay a failure.
+- [DESIGN.md](DESIGN.md) describes the design of the implemented version and its rationale in detail.
 
-`DESIGN.md` describes the design and its rationale in detail.
+## Glossary
+
+- **Tag**: one `key=value` pair of application context, such as `controller='users'`, taken from a SQL comment, from `application_name`, or from `tags_override`.
+- **Key**: the name of a tag (`controller`). Only keys kept by the `tags` allowlist and not in `exclude_tags` are stored; see [the tag pipeline](docs/extractors.md#the-tag-pipeline).
+- **Tag set**: the canonical set of tags of one statement after the tag pipeline: keys renamed, filtered, values normalized and truncated, sorted by key. It is shown as the `tags` jsonb column and is part of an entry's identity. A statement without tags has an empty tag set and, by default, is not recorded ([`untagged`](docs/configuration.md#untagged)).
+- **Context**: what the tag set describes, i.e. which part of the application ran the statement. An entry is one (query × context) combination: (database, user, `queryid`, `toplevel`, tag set).
+- **Extractor**: a parser that finds tags in a statement's comments (`sqlcommenter`, `marginalia`, `regex`) or in `application_name` (`appname`), configured with the [`extractors`](docs/configuration.md#extractors) setting.
+- **Frame**: the extension's backend-local record of one executing statement (one executor instance or one utility call) and its resolved tag set. Nested statements, such as those run by a PL/pgSQL function, can inherit the tags of the frame that runs them ([`nested_tags`](docs/configuration.md#nested_tags)).
+- **Bucket**: one time slice of an entry's statistics. Each entry keeps `calls` and `total_exec_time` for the last [`bucket_count`](docs/configuration.md#bucket_count) buckets of [`bucket_interval`](docs/configuration.md#bucket_interval) each (by default 12 × 5 minutes); older buckets expire.
 
 ## License
 
-See [LICENSE](LICENSE).
+MIT License: see [LICENSE](LICENSE). Copyright is held by the holder named in LICENSE and [NOTICE](NOTICE) (TODO(owner): confirm the copyright holder and add the contributor attestation policy to NOTICE).
 
 [marginalia]: https://github.com/basecamp/marginalia
 [SQLCommenter]: https://google.github.io/sqlcommenter/

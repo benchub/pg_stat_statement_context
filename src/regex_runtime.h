@@ -1,8 +1,7 @@
 /*
  * regex_runtime.h
- *		Runtime of the regex extractor (DESIGN.md §4.2, §6.11; backlog item
- *		20261005-091225-10): per-backend lazy compilation of the configured
- *		patterns and matching of comment bodies.
+ *		Runtime of the regex extractor (DESIGN.md §4.2, §6.11): per-backend
+ *		lazy compilation of the configured patterns and matching of comment bodies.
  *
  * _PG_init installs pssc_regex_extract() as the pipeline's regex hook
  * (pssc_extract_set_regex_hook()). It is called once per comment body of a
@@ -57,8 +56,7 @@ extern PSSC_TEST_API void pssc_regex_extract(void *arg, int index,
 										   PsscPairResult *result);
 
 /*
- * Value normalization (DESIGN.md §6.11 step 6; backlog item
- * 20261005-091225-41): applies, in order, every rule of list whose key is
+ * Value normalization (DESIGN.md §6.11 step 6): applies, in order, every rule of list whose key is
  * key[0, klen) to val[0, vlen) (valid in the database encoding, no NUL),
  * each to the previous rule's output. A rule is equivalent to
  * regexp_replace(value COLLATE "C", pattern, replacement, 'g') (same engine
@@ -132,8 +130,8 @@ extern PSSC_TEST_API PsscRegexTestEngineHook pssc_regex_test_engine_hook;
 #endif
 
 /*
- * Compile time limit per pattern, in milliseconds (backlog
- * 20261006-021334-1): some patterns take seconds or minutes to compile
+ * Compile time limit per pattern, in milliseconds (DESIGN.md §4.2): some
+ * patterns take seconds or minutes to compile
  * (e.g. ((?:(?:$)|\Zda|(?<!1)|\S){0,255}) ). pssc_regex_compile_limit_ms
  * is the limit in effect: PSSC_REGEX_COMPILE_LIMIT_MS, changed only by
  * tests (<= 0: no limit). In a client backend the limit is wall-clock

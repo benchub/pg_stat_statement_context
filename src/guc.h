@@ -156,7 +156,7 @@ typedef enum PsscExtractorKind
 } PsscExtractorKind;
 
 /*
- * What an extractor parses (backlog item 20261005-091225-38). An
+ * What an extractor parses (DESIGN.md §4.2). An
  * appname(format=F, ...) extractor is stored with kind F and source
  * APPNAME: it parses application_name with F's rules and parameters instead
  * of comments, and has no position.
@@ -280,8 +280,8 @@ extern PSSC_TEST_API uint64 pssc_guc_config_generation(void);
 extern PSSC_TEST_API uint64 pssc_guc_regex_generation(void);
 
 /*
- * Parsed pg_stat_statement_context.tags_override (backlog item
- * 20261005-091225-30): the sqlcommenter pairs of the setting, URL-decoded,
+ * Parsed pg_stat_statement_context.tags_override (DESIGN.md §8): the
+ * sqlcommenter pairs of the setting, URL-decoded,
  * in order (duplicates kept; the pipeline keeps the first). Flat and
  * pointer-free like PsscNormalizeList: header, pairs, then the
  * NUL-terminated strings. Keys are 1..PSSC_MAX_KEY_LEN bytes; an empty value

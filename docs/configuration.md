@@ -117,7 +117,7 @@ Tags are capped when they are extracted, for the current user. When they end up 
 - statements that inherit the caller's tags ([`nested_tags = inherit`](#nested_tags)) inside a `SECURITY DEFINER` function are recorded under the definer, with the definer's caps;
 - a tagged `SET ROLE` (with [`track_utility`](#track_utility)) is recorded under the new role, with its caps, and so is the [activity view](sql-interface.md#pg_stat_statement_context_activity) row of a portal run after a `SET ROLE`.
 
-Applying the caps again admits the values kept as strings in that role's scope and counts collapses in `capped_tags` again. It uses the cap settings in effect at that moment. This costs nothing under `database` and `server` or while caps are off, and little memory otherwise (DESIGN.md §6.1 "Identity").
+Applying the caps again admits the values kept as strings in that role's scope and counts collapses in `capped_tags` again. It uses the cap settings in effect at that moment. This costs nothing under `database` and `server` or while caps are off, and little memory otherwise (developer reference: DESIGN.md §6.1 "Identity").
 
 ### `cardinality_cap_slots`
 

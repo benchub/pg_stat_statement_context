@@ -34,7 +34,7 @@
  *		 later occurrences of a normalized key are not normalized again
  *		 (they lose to the first occurrence anyway);
  *	  7. truncate the value to max_tag_value_len bytes with env->cliplen.
- *	Exemplar capture (backlog item 20261005-091225-33) sits between steps 4
+ *	Exemplar capture (DESIGN.md §6.13) sits between steps 4
  *	and 5: a pair whose final key (after rename) is in env->exemplar_keys
  *	has its value captured for that key's exemplar slot, whatever step 5
  *	and later steps decide for the grouping tag set, so a denylisted key
@@ -90,7 +90,7 @@
 #include "scan.h"
 
 /*
- * Exemplars (backlog item 20261005-091225-33): at most this many keys in
+ * Exemplars (DESIGN.md §6.13): at most this many keys in
  * exemplar_keys, and at most this many bytes per captured value.
  */
 #define PSSC_MAX_EXEMPLAR_KEYS		8
@@ -102,7 +102,7 @@ struct PsscExtractor;
 struct PsscTagList;
 
 /*
- * Regex extractor hook (backlog item 20261005-091225-10). Called once per
+ * Regex extractor hook (DESIGN.md §4.2). Called once per
  * comment of a regex extractor, with the comment body (delimiters
  * stripped, see pssc_comment_body()). index is the extractor's position in
  * list, so an implementation can find its compiled regex. It reports pairs
@@ -120,8 +120,7 @@ typedef void (*PsscRegexExtractFn) (void *arg, int index,
 									PsscPairResult *result);
 
 /*
- * Value normalization hook (step 6 of the pipeline; backlog item
- * 20261005-091225-41). Called with a final key (1..PSSC_MAX_KEY_LEN bytes)
+ * Value normalization hook (step 6 of the pipeline). Called with a final key (1..PSSC_MAX_KEY_LEN bytes)
  * and its value (valid in the encoding, no NUL). Returns NO_RULES if no
  * rule names key (the value is kept as is), DONE with the result in *out /
  * *outlen (at most limit bytes, valid until pssc_tagset_build() returns,
@@ -142,7 +141,7 @@ typedef PsscNormalizeResult (*PsscNormalizeFn) (void *arg,
 												const char **out, size_t *outlen);
 
 /*
- * Cardinality cap hook (step 8; backlog item 20261005-091225-32). Called
+ * Cardinality cap hook (step 8). Called
  * with a final key (1..PSSC_MAX_KEY_LEN bytes) and its value after steps
  * 1-7 (no NUL). Returns KEEP to keep the value, NULL to collapse it to null
  * (its key is over its cap), or NULL_FULL to collapse it because the
@@ -319,7 +318,7 @@ typedef struct PsscTagCandidate
 
 /*
  * Tags derived from application_name by the appname extractors (DESIGN.md
- * §4.2; backlog item 20261005-091225-38), built by pssc_appname_tags_build()
+ * §4.2), built by pssc_appname_tags_build()
  * and passed to pssc_tagset_build(). The appname extractors form a chain of
  * their own, with the comment chain's rules: in configuration order, the
  * first one that produces wins and later ones run only with merge=on;
@@ -361,8 +360,7 @@ extern void pssc_appname_tags_build(const char *appname, size_t len,
 									PsscAppnameTags *out);
 
 /*
- * Runs the pairs of the tags_override setting (backlog item
- * 20261005-091225-30; parsed and URL-decoded by the GUC's check_hook with
+ * Runs the pairs of the tags_override setting (parsed and URL-decoded by the GUC's check_hook with
  * pssc_parse_sqlcommenter()) through steps 2 and 4-7, into *out (zeroed
  * first; tags allocated with env->alloc, keys and values point into pairs'
  * text, the blob or scratch). There is no extractor, so no step 3 ("keys");

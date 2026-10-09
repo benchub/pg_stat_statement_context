@@ -555,8 +555,35 @@ for my $needle ('SHOW', 'pg_settings', 'pg_file_settings', 'regex_compile_failur
 			\%a;
 		};
 	};
+	# In a release tree (git archive: no .git), the export-ignore paths of
+	# .gitattributes are absent, so developer docs' links to them (DESIGN.md
+	# to research/, say) can't resolve. 043_release_tree.pl makes sure no
+	# user doc links there.
+	my @export_ignored;
+	if (!-e "$root/.git" && -f "$root/.gitattributes")
+	{
+		for (split /\n/, slurp_file("$root/.gitattributes"))
+		{
+			my ($pat, @attrs) = split ' ';
+			next unless defined $pat && $pat =~ m{^/} && grep { $_ eq 'export-ignore' } @attrs;
+			push @export_ignored, $pat =~ s{^/}{}r;
+		}
+	}
+	my $omitted = sub {
+		my ($target) = @_;
+		return 0 unless index($target, "$root/") == 0;
+		my @out;
+		for (split m{/}, substr($target, length("$root/")))
+		{
+			next if $_ eq '' || $_ eq '.';
+			if ($_ eq '..') { pop @out; } else { push @out, $_; }
+		}
+		my $rel = join '/', @out;
+		return scalar grep { $rel eq $_ || index($rel, "$_/") == 0 } @export_ignored;
+	};
 	my @bad;
 	my $nlinks = 0;
+	my $nomitted = 0;
 	for my $f (sort @files)
 	{
 		my $t = slurp_file($f);
@@ -570,6 +597,7 @@ for my $needle ('SHOW', 'pg_settings', 'pg_file_settings', 'regex_compile_failur
 			$nlinks++;
 			my ($p, $a) = split /#/, $l, 2;
 			my $target = $p eq '' ? $f : dirname($f) . "/$p";
+			if (!-e $target && $omitted->($target)) { $nomitted++; next; }
 			if (!-e $target) { push @bad, "$f: $l (no such file)"; next; }
 			push @bad, "$f: $l (no such anchor)"
 			  if defined $a && $target =~ /\.md$/ && !$anchors_of->($target)->{$a};
@@ -577,6 +605,8 @@ for my $needle ('SHOW', 'pg_settings', 'pg_file_settings', 'regex_compile_failur
 	}
 	ok($nlinks > 100, "relative links found ($nlinks)");
 	is_deeply(\@bad, [], 'every relative link resolves') or diag(join("\n", @bad));
+	note("$nomitted links into paths left out of release tarballs not checked")
+	  if $nomitted;
 }
 
 $node->stop;

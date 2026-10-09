@@ -134,7 +134,7 @@ typedef enum PsscStoreResult
 	PSSC_STORE_UNAVAILABLE		/* shared memory not set up (not preloaded) */
 } PsscStoreResult;
 
-/* Shared header counters and sizes (for _info(), item -21, and tests). */
+/* Shared header counters and sizes (for _info() and tests). */
 typedef struct PsscStoreCounters
 {
 	int64		entries;
@@ -326,7 +326,7 @@ typedef enum PsscDebugClockMode
 } PsscDebugClockMode;
 #endif
 
-/* Header bucket state (§5.2), for _info() (item -21) and tests. */
+/* Header bucket state (§5.2), for _info() and tests. */
 typedef struct PsscStoreBuckets
 {
 	TimestampTz epoch;

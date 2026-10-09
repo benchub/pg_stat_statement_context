@@ -2,7 +2,7 @@
 
 This page covers the lifecycle of an installation: upgrading the extension, moving to a new PostgreSQL major with `pg_upgrade`, going back to an older release, and removing the extension. It also says what happens to the saved statistics in each case.
 
-`test/t/040_upgrade_uninstall.pl` checks the restart, discard and uninstall behavior described here on every supported major. The procedures were also run by hand in Docker on PostgreSQL 18, and `pg_upgrade` from 17 to 18 (backlog item 20261008-065635-9).
+`test/t/040_upgrade_uninstall.pl` checks the restart, discard and uninstall behavior described here on every supported major. The procedures were also run by hand in Docker on PostgreSQL 18, and `pg_upgrade` from 17 to 18.
 
 ## Three version numbers
 
@@ -81,7 +81,7 @@ The statistics are kept. Example log line: `loaded 2 of 2 saved entries from "pg
 ### A release with a new SQL version
 
 1. Install the new package. It contains the new library, the new `.control` file and the upgrade scripts (`pg_stat_statement_context--1.0--1.1.sql`, ...).
-2. Restart the server. The new library is loaded, and the saved statistics are discarded (see above). The databases still have the old SQL objects. They keep working, because each release keeps the C entry points the older SQL versions call (see [Version discipline](maintaining.md#5-version-discipline)).
+2. Restart the server. The new library is loaded, and the saved statistics are discarded (see above). The databases still have the old SQL objects. They keep working, because each release keeps the C entry points the older SQL versions call (developer reference: [Version discipline](maintaining.md#5-version-discipline)).
 3. In **every database** where the extension is created, run:
 
    ```sql

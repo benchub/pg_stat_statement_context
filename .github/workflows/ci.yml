@@ -48,6 +48,8 @@ jobs:
         run: scripts/check-frozen-sql.sh
       - name: Docker image tag self-test
         run: scripts/test-docker-test.sh
+      - name: Release tarball contents
+        run: scripts/check-release-tarball.sh --list-only
 
   linux:
     name: Linux PG${{ matrix.pg }} (PGDG)

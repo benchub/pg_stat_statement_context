@@ -18,8 +18,7 @@
  * nothing were cached. A result that depends on more than its inputs (out
  * of memory, a normalize or regex failure that may not recur) is not cached.
  *
- * The tags_override result (backlog item 20261005-091225-30) is cached the
- * same way, keyed by the parsed setting (the check_hook's blob): a
+ * The tags_override result (DESIGN.md §8) is cached the same way, keyed by the parsed setting (the check_hook's blob): a
  * statement without an override costs one pointer test, one with an
  * unchanged override a generation comparison, and one whose override was
  * set again to the same value (SET LOCAL in every transaction) a memcmp of

@@ -155,8 +155,11 @@ extern PSSC_TEST_API int pssc_nesting_level;
  * Installs the planner hook (from _PG_init, while preloading), which only
  * counts planning as a nesting level, like pgss's planner hook on PG17+:
  * statements run by functions evaluated while planning (constant folding)
- * are not top level. It neither times planning nor activates a frame. On
- * PG14-16, where pgss's toplevel ignores planning, nothing is installed.
+ * are not top level. It neither times planning nor activates a frame. It
+ * is installed on every version: on PG14-16, where pgss's toplevel ignores
+ * planning, it leaves the nesting level alone and only tracks planning
+ * depth, so that plan-time statements never become the backend's activity
+ * row (context.c).
  */
 extern void pssc_context_init(void);
 

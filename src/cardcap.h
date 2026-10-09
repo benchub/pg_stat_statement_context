@@ -1,7 +1,7 @@
 /*
  * cardcap.h
- *		Per-key cardinality caps (DESIGN.md §6.11 step 8; backlog item
- *		20261005-091225-32): the GUCs, and the shared table of the distinct
+ *		Per-key cardinality caps (DESIGN.md §6.11 step 8): the GUCs, and
+ *		the shared table of the distinct
  *		values admitted per key that backs the pipeline's env->cap hook.
  *
  * Each allowed key may take at most its cap of distinct values, counted

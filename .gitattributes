@@ -1,0 +1,18 @@
+# Release tarballs (git archive, GitHub source downloads) leave out
+# development-only material. Everything needed to build, install, test,
+# package and regenerate the docs (docs/benchmarks.md from bench/results/)
+# stays. Checked by scripts/check-release-tarball.sh and
+# test/t/043_release_tree.pl.
+
+# Agent instructions and planning (the backlog and the script that edits it).
+/CLAUDE.md                   export-ignore
+/BACKLOG.md                  export-ignore
+/BACKLOG-COMPLETE.md         export-ignore
+/scripts/backlog-complete.py export-ignore
+/.claude                     export-ignore
+/.copilot                    export-ignore
+# Scratch space and item worktrees (git-ignored, listed in case one is added).
+/tmp                         export-ignore
+/worktrees                   export-ignore
+# Driver experiments behind docs/limitations.md and DESIGN.md §6.3.
+/research                    export-ignore

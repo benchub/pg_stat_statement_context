@@ -1,7 +1,8 @@
 # pg_stat_statement_context — Design Document
 
-> Status: Draft / proposal
+> Status: describes the implemented v1.0 (SQL version `1.0`; released as 1.0.0, plus the unreleased changes listed in `CHANGELOG.md`). Sections record the decisions and their rationale; §8 lists what is still future work.
 > Target: PostgreSQL 14, 15, 16, 17, 18
+> Item IDs ("item 20261005-091225-30", or "item -30" for the `20261005-091225-` batch) are developer references to the project's backlog (`BACKLOG.md`, `BACKLOG-COMPLETE.md`), which lives in the source repository and is not part of release tarballs.
 
 ## 1. Summary
 
@@ -91,7 +92,7 @@ Since PG14, core computes `queryId` itself (`compute_query_id`). The extension c
 | `ExecutorEnd` | Add one call and the elapsed time from `queryDesc->totaltime` to the store under the frame's key, then drop the frame. |
 | `ProcessUtility` | Before chaining, snapshot `queryId`, statement bounds, and tags into a utility frame. Activate it and bump nesting (`EXECUTE`/`PREPARE` get no frame and no nesting bump; on PG14–16 nesting mirrors pgss, §6.7) around the chained call, timing it. Record from the snapshot afterwards. Never touch `pstmt` after chaining (§6.7). |
 
-No `planner_hook` is used for timing: planning time is left to pgss (`track_planning`), see §8 "Rejected". On PG17+ only, a minimal `planner_hook` adds one nesting level around the chained planner and restores it in `PG_FINALLY`. It does no timing and activates no frame, so SQL run during planning (constant-folded functions) is not top-level, matching pgss, which counts planner nesting only from PG17.0. On PG14–16 pgss ignores planning when deciding `toplevel`, so no hook is installed there (decided 2026-10-05, item -16).
+No `planner_hook` is used for timing: planning time is left to pgss (`track_planning`), see §8 "Rejected". A minimal `planner_hook` (`pssc_planner()` in `context.c`), installed on every version, wraps the chained planner and restores its state in `PG_FINALLY`. It does no timing and activates no frame. On PG17+ it adds one nesting level, so SQL run during planning (constant-folded functions) is not top-level, matching pgss, which counts planner nesting only from PG17.0 (`PSSC_HAS_PLANNER_NESTING` in `compat.h`). On PG14–16 pgss ignores planning when deciding `toplevel`, so the hook leaves the nesting level alone there (decided 2026-10-05, item -16). On every version it counts the planning depth, so that a plan-time statement never becomes the backend's activity row (§8, activity view).
 
 Frame details (item -16):
 - **User and nesting refresh:** `pssc_frame_refresh()` updates `userid`, nesting level, `toplevel` and recordability at recording time (ExecutorEnd, or after a utility returns), because pgss reads them then. For example, a cursor closed under a different role is recorded under the closing role.
@@ -407,7 +408,7 @@ Done in item 20261005-091225-35, after `pg_stat_statements` (`pgss_shmem_shutdow
 ## 6. Gotchas and mitigations
 
 ### 6.1 Tag cardinality explosion
-`traceparent`, `request_id`, and per-user values make every statement unique, which can empty the table within seconds. This is mostly an operator choice: only allowlisted keys are stored, and the default allowlist is `action, controller, job`. New tags that application developers add are therefore ignored until an operator opts in. The table can still flood if an allowed tag has unexpectedly high-cardinality values (for example, an unnormalized route like `/users/123`), or if a buggy or malicious client sends random values for an allowed key. **Mitigation:** the restrictive default allowlist, a denylist of known high-cardinality keys for anyone who opts into `tags = '*'`, `max_tag_value_len` truncation, `_info()` counters for evictions, per-key value normalization rules (`normalize`, item -41), and per-key cardinality caps (item -32, below). Exemplar storage is on the roadmap (§8).
+`traceparent`, `request_id`, and per-user values make every statement unique, which can empty the table within seconds. This is mostly an operator choice: only allowlisted keys are stored, and the default allowlist is `action, controller, job`. New tags that application developers add are therefore ignored until an operator opts in. The table can still flood if an allowed tag has unexpectedly high-cardinality values (for example, an unnormalized route like `/users/123`), or if a buggy or malicious client sends random values for an allowed key. **Mitigation:** the restrictive default allowlist, a denylist of known high-cardinality keys for anyone who opts into `tags = '*'`, `max_tag_value_len` truncation, `_info()` counters for evictions, per-key value normalization rules (`normalize`, item -41), and per-key cardinality caps (item -32, below). Exemplars (§6.13) keep the latest value of such a key per entry without grouping by it.
 
 **Cardinality caps** (item -32, landed 2026-10-06): `cardinality_cap` and `cardinality_cap_overrides` (§4.1) bound the distinct values per key, counted per `cardinality_cap_scope` (not per bucket or `queryid`). Values beyond the cap collapse to JSON `null`, which cannot collide with a real value because a client can only send strings; the statements still count, in one `null` entry per query and remaining tags. The tracking table is a separate lock-free shared-memory area: open addressing with CAS on 64-bit words holding a generation number and a 44-bit value fingerprint (false-positive rate about n/2^44). Values never decay: eviction does not free them; only `_reset()` or a restart does. Resets are serialized by an LWLock that lookups and admissions never take; `_reset()` bumps a 64-bit reset count (O(1)), and every admission re-checks that count before updating a key's count, so it never repeats in practice. The 20-bit generation stored in table words is derived from it; once every 2^20−1 resets it wraps, and that reset clears the whole table under the lock (new values collapse to `null` during the clear). `_reset()` clears the caps before the store. A value is admitted when tags are extracted at statement start, so failed statements also use cap space. When the table is full, new values collapse to `null` (fail closed) and are counted in `cap_table_full` as well as `capped_tags`. Known narrow races: a value another backend is inserting at the same moment can briefly collapse, and two backends inserting the same value can collapse a third. The count never exceeds the cap except through fingerprint false positives.
 
@@ -437,7 +438,7 @@ The scanner uses the *current* `standard_conforming_strings` setting. The hooks 
 ### 6.3 Prepared statements carry stale comments
 Comments are read from the source text saved at **Parse/PREPARE** time. **Bind/Execute** and SQL `EXECUTE ... /*tags*/` supply no new statement text, and the executor runs the saved source. If a client prepares once and executes many times from different code paths, every execution is attributed to the first caller's tags. This applies to named *and* unnamed statements: an unnamed statement only gets fresh context if the driver sends a new Parse for each use. pgss has the same limitation for query text. **Mitigation:** document this clearly. Drivers and ORMs that include the comment in their statement-cache key, or that re-Parse each time, are unaffected. Before v1, check the behavior of the target drivers (Rails/PG, pgx, JDBC, psycopg, and pgbouncer in transaction mode). If they reuse prepared plans across contexts, move the session/transaction override (`tags_override`, §8) into v1.
 
-**Result (2026-10-05, item -27, `research/driver-prepared-statements/`):** no target driver reuses a prepared statement across different comments. The statement cache is keyed by SQL text that includes the comment, and pgbouncer shares statements by query text. Tested with pgx 5.11, pgjdbc 42.7.13, psycopg 3.3.6, ActiveRecord 7.0–8.1 with pg 1.7 and marginalia 1.11, and pgbouncer 1.26. Native Rails `query_log_tags` (Rails 7.1+) disables prepared statements. Stale context appears only when the application itself reuses one prepared handle across requests. **Decision: `tags_override` stays on the roadmap (no-go for v1).** Notes for the user docs:
+**Result (2026-10-05, item -27, `research/driver-prepared-statements/`):** no target driver reuses a prepared statement across different comments. The statement cache is keyed by SQL text that includes the comment, and pgbouncer shares statements by query text. Tested with pgx 5.11, pgjdbc 42.7.13, psycopg 3.3.6, ActiveRecord 7.0–8.1 with pg 1.7 and marginalia 1.11, and pgbouncer 1.26. Native Rails `query_log_tags` (Rails 7.1+) disables prepared statements. Stale context appears only when the application itself reuses one prepared handle across requests. **Decision: `tags_override` stays on the roadmap (no-go for v1).** It was later implemented anyway and ships in v1.0 (item -30, §8). Notes for the user docs:
 - Each distinct comment value creates a separate prepared statement, so high-cardinality values in comments (such as request IDs) defeat statement caching.
 - On Rails 8, marginalia does not annotate some ORM paths (`pick`, `find_by`); prefer `query_log_tags`.
 
@@ -669,8 +670,10 @@ Other pgss metrics can be apportioned to a context approximately by its share of
 
 ## 8. Roadmap
 
-**v1.x — hardening**
-- ~~**Per-key cardinality caps.**~~ Done (item -32, 2026-10-06; §4.1, §6.1, §6.11 step 8). Possible follow-up: decay of values unused for a while, so a long-running server doesn't keep old values' cap space until `_reset()`.
+Everything planned for v1.x, v2 and v3 below except the last two v3 bullets (packaging, upstream hook) shipped in v1.0.0; it is kept here, struck through or marked done, as the record of what was decided. Open future work is collected under **Future work** at the end.
+
+**v1.x — hardening (shipped in v1.0.0)**
+- ~~**Per-key cardinality caps.**~~ Done (item -32, 2026-10-06; §4.1, §6.1, §6.11 step 8). The possible follow-up, cap decay, is under Future work.
 - ~~**Exemplars:** store the most recent value of a high-cardinality key, such as `traceparent`, per entry, so users can jump from an aggregate to a real trace without the key exploding. Exemplar keys are an explicit list in a dedicated GUC; the `exclude_tags` denylist does not double as that list. Total exemplar storage is bounded by a configurable memory cap (decided 2026-10-05).~~ Done (item 20261005-091225-33, ships in v1.0.0; §4.1, §5.1, §6.11, §6.13, §7): `exemplar_keys` and `exemplar_memory` (postmaster), the `exemplars` jsonb column, over-long values dropped and counted.
 - ~~Optional background worker that reclaims dead entries (all slots expired) on idle systems.~~ Done (item 20261005-091225-34, 2026-10-06, ships in v1.0.0; §4.1, §5.3): `reclaim_worker` (postmaster, default `off`) and `reclaim_worker_interval`. It is not needed for correctness, since readers filter expired slots (§5.2).
 - ~~**Persist stats across clean restarts** (dump/load like `pg_stat_statements.save`)~~. Done (item 20261005-091225-35, 2026-10-07, ships in v1.0.0; §4.1, §5.5). It follows pgss's lead (decided 2026-10-05):
@@ -679,7 +682,7 @@ Other pgss metrics can be apportioned to a context approximately by its share of
   - if `bucket_interval` or `bucket_count` changed, the file is discarded;
   - slots that expired during the downtime are dropped.
 
-**v2 — more context sources**
+**v2 — more context sources (shipped in v1.0.0)**
 - **`tags_override`:** context from a session or transaction GUC, e.g. `SET LOCAL pg_stat_statement_context.tags_override = 'controller=''users'',action=''show'''`. The value uses sqlcommenter syntax (`k='v',k2='v2'`, URL-encoded values). It **merges** with comment tags, and the override wins on key conflicts. Override tags go through the §6.11 pipeline (rename, allowlist/denylist, truncation). This works with prepared statements and with drivers that can't add comments. **Done (item -30):**
   - USERSET, default `''`. The check hook URL-decodes and validates the value into a flat extra blob; bad syntax, bad `%` escapes, NUL, or keys over 63 bytes are rejected at `SET` time (invalid encoding only when set from SQL/the client, since the database encoding is unknown for file, `ALTER ROLE` and `ALTER DATABASE` values).
   - Read at extraction (execution start), so a prepared statement uses the value at `EXECUTE`/Bind-Execute, and a `SET` statement is tagged with the previous value (as for appname).
@@ -691,15 +694,20 @@ Other pgss metrics can be apportioned to a context approximately by its share of
 - **Activity view (done, item -39):** `pg_stat_statement_context_activity` (`pid`, `userid`, `dbid`, `queryid`, `state`, `tags`) shows each backend's current top-level tags, as a companion to `pg_stat_activity` (join on `pid`).
   - Each backend owns one shared slot (MaxBackends × `align8(36 + max_tagset_bytes)`, 67–75 kB at the defaults depending on the PostgreSQL version; not in `_info()`, visible in `pg_shmem_allocations`), indexed by proc number (`MyProcNumber` on PG17+, `MyBackendId - 1` before; shims in `src/compat.h`) and requested in shmem_request/`_PG_init` like the store.
   - Writes are lock-free with a PgBackendStatus-style changecount: only the owner writes, in a critical section with barriers; readers retry until the counter is stable and even. Writers never wait.
-  - A slot is published when a top-level frame starts executing (executor run or utility start: no active frame, nesting level 0, not inside the planner on any version, so the planner hook is installed on PG14–16 to count planning depth). It is marked `idle` when the statement ends and keeps the last tags, as `pg_stat_activity.query` does. `ExecutorFinish` only re-marks the row active if it still belongs to the same statement, so a portal that never ran (Bind→Close, Bind→Sync) or a cursor dropped at COMMIT doesn't replace it. The row is cleared by a top-level statement without tags resolved and at backend exit.
+  - A slot is published when a top-level frame starts executing (executor run or utility start: no active frame, nesting level 0, not inside the planner on any version: the planner hook counts planning depth on PG14–16 too, §3.2). It is marked `idle` when the statement ends and keeps the last tags, as `pg_stat_activity.query` does. `ExecutorFinish` only re-marks the row active if it still belongs to the same statement, so a portal that never ran (Bind→Close, Bind→Sync) or a cursor dropped at COMMIT doesn't replace it. The row is cleared by a top-level statement without tags resolved and at backend exit.
   - `userid` is the role the statement executes as (`GetUserId()` at publish time, not at Bind). Per §6.11, other roles' `queryid`, `state` and `tags` are NULL without `pg_read_all_stats`.
   - Cost: ~6 ns per publish/idle pair with typical tags (110 ns at 512 B); reading all slots ~0.5 µs (microbenchmark at 23d9382, docs/benchmarks.md#activity-view). No on/off GUC.
 - **Value normalization rules (done, item -41):** per-key regex-replace rules, e.g. `/users/\d+` → `/users/:id`, set with `normalize` (§4.1). They run after rename and the allowlist/denylist, and before truncation and cardinality caps (§6.11 step 6). The `normalize_*` counters appear only in `_extract()`. Adding them to `_info()` is deferred to a later upgrade script.
 
-**v3 — ecosystem**
-- **Integrations (done, item -42):** `docs/integrations/` ships recipes for sql_exporter, postgres_exporter (its custom queries are deprecated upstream) and the OTel Collector contrib `sql_query` receiver; the `postgresql` receiver cannot run custom queries. It also has a Grafana dashboard and a least-privilege monitoring role. `scripts/test-integrations.sh` tests them end to end in Docker. Buckets expire and entries are evicted, so the recipes export per-second gauges over the last closed bucket rather than Prometheus counters. Only the `_info()` counters are exported as `_total`. Selected tag keys become `tag_<key>` labels, and the dashboard defaults to `toplevel = true`. Monotonic counters and bucket metadata are proposed in 20261006-010149-1.
-- Packaging: PGXN, PGDG apt/yum, Homebrew, Docker images. Engage managed-cloud providers about adding the extension to their allowlists.
-- Upstream conversation: propose a core hook or field for "statement comments" or a query-tag mechanism, which would benefit pgss and any similar extension.
+**v3 — ecosystem (integrations shipped in v1.0.0)**
+- **Integrations (done, item -42):** `docs/integrations/` ships recipes for sql_exporter, postgres_exporter (its custom queries are deprecated upstream) and the OTel Collector contrib `sql_query` receiver; the `postgresql` receiver cannot run custom queries. It also has a Grafana dashboard and a least-privilege monitoring role. `scripts/test-integrations.sh` tests them end to end in Docker. Buckets expire and entries are evicted, so the recipes export per-second gauges over the last closed bucket rather than Prometheus counters. Only the `_info()` counters are exported as `_total`. Selected tag keys become `tag_<key>` labels, and the dashboard defaults to `toplevel = true`. Monotonic counters and bucket metadata were added before 1.0.0 (item 20261006-010149-1, §7).
+- Packaging and upstream conversation: not started, see Future work.
+
+**Future work** (not in v1.0):
+- Packaging: PGXN, PGDG apt/yum, Homebrew, Docker images. Engage managed-cloud providers about adding the extension to their allowlists (item 20261005-091225-45). Ubuntu `.deb` packages can already be built locally (`scripts/build-debs.sh`).
+- Upstream conversation: propose a core hook or field for "statement comments" or a query-tag mechanism, which would benefit pgss and any similar extension (item 20261005-091225-46).
+- Cardinality caps: decay of values unused for a while, so a long-running server doesn't keep old values' cap space until `_reset()` (§6.1).
+- The `normalize_*` counters in `_info()` (they are only in `_extract()` in 1.0), in a later upgrade script.
 
 **Rejected (2026-10-05).** Out of scope for a pgss companion, which stores only `calls` and `total_exec_time` per context (§5.1):
 - `track_planning` (planning time): pgss already tracks planning per `queryid`.
@@ -783,33 +791,47 @@ Other pgss metrics can be apportioned to a context approximately by its share of
 
   The same targets run under a standalone driver in `make unittest`. `fuzz/run-libfuzzer.sh` runs libFuzzer in Docker. The regex extractor depends on backend allocators, `pg_wchar` and collation code, so `fuzz/sql/run.sh` fuzzes it at the SQL level through `pg_stat_statement_context_extract` against the assert or Valgrind server. It predicts which patterns the check hook will accept, compares tags with a `regexp_matches` oracle, and detects crashes and assertion failures. CI runs a short smoke of both. Six bugs were injected on purpose and the harnesses caught all of them (`fuzz/README.md`).
 
-## 10. Repository layout (proposed)
+## 10. Repository layout
 
 ```
 pg_stat_statement_context/
-├── Makefile / meson.build          # PGXS
+├── Makefile                        # PGXS; release and testing (PSSC_TESTING=1) builds (§9)
 ├── pg_stat_statement_context.control
 ├── sql/pg_stat_statement_context--1.0.sql   # frozen at v1.0.0 (§7)
 ├── sql/frozen.sha256               # checksums of released scripts
 ├── src/
-│   ├── pg_stat_statement_context.c # _PG_init, hooks
+│   ├── pg_stat_statement_context.c # _PG_init, hook installation, load-order check
 │   ├── compat.h                    # PG14–18 shims, PG19+ guard, module magic
 │   ├── export.h                    # PSSC_TEST_API (testing-build exports)
-│   ├── guc.c                       # GUCs + DSL parser
-│   ├── scan.c                      # comment scanner (backend-independent)
-│   ├── extract.c                   # sqlcommenter / marginalia / regex
-│   ├── context.c                   # execution frames, active-frame tracking
-│   ├── reclaim.c                   # optional dead-entry reclaim worker
-│   └── store.c                     # shmem HTAB, buckets, eviction
-├── test/{sql,expected,t}/          # pg_regress + TAP
-├── test/perl/PsscTest.pm           # shared TAP helpers (pgss detection)
-├── fuzz/
+│   ├── guc.c                       # GUCs + extractor DSL parser (§4)
+│   ├── scan.c                      # comment scanner (backend-independent, §3.1)
+│   ├── pairs.c                     # sqlcommenter / marginalia pair parsers (backend-independent)
+│   ├── tagset.c                    # tag pipeline and extractor chain (backend-independent, §6.11)
+│   ├── extract.c, regex_runtime.c  # backend glue: tags_override/appname, regex extractor, normalize
+│   ├── context.c                   # execution frames, active frame, planner hook (§3.2)
+│   ├── executor.c, utility.c       # executor and ProcessUtility hooks (§3.2, §3.3)
+│   ├── store.c, counters.c         # shmem HTAB, bucket ring, eviction, persistence (§5)
+│   ├── cardcap.c                   # per-key cardinality caps (§6.1)
+│   ├── reclaim.c                   # optional dead-entry reclaim worker (§5.3)
+│   ├── activity.c                  # per-backend current tags (§8 activity view)
+│   └── *_fn.c, tagout.c            # SQL functions and jsonb tag output (§7)
+├── test/{sql,expected}/            # pg_regress
+├── test/t/, test/perl/PsscTest.pm  # TAP tests and shared helpers
+├── test/modules/                   # TEST-ONLY modules (testing build only, §9)
+├── test/unit/, fuzz/               # standalone unit tests and fuzz targets (§9)
+├── test/smoke/                     # managed-server smoke test (make smoke)
+├── docker/, scripts/               # Docker test harness, packaging, repository checks
+├── bench/                          # benchmark harness and committed results
+├── docs/                           # user documentation
+├── research/                       # driver experiments (§6.3); not in release tarballs
 └── DESIGN.md
 ```
 
+Release tarballs (`git archive`) leave out development-only material through `export-ignore` rules in `.gitattributes`: the agent and planning files (`CLAUDE.md`, `BACKLOG*.md`, `scripts/backlog-complete.py`) and `research/`. Everything needed to build, install, test, package and regenerate `docs/benchmarks.md` (including `bench/results/`) stays; `scripts/check-release-tarball.sh` builds and tests an extracted tarball.
+
 ## 11. Open questions
 
-All seven questions below were resolved by the project owner on 2026-10-05. They are kept, with their resolutions, for the record. Remaining undecided points are tracked as open questions on individual tasks in `BACKLOG.md`.
+All seven questions below were resolved by the project owner on 2026-10-05. They are kept, with their resolutions, for the record. Remaining undecided points are tracked as open questions on individual tasks in `BACKLOG.md` (source repository only).
 
 1. ~~Should an empty tag set be recorded by default?~~ **Resolved: no.** Untagged statements are skipped by default (`untagged = skip`, §4.1), so untagged traffic doesn't consume entries. `untagged = record` remains available.
 2. ~~`jsonb` for `tags`, or fixed columns for a configured set of keys?~~ **Resolved: `jsonb`** (§7).
