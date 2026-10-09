@@ -198,6 +198,23 @@ dependencies and is not shown.
 - `sql/frozen.sha256` matches the re-recorded 1.0 script (it includes `_counters()` and `_info_1_0` from -2).
 - Not run: the README install from a fresh clone, libFuzzer, `scripts/test-integrations.sh` (Docker credential helper error, as before). Rerun the matrix and the README check once the remaining doc/test items have landed, before tagging.
 
+**Progress (2026-10-09, agent, final matrix on a76182d after all RDS-readiness items, 20261008-065635-1..14 and their follow-ups, landed):**
+- Run from a detached worktree at a76182d on an otherwise idle machine, cells one after another (04:35–05:41 UTC). Everything passed on the first run.
+  - PGDG 14.24, 15.19, 16.15, 17.11, 18.6: PASS.
+  - `--assert` 14–18: PASS, including 14, which flaked on eafa267 before 20261008-120000-1 landed.
+  - `--valgrind` 18.6 and `--valgrind-tap` 18.6: PASS.
+- `scripts/check-release-tarball.sh 18`: ok.
+- `fuzz/run-libfuzzer.sh -t 15`: ok.
+- `fuzz/sql/run.sh --pgdg --pg 18 -- --duration 30`: PASS, with 508 rounds and 0 oracle errors.
+- README install and quick start, run from a fresh clone of a76182d in the PGDG 14 and 18 images, using the code blocks extracted from the committed README: PASS. The output had 2 rows with calls 2 and 1. `_extract()` returned the documented tags, extversion was 1.0, and the server log had no warnings.
+- `scripts/test-integrations.sh`: still not runnable here (Docker credential helper error).
+- **Remaining (owner):**
+  - Fill in the `TODO(owner)` copyright and attestation wording in `NOTICE` and `README.md`.
+  - Adjust the CHANGELOG `[1.0.0]` date if needed.
+  - Push `main`, wait for CI to pass, then tag `v1.0.0`.
+  - Create the GitHub release from `docs/release-notes/v1.0.0.md`.
+  - Run `scripts/backlog-complete.py 20261005-091225-29`.
+
 **Depends on:** 20261005-091225-3, 20261005-091225-11, 20261005-091225-22, 20261005-091225-23, 20261005-091225-24, 20261005-091225-25, 20261005-091225-26, 20261005-091225-28, 20261005-213120-1, 20261006-010149-1, 20261005-091225-32, 20261007-070036-1 (security fix, must land before the tag; the release matrix must be rerun after it); 20261007-133120-1 (per-database settings, owner request 2026-10-07; rerun the matrix after it); 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 (RDS-readiness code/SQL items, owner decision 2026-10-08; rerun the matrix and re-record frozen.sha256 after them)
 **Open questions:** none
 **Status:** ready
