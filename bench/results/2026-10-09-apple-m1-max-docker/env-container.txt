@@ -1,0 +1,61 @@
+pg_config --version: PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2)
+pgbench: pgbench (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)
+container CPUs: 0 1 2 3 4 5 6 7 8 9; server CPUs: 0,1,2,3,4 (5); pgbench CPUs: 5,6,7 (3)
+kernel: Linux 6.12.54-linuxkit aarch64
+MemTotal:        8024852 kB
+Architecture:                            aarch64
+CPU(s):                                  10
+Vendor ID:                               Apple
+Model name:                              -
+BogoMIPS:                                48.00
+pgbench: -T 15 (warmup 3s), -j min(clients, 3), scale 10, Unix socket
+plan: 500 runs, 10 blocks, seed 146694251; IN list: 10000 elements
+boundary windows: +-5 ms on a 1 s grid
+setting: autovacuum = off
+setting: checkpoint_timeout = 30min
+setting: compute_query_id = auto
+setting: jit = off
+setting: max_connections = 60
+setting: max_wal_size = 8GB
+setting: pg_stat_statement_context.bucket_count = 12
+setting: pg_stat_statement_context.bucket_interval = 5min
+setting: pg_stat_statement_context.cardinality_cap = 0
+setting: pg_stat_statement_context.cardinality_cap_overrides = 
+setting: pg_stat_statement_context.cardinality_cap_scope = role
+setting: pg_stat_statement_context.cardinality_cap_slots = 16384
+setting: pg_stat_statement_context.enabled = on
+setting: pg_stat_statement_context.exclude_tags = traceparent, tracestate, request_id
+setting: pg_stat_statement_context.exemplar_keys = 
+setting: pg_stat_statement_context.exemplar_memory = 2MB
+setting: pg_stat_statement_context.extractors = sqlcommenter, marginalia
+setting: pg_stat_statement_context.max_entries = 10000
+setting: pg_stat_statement_context.max_tag_value_len = 64
+setting: pg_stat_statement_context.max_tags = 8
+setting: pg_stat_statement_context.max_tagset_bytes = 512
+setting: pg_stat_statement_context.nested_tags = inherit
+setting: pg_stat_statement_context.normalize = 
+setting: pg_stat_statement_context.reclaim_worker = off
+setting: pg_stat_statement_context.reclaim_worker_interval = 10s
+setting: pg_stat_statement_context.save = on
+setting: pg_stat_statement_context.scan_window = 2kB
+setting: pg_stat_statement_context.tags = action, controller, job
+setting: pg_stat_statement_context.tags_override = 
+setting: pg_stat_statement_context.track = top
+setting: pg_stat_statement_context.track_utility = on
+setting: pg_stat_statement_context.untagged = skip
+setting: pg_stat_statements.max = 5000
+setting: pg_stat_statements.track = top
+setting: pg_stat_statements.track_planning = off
+setting: pg_stat_statements.track_utility = on
+setting: shared_buffers = 1GB
+setting: synchronous_commit = off
+script bytes:    278 /var/lib/postgresql/bench/scripts/evict.sql
+script bytes:   3955 /var/lib/postgresql/bench/scripts/exporter.sql
+script bytes:  59184 /var/lib/postgresql/bench/scripts/inlist0.sql
+script bytes:  59185 /var/lib/postgresql/bench/scripts/inlist.sql
+script bytes:    243 /var/lib/postgresql/bench/scripts/nested.sql
+script bytes:     92 /var/lib/postgresql/bench/scripts/ro-plain.sql
+script bytes:    269 /var/lib/postgresql/bench/scripts/ro.sql
+script bytes:    534 /var/lib/postgresql/bench/scripts/rw-plain.sql
+script bytes:   1419 /var/lib/postgresql/bench/scripts/rw.sql
+script bytes: 125159 total

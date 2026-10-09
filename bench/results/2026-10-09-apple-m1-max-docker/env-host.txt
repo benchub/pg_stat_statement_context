@@ -1,0 +1,7 @@
+date: 2026-10-08T23:12:01Z
+git: 33dad666c094
+host: Apple M1 Max, 10 CPUs (8 performance + 2 efficiency), 64 GB, macOS 26.6.2
+docker: Docker Desktop 29.0.1, VM/host: 10 CPUs, 8217448448 bytes
+other running containers at start: none
+image: pg_stat_statement_context-test:pg18-0126427c05b6
+blocks: 10, duration: 15s, warmup: 3s, seed: 146694251

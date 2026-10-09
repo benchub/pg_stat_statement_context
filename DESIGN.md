@@ -19,7 +19,7 @@ Where `pg_stat_statements` answers *"which query fingerprints are expensive?"*, 
 ### Goals
 
 - Aggregate per **(query fingerprint × extracted tag set)** in shared memory.
-- Low, predictable overhead on the hot path; no extra SQL parse.
+- Low, predictable overhead on the hot path; no extra SQL parse. (Measured: a few µs of server CPU per tagged statement; see §9 Benchmarks and docs/benchmarks.md.)
 - Declarative configuration for which tags to extract, from which comment format, and where in the query to look.
 - Bounded memory with a rolling, time-bucketed history.
 - Track DML/SELECT **and** utility statements (DDL, etc.).
@@ -427,7 +427,7 @@ Executor frames store `cands` after their tags and exemplars in the frame's allo
 
 ### 6.2 Long queries (e.g., 10k-element `IN` lists)
 Even a linear scan costs something on a 1 MB query string. **Mitigation:** if the statement range fits within `scan_window`, it is always lexed exactly from the front. For longer statements, `position=append|prepend` limits work to the first or last `scan_window` bytes:
-- The statement end comes from `stmt_len`. A `strlen` is needed only when `stmt_len == 0` (rest of string), and that cost is included in the overhead benchmarks.
+- The statement end comes from `stmt_len`. A `strlen` is needed only when `stmt_len == 0` (rest of string: a client statement without a trailing `;`). The `inlist0` benchmark exercises it on a 59 kB statement; the local campaign could not distinguish it from zero (docs/benchmarks.md, *Long statements: scan costs and tuning*). There is no separate byte budget: `scan_window` and `position` are the knobs.
 - `append` trims whitespace and `;` **within the window only**, expects a closing `*/`, and walks backwards to the matching `/*` while tracking nesting depth. A trailing `--` comment, or a comment that crosses the window start, yields no tags. The scan never parses half a comment.
 - Starting a lexer at an arbitrary offset means its state is unknown. A string literal ending in `*/` can therefore fool the tail path into misattributing a statement, and a `--` line comment opened before the window can make text inside it look like a tagged comment (fake tags; covered by the extract regress test). Such results are counted in `_info().heuristic_scans` so operators can see how often the inexact path is used.
 - `position=any` does a full forward lexical scan.
@@ -693,7 +693,7 @@ Other pgss metrics can be apportioned to a context approximately by its share of
   - Writes are lock-free with a PgBackendStatus-style changecount: only the owner writes, in a critical section with barriers; readers retry until the counter is stable and even. Writers never wait.
   - A slot is published when a top-level frame starts executing (executor run or utility start: no active frame, nesting level 0, not inside the planner on any version, so the planner hook is installed on PG14–16 to count planning depth). It is marked `idle` when the statement ends and keeps the last tags, as `pg_stat_activity.query` does. `ExecutorFinish` only re-marks the row active if it still belongs to the same statement, so a portal that never ran (Bind→Close, Bind→Sync) or a cursor dropped at COMMIT doesn't replace it. The row is cleared by a top-level statement without tags resolved and at backend exit.
   - `userid` is the role the statement executes as (`GetUserId()` at publish time, not at Bind). Per §6.11, other roles' `queryid`, `state` and `tags` are NULL without `pg_read_all_stats`.
-  - Cost: ~6 ns per publish/idle pair with typical tags (110 ns at 512 B); reading all slots ~0.5 µs (docs/benchmarks.md). No on/off GUC.
+  - Cost: ~6 ns per publish/idle pair with typical tags (110 ns at 512 B); reading all slots ~0.5 µs (microbenchmark at 23d9382, docs/benchmarks.md#activity-view). No on/off GUC.
 - **Value normalization rules (done, item -41):** per-key regex-replace rules, e.g. `/users/\d+` → `/users/:id`, set with `normalize` (§4.1). They run after rename and the allowlist/denylist, and before truncation and cardinality caps (§6.11 step 6). The `normalize_*` counters appear only in `_extract()`. Adding them to `_info()` is deferred to a later upgrade script.
 
 **v3 — ecosystem**
@@ -756,14 +756,18 @@ Other pgss metrics can be apportioned to a context approximately by its share of
   - Valgrind, `scripts/docker-test.sh --valgrind-tap 18`: with the same wrapper installed as `postgres`, the TAP tests start their clusters under Valgrind. `initdb`'s bootstrap and single-user runs and the `-V`/`-C` probes bypass it. The subset (`PSSC_VALGRIND_TAP_TESTS` in `docker/run-tests.sh`) is 007 (the store and its SRFs through the test driver), 009 (eviction), 024 (cardinality caps and their races), 028 (persistence save and reload, corrupt files, crash restart), 029 (exemplars) and 039 (the soak below, 4,000 statements). `PG_TEST_TIMEOUT_DEFAULT` and `PGCTLTIMEOUT` are raised for the slower servers. Any `VALGRINDERROR` in any process's log fails the cell, as does a TAP server log line saying a process exited with Valgrind's error exit code (128). Killed backends from the tests' own crash cases are not errors.
   - `--enable-cassert`: `scripts/docker-test.sh --assert N` (14–18, the whole suite) and the SQL-level regex fuzzer in CI.
   - Backend memory growth, `039_memory_soak.pl` (every cell, both builds): one backend runs about 20,000 statements (`PSSC_SOAK_STATEMENTS`, e.g. 200,000 for a long run) of every shape: top-level statements with sqlcommenter, marginalia, regex and appname tags, `tags_override`, normalized and exemplar values, nested statements under `nested_tags = scan` and `inherit` (PL/pgSQL static and dynamic SQL, `DO`, a procedure that commits and rolls back), utility statements, cursors, `PREPARE`/`EXECUTE`/`DEALLOCATE`, errors at top level and nested and caught, and reads of the views. `max_entries = 100` keeps the store evicting and `cardinality_cap` capping. After a warm-up of a fifth of the rounds, it reads `pg_backend_memory_contexts` in that backend at five equally spaced points. From the first sample to the last, TopMemoryContext's own blocks and CacheMemoryContext's own blocks may grow by at most 32 kB, this extension's contexts by 16 kB, and the sum over all contexts by 64 kB. A deliberate 8-byte `TopMemoryContext` allocation per `ExecutorEnd` made it fail (192 kB of growth); without it, the samples are flat on 14–18 (one 1 kB step in the total on 16 and 17), also over 200,000 statements. Shared memory is bounded by construction (§5) and is not part of this test.
-- **Benchmarks** (`bench/run.sh [--major N] [--quick]`, item -26): pgbench runs inside one Docker container and compares against pgss alone in these setups:
-  - no comment;
-  - appended and prepended comments;
-  - 10,000-element `IN` lists (heuristic and exact scans, `stmt_len` > 0 and = 0);
-  - 1 s buckets (latency within ±5 ms of a boundary);
-  - sustained eviction.
+- **Benchmarks** (`bench/run.sh [--major N]`, items -26 and 20261008-065635-13): pgbench in one Docker container (release build, server and clients pinned to separate CPUs, Unix socket) compares each configuration with `pg_stat_statements` alone on the same script:
+  - simple and prepared protocol; read-only point selects and the TPC-B-like transaction; 1, N and 4N clients (256 opt-in);
+  - untagged statements, a regex extractor with a normalize rule, a store pre-populated with 5,000 entries, the exporter recipe's queries every 15 s and 1 s, 1 s buckets;
+  - nested PL/pgSQL under `track = top` and `track = all` (`inherit`, `scan`);
+  - 10,000-element `IN` lists (`append` and `any`, with and without a trailing `;`);
+  - sustained eviction at `max_entries = 10000`.
 
-  Rounds are paired in ABBA order. The run fails if a setup recorded nothing, evicted nothing or never rolled a bucket. Results are in `docs/benchmarks.md`. Steady-state overhead is within the noise of a Docker VM, and bucket boundaries add no latency. Under sustained churn at `max_entries=10000`, eviction raised p99 by 2.5–5× because each pass sorted every entry under the exclusive lock. Item 20261006-043919-1 replaced the sort with partial selection in a single scan (pass ~40% faster; Δp99 +196% → +115% on PG 18). The rest is the scan of ~10,000 entries itself; 20261006-075124-1 tracks batching passes.
+  Every configuration runs once per block, in a seeded random order, and is paired with its baseline from the same block. The report gives server CPU per statement (from `/proc/<pid>/stat` of the postmaster and its children), TPS and p50/p95/p99, each as a mean paired difference with a 95% Student-t interval. Every run is checked (tags recorded, nesting, scan path, evictions, rollovers, reader rows). Raw per-run summaries are committed under `bench/results/<date>-<host>/`, and `docs/benchmarks.md` is generated from them (`bench/analyze.py doc --check-fresh`).
+
+  Result of the local campaign at 33dad66 (PG 18.6, Docker on an Apple M1 Max, 10 blocks): a tagged statement costs **+2.4 to +3.8 µs of server CPU** per statement (95% intervals within −0.4 to +5.2 µs over 12 workloads), +4–10% of a cached point select; an untagged one +1–2.4 µs; regex + normalize +8–10 µs; sustained eviction +5.6 µs and **p99 +60% [+38, +84]**; 1 s bucket rollovers showed no latency concentration at boundaries. That host cannot resolve effects below about 1 µs per statement or 5% of a long statement, and says nothing about other hardware; `bench/README.md` has the procedure for dedicated Linux x86 and Graviton runs.
+
+  History: under sustained churn at `max_entries=10000`, eviction first raised p99 by 2.5–5× because each pass sorted every entry under the exclusive lock. Item 20261006-043919-1 replaced the sort with partial selection in a single scan, and 20261006-075124-1 replaced the hash-table walk with a compact slot array (§5.3).
 - **Fuzzing** (`fuzz/`, item -25): libFuzzer targets for the code that needs no server:
   - the comment scanner in every position mode (`fuzz_scan`);
   - the SQLCommenter and marginalia parsers;

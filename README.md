@@ -135,7 +135,7 @@ SELECT pg_stat_statement_context_extract(
 | [docs/integrations/](docs/integrations/README.md) | Recipes for postgres_exporter, sql_exporter and the OpenTelemetry Collector, a Grafana dashboard, a monitoring role, and the metric semantics (gauges, `toplevel`, cardinality). |
 | [docs/managed-services.md](docs/managed-services.md) | Running without superuser on a managed service: what each GUC's context means with parameter groups, raw parameter-group values for the DSL settings, who can call `_reset()`/`_extract()` and read the views, and a SQL-only troubleshooting checklist. |
 | [docs/upgrading.md](docs/upgrading.md) | Upgrading (library-only vs `ALTER EXTENSION ... UPDATE`), what needs a restart, when saved statistics are discarded, `pg_upgrade`, downgrading, uninstalling cleanly, and identifying the loaded build. |
-| [docs/benchmarks.md](docs/benchmarks.md) | pgbench overhead and latency measurements against pg_stat_statements alone: the method, results for PG 18 and PG 14, findings (bucket boundaries, IN lists, eviction), and how to re-run them. |
+| [docs/benchmarks.md](docs/benchmarks.md) | Overhead against pg_stat_statements alone (CPU per statement, TPS, p50/p95/p99 with 95% confidence intervals), generated from the raw results in `bench/results/`: the scenarios, the method, what the data can and cannot bound, and the scan costs of long statements. [bench/README.md](bench/README.md) explains how to run it, including on dedicated hardware. |
 
 ## Testing
 
@@ -159,7 +159,7 @@ make unittest                         # standalone scanner/parser unit tests and
 fuzz/run-libfuzzer.sh -t 600          # libFuzzer (clang, ASan+UBSan) targets in Docker, 10 min each
 fuzz/sql/run.sh -- --duration 600     # regex extractor SQL fuzzer, assert build in Docker
 scripts/test-integrations.sh 17       # exporter recipes + Grafana dashboard, end to end in Docker
-bench/run.sh --major 18 [--quick]     # pgbench overhead benchmarks in Docker (docs/benchmarks.md)
+bench/run.sh [--major 18] [--dry-run]  # pgbench overhead benchmarks in Docker (bench/README.md)
 ```
 
 [docs/maintaining.md](docs/maintaining.md) lists the pg_stat_statements behaviors this extension mirrors, what to re-check when a new PostgreSQL release ships, the coexistence tests with other hook-using extensions, and the oldest-minor CI policy.

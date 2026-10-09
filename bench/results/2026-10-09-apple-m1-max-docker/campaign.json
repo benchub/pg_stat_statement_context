@@ -1,0 +1,836 @@
+{
+ "commit": "33dad666c094",
+ "dirty": false,
+ "date": "2026-10-09",
+ "host": "Apple M1 Max, 10 CPUs (8 performance + 2 efficiency), 64 GB, macOS 26.6.2",
+ "docker": "Docker Desktop 29.0.1, VM/host: 10 CPUs, 8217448448 bytes",
+ "image": "pg_stat_statement_context-test:pg18-0126427c05b6",
+ "pg_version": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2)",
+ "kernel": "Linux 6.12.54-linuxkit aarch64",
+ "build": "release (make, no PSSC_TESTING)",
+ "server_cpus": "0,1,2,3,4",
+ "client_cpus": "5,6,7",
+ "ncpu": 5,
+ "blocks": 10,
+ "duration_s": 15,
+ "warmup_s": 3,
+ "seed": 146694251,
+ "only": null,
+ "high_clients": false,
+ "cpuset": null,
+ "dry_run": false,
+ "wall_time_s": 9422,
+ "quiet_check": "other containers at start: none; at end: none; CPU used outside the benchmark container during each run measured from the VM's /proc/stat: max 0.51 cores, median 0.00 (runs over 0.75 cores are retried)",
+ "scenarios": [
+  {
+   "name": "ro-simple-c1",
+   "workload": "ro",
+   "protocol": "simple",
+   "clients": 1,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "ro",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:1"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    }
+   ]
+  },
+  {
+   "name": "ro-simple-c5",
+   "workload": "ro",
+   "protocol": "simple",
+   "clients": 5,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "ro",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:1"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "plain-pgss",
+     "baseline": "plain-pgss",
+     "preload": "pgss",
+     "script": "ro-plain",
+     "label": "pg_stat_statements only, no comments",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "plain-ext",
+     "baseline": "plain-pgss",
+     "preload": "ext",
+     "script": "ro-plain",
+     "label": "+ extension, untagged (untagged = skip)",
+     "settings": [],
+     "checks": [
+      "untagged"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext-regex-normalize",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, regex extractor (merge) and a normalize rule",
+     "settings": [
+      "pg_stat_statement_context.tags = 'action, controller, job, route, driver'",
+      "pg_stat_statement_context.extractors = 'sqlcommenter, regex(pattern=''db_driver=.(\\\\w+)'', keys=driver, merge=on)'",
+      "pg_stat_statement_context.normalize = 'route: ''/\\\\d+'' => ''/:id'''"
+     ],
+     "checks": [
+      "regexnorm:1"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext-store5k",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, store pre-populated with 5000 entries",
+     "settings": [],
+     "checks": [
+      "tagged:1",
+      "store:5000"
+     ],
+     "extra": "store:5000",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext-reader15s",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, exporter queries every 15 s",
+     "settings": [],
+     "checks": [
+      "tagged:1",
+      "reader"
+     ],
+     "extra": "reader:15",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext-reader1s",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, exporter queries every 1 s",
+     "settings": [],
+     "checks": [
+      "tagged:1",
+      "reader"
+     ],
+     "extra": "reader:1",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext-1s-buckets",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, 1 s buckets (a rollover every second)",
+     "settings": [
+      "pg_stat_statement_context.bucket_interval = '1s'",
+      "pg_stat_statement_context.bucket_count = 45"
+     ],
+     "checks": [
+      "tagged:1",
+      "buckets"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    }
+   ]
+  },
+  {
+   "name": "ro-simple-c20",
+   "workload": "ro",
+   "protocol": "simple",
+   "clients": 20,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "ro",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:1"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    }
+   ]
+  },
+  {
+   "name": "ro-prepared-c1",
+   "workload": "ro",
+   "protocol": "prepared",
+   "clients": 1,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "ro",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:1"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    }
+   ]
+  },
+  {
+   "name": "ro-prepared-c5",
+   "workload": "ro",
+   "protocol": "prepared",
+   "clients": 5,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "ro",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:1"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "plain-pgss",
+     "baseline": "plain-pgss",
+     "preload": "pgss",
+     "script": "ro-plain",
+     "label": "pg_stat_statements only, no comments",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "plain-ext",
+     "baseline": "plain-pgss",
+     "preload": "ext",
+     "script": "ro-plain",
+     "label": "+ extension, untagged (untagged = skip)",
+     "settings": [],
+     "checks": [
+      "untagged"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext-regex-normalize",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, regex extractor (merge) and a normalize rule",
+     "settings": [
+      "pg_stat_statement_context.tags = 'action, controller, job, route, driver'",
+      "pg_stat_statement_context.extractors = 'sqlcommenter, regex(pattern=''db_driver=.(\\\\w+)'', keys=driver, merge=on)'",
+      "pg_stat_statement_context.normalize = 'route: ''/\\\\d+'' => ''/:id'''"
+     ],
+     "checks": [
+      "regexnorm:1"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    }
+   ]
+  },
+  {
+   "name": "ro-prepared-c20",
+   "workload": "ro",
+   "protocol": "prepared",
+   "clients": 20,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "ro",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "ro",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:1"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    }
+   ]
+  },
+  {
+   "name": "rw-simple-c1",
+   "workload": "rw",
+   "protocol": "simple",
+   "clients": 1,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "rw",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "rw",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:5"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    }
+   ]
+  },
+  {
+   "name": "rw-simple-c5",
+   "workload": "rw",
+   "protocol": "simple",
+   "clients": 5,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "rw",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "rw",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:5"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    },
+    {
+     "name": "plain-pgss",
+     "baseline": "plain-pgss",
+     "preload": "pgss",
+     "script": "rw-plain",
+     "label": "pg_stat_statements only, no comments",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    },
+    {
+     "name": "plain-ext",
+     "baseline": "plain-pgss",
+     "preload": "ext",
+     "script": "rw-plain",
+     "label": "+ extension, untagged (untagged = skip)",
+     "settings": [],
+     "checks": [
+      "untagged"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    },
+    {
+     "name": "ext-regex-normalize",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "rw",
+     "label": "+ extension, regex extractor (merge) and a normalize rule",
+     "settings": [
+      "pg_stat_statement_context.tags = 'action, controller, job, route, driver'",
+      "pg_stat_statement_context.extractors = 'sqlcommenter, regex(pattern=''db_driver=.(\\\\w+)'', keys=driver, merge=on)'",
+      "pg_stat_statement_context.normalize = 'route: ''/\\\\d+'' => ''/:id'''"
+     ],
+     "checks": [
+      "regexnorm:5"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    }
+   ]
+  },
+  {
+   "name": "rw-simple-c20",
+   "workload": "rw",
+   "protocol": "simple",
+   "clients": 20,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "rw",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "rw",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:5"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    }
+   ]
+  },
+  {
+   "name": "rw-prepared-c1",
+   "workload": "rw",
+   "protocol": "prepared",
+   "clients": 1,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "rw",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "rw",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:5"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    }
+   ]
+  },
+  {
+   "name": "rw-prepared-c5",
+   "workload": "rw",
+   "protocol": "prepared",
+   "clients": 5,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "rw",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "rw",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:5"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    }
+   ]
+  },
+  {
+   "name": "rw-prepared-c20",
+   "workload": "rw",
+   "protocol": "prepared",
+   "clients": 20,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "rw",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "rw",
+     "label": "+ extension, tagged, defaults",
+     "settings": [],
+     "checks": [
+      "tagged:5"
+     ],
+     "extra": "",
+     "stmts_per_txn": 7
+    }
+   ]
+  },
+  {
+   "name": "nested-simple-c5",
+   "workload": "nested",
+   "protocol": "simple",
+   "clients": 5,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "nested",
+     "label": "pg_stat_statements only (track = top)",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 17
+    },
+    {
+     "name": "ext",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "nested",
+     "label": "+ extension, defaults (track = top)",
+     "settings": [],
+     "checks": [
+      "tagged:1"
+     ],
+     "extra": "",
+     "stmts_per_txn": 17
+    },
+    {
+     "name": "pgss-all",
+     "baseline": "pgss-all",
+     "preload": "pgss",
+     "script": "nested",
+     "label": "pg_stat_statements only (track = all)",
+     "settings": [
+      "pg_stat_statements.track = all"
+     ],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 17
+    },
+    {
+     "name": "ext-all-inherit",
+     "baseline": "pgss-all",
+     "preload": "ext",
+     "script": "nested",
+     "label": "+ extension, track = all, nested_tags = inherit",
+     "settings": [
+      "pg_stat_statements.track = all",
+      "pg_stat_statement_context.track = all"
+     ],
+     "checks": [
+      "tagged:1",
+      "nested:inherit:16"
+     ],
+     "extra": "",
+     "stmts_per_txn": 17
+    },
+    {
+     "name": "ext-all-scan",
+     "baseline": "pgss-all",
+     "preload": "ext",
+     "script": "nested",
+     "label": "+ extension, track = all, nested_tags = scan",
+     "settings": [
+      "pg_stat_statements.track = all",
+      "pg_stat_statement_context.track = all",
+      "pg_stat_statement_context.nested_tags = scan"
+     ],
+     "checks": [
+      "tagged:1",
+      "nested:scan:16"
+     ],
+     "extra": "",
+     "stmts_per_txn": 17
+    }
+   ]
+  },
+  {
+   "name": "inlist-simple-c5",
+   "workload": "inlist",
+   "protocol": "simple",
+   "clients": 5,
+   "configs": [
+    {
+     "name": "inlist-pgss",
+     "baseline": "inlist-pgss",
+     "preload": "pgss",
+     "script": "inlist",
+     "label": "10k IN list + ';': pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "inlist-ext",
+     "baseline": "inlist-pgss",
+     "preload": "ext",
+     "script": "inlist",
+     "label": "10k IN list + ';': position = append (heuristic tail scan)",
+     "settings": [],
+     "checks": [
+      "tagged:1",
+      "heuristic"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "inlist-ext-any",
+     "baseline": "inlist-pgss",
+     "preload": "ext",
+     "script": "inlist",
+     "label": "10k IN list + ';': position = any (full scan)",
+     "settings": [
+      "pg_stat_statement_context.extractors = 'sqlcommenter(position=any), marginalia(position=any)'"
+     ],
+     "checks": [
+      "tagged:1",
+      "exact"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "inlist0-pgss",
+     "baseline": "inlist0-pgss",
+     "preload": "pgss",
+     "script": "inlist0",
+     "label": "10k IN list, no ';' (stmt_len = 0): pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "inlist0-ext",
+     "baseline": "inlist0-pgss",
+     "preload": "ext",
+     "script": "inlist0",
+     "label": "10k IN list, no ';': position = append (strlen + tail scan)",
+     "settings": [],
+     "checks": [
+      "tagged:1",
+      "heuristic"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "inlist0-ext-any",
+     "baseline": "inlist0-pgss",
+     "preload": "ext",
+     "script": "inlist0",
+     "label": "10k IN list, no ';': position = any (full scan)",
+     "settings": [
+      "pg_stat_statement_context.extractors = 'sqlcommenter(position=any), marginalia(position=any)'"
+     ],
+     "checks": [
+      "tagged:1",
+      "exact"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    }
+   ]
+  },
+  {
+   "name": "evict-simple-c5",
+   "workload": "evict",
+   "protocol": "simple",
+   "clients": 5,
+   "configs": [
+    {
+     "name": "pgss",
+     "baseline": "pgss",
+     "preload": "pgss",
+     "script": "evict",
+     "label": "pg_stat_statements only",
+     "settings": [],
+     "checks": [
+      "pgss"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    },
+    {
+     "name": "ext-max10000",
+     "baseline": "pgss",
+     "preload": "ext",
+     "script": "evict",
+     "label": "+ extension, a new tag set every statement, max_entries = 10000 (sustained eviction)",
+     "settings": [
+      "pg_stat_statement_context.max_entries = 10000"
+     ],
+     "checks": [
+      "evict"
+     ],
+     "extra": "",
+     "stmts_per_txn": 1
+    }
+   ]
+  }
+ ]
+}

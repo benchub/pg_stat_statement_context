@@ -6,7 +6,21 @@ What pg_stat_statement_context costs on top of `pg_stat_statements` alone, measu
 
 ## Summary
 
-{{summary}}
+From the 2026-10-09 campaign (PG 18.6, release build, Docker on an Apple M1 Max; 10 paired blocks of 15 s runs; 95% confidence intervals):
+
+| What | Extra server CPU per statement vs `pg_stat_statements` alone | Notes |
+|---|---|---|
+| A tagged statement (sqlcommenter comment, 2 kept tags), defaults | **+2.4 to +3.8 µs** (means over 12 workloads: simple/prepared, read-only/TPC-B, 1/5/20 clients; every informative interval lies within −0.4 to +5.2 µs) | +4–10% of a cached point select's CPU; TPS −7% to +2% |
+| An untagged statement (no comment, `untagged = skip`) | +1.0 µs [+0.1, +1.9] (prepared) to +2.4 µs [+1.1, +3.7] (simple); not resolved for TPC-B | |
+| A `regex` extractor merged with sqlcommenter, plus a `normalize` rule | +7.8 to +9.8 µs | |
+| 5,000 other entries in the store; the exporter recipe scraped every 15 s | +3.3 and +3.0 µs | in the range of the defaults (not paired against them) |
+| The exporter recipe scraped every 1 s | +4.5 µs [+3.6, +5.5] | p99 +19% [+6, +33] |
+| 1 s buckets (a rollover every second) | +4.6 µs [+3.4, +5.9] | no latency concentration at bucket boundaries |
+| Nested PL/pgSQL, `track = all` | +1.1 µs (`nested_tags = inherit`), +1.8 µs (`scan`) per statement | with `track = top`, +7 µs per call of a function running 16 statements |
+| A 59 kB `IN` list (≈ 5.8 ms of server CPU each) | not resolved: `position = any` +0.2 ms [−0.6, +1.0] | a residual bias of ~5% between runs hides smaller effects |
+| Sustained eviction (a new tag set every statement, `max_entries = 10000`) | +5.6 µs [+4.3, +6.8] | **p99 +60% [+38, +84]** |
+
+What this supports: on this host, the extension's cost is a few microseconds of CPU per statement. That matters for sub-millisecond point queries (single-digit percent) and is negligible for statements that take milliseconds. What it does not support: any statement about other hardware, or about overheads below about 1 µs per statement or 5% of a long statement. Dedicated-hardware runs are needed for those; see [bench/README.md](../bench/README.md#dedicated-hardware).
 
 ## Scenarios
 
@@ -59,7 +73,7 @@ The extension finds comments by lexing the statement's text (no extra parse). Fo
 | `position = any` | all *L* bytes, lexed one by one | exact, and grows linearly with *L* |
 | a larger `scan_window` | up to `scan_window` bytes | a window ≥ *L* makes the scan exact, at the cost of `any` |
 
-The `inlist` scenarios measure these cases on a 59 kB statement. Parsing and planning a 10,000-element `IN` list costs milliseconds in PostgreSQL itself, so the extension's share is small even with `any`; the measured cost per statement is in the results below.
+The `inlist` scenarios measure these cases on a 59 kB statement. Parsing and planning a 10,000-element `IN` list costs about 6 ms of CPU in PostgreSQL itself, so the extension's share is small even with `any`. The local campaign could not resolve it: `any` measured +0.2 ms [−0.6, +1.0] with a trailing `;` and +0.3 ms [−0.2, +0.8] without, against a residual bias of about 5% between runs, so a full scan of 59 kB costs less than about 1 ms there. The heuristic `append` path, with or without the `strlen`, reads at most 2 kB plus the length scan and was not distinguishable from zero.
 
 Tuning:
 
@@ -99,7 +113,5 @@ Measured at commit `002dda0` (PG 18.6, Docker on the same M1). With a [cardinali
 | table full (`cardinality_cap_slots = 256`, 64 probes per tag) | 3463 | +144 ns (vs 3319 off in the same run) |
 
 Earlier pgbench A/B runs of both features, in the previous version of this page, were too noisy to resolve these costs; they are superseded by the campaigns below.
-
-## Results
 
 {{campaigns}}
