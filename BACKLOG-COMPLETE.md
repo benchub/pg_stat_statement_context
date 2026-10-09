@@ -1765,6 +1765,32 @@ Fix:
 **Open questions:** none
 **Status:** done
 
+### 20261008-065635-13: Benchmark requalification on the release commit
+
+**Description:** TST-1, TST-2, TST-11, PERF-1, PERF-2, PERF-4, PERF-5 and PERF-11. The numbers in `docs/benchmarks.md` were measured at 22f9e0f, before 19 later commits touched `src/`. They come from a noisy M1 laptop running Docker, and they don't cover prepared statements, writes, high client counts, concurrent readers, multi-entry stores, or long statements. Per the owner's decision (2026-10-08), make the benchmark suite reproducible and complete, run it locally in Docker with clear caveats, and leave the dedicated-hardware runs to the owner.
+- Extend `bench/` with scenarios for:
+  - simple and prepared (`-M prepared`) protocol
+  - read-only and write (pgbench TPC-B-like) workloads
+  - client counts of 1, CPU count, 4× CPU count and (opt-in) 256
+  - pgss-only vs pgss + this extension (untagged skip, tagged, regex/normalize configured)
+  - a pre-populated store with thousands of entries
+  - a periodic reader that runs the exporter recipe's queries every 15 s (and an aggressive 1 s variant)
+  - nested PL/pgSQL loops
+  - long statements (10k-element IN lists, with `position = append` and `position = any`, and with or without a trailing `;`)
+- Record CPU/statement and the p50/p95/p99 latency, plus TPS. Run enough paired, interleaved repetitions to report a confidence interval, not min/max of two pairs.
+- Each run stores its raw results with the commit, the settings and a host description under `bench/results/<date>-<host>/` (committed, small), and `docs/benchmarks.md` is regenerated from them.
+- Add a `bench/README` (or a docs section) with exact instructions for the owner's dedicated Linux x86 and Graviton runs.
+- Rewrite claims in DESIGN.md, the release notes and the README so they match what the data supports. If the local data can't bound the overhead, say so explicitly.
+- Document the long-statement scan costs (`position = any` scans the full text; append without a trailing `;` needs a full `strlen`) and give tuning guidance (`scan_window`, `position`). No new byte-budget GUC (owner decision).
+
+**Acceptance criteria:**
+- `bench/run.sh` (or its successor) runs every scenario from one command. `bench/test_analyze.py` covers the new statistics.
+- `docs/benchmarks.md` is generated from committed raw data at the current commit, and states the caveats. Instructions for dedicated hardware exist.
+
+**Depends on:** 20261008-065635-1, 20261008-065635-2, 20261008-065635-3 (benchmark the code that will ship)
+**Open questions:** none
+**Status:** done
+
 ## Dropped
 
 Items removed from BACKLOG.md without being built, with the reason.
