@@ -229,6 +229,11 @@ These come from an RDS-acceptance review on 2026-10-08 (five reviewers plus an i
 - `git archive HEAD | tar -t` leaves out the listed files. A clean build and `make installcheck` from the extracted tarball pass in Docker.
 - No user doc links to development-only files, unless the link is labeled as such. The DESIGN.md status and sections are accurate.
 
+**Owner decisions (2026-10-08):**
+- Release tarballs leave out `research/`, as well as the agent and planning files.
+- `bench/results/` stays in tarballs, so `docs/benchmarks.md` can be regenerated from them.
+- No copyright wording was supplied. Add the NOTICE/AUTHORS stub and the README line with a clearly marked `TODO(owner)` placeholder for the copyright holder.
+
 **Depends on:** 20261008-065635-13 (so DESIGN.md benchmark claims are rewritten once)
 **Open questions:** none
 **Status:** ready
