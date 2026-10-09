@@ -23,10 +23,10 @@ use strict;
 use warnings;
 
 use File::Basename qw(dirname);
-use File::Find;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use PsscDocLinks qw(check_relative_links);
 
 my $P = 'pg_stat_statement_context';
 my $root = dirname(__FILE__) . '/../..';
@@ -530,83 +530,12 @@ for my $needle ('SHOW', 'pg_settings', 'pg_file_settings', 'regex_compile_failur
 
 # ------------------------------------------------------- relative links
 {
-	my @files;
-	find(sub {
-			push @files, $File::Find::name
-			  if /\.md$/ && $File::Find::name !~ m{/(?:tmp|worktrees|tmp_check|\.git)/};
-		}, $root);
-	my %anchors;
-	my $anchors_of = sub {
-		my ($file) = @_;
-		return $anchors{$file} //= do {
-			my $t = slurp_file($file);
-			$t =~ s/^```.*?^```//msg;
-			my (%a, %n);
-			for my $h ($t =~ /^#{1,6}\s+(.+?)\s*$/mg)
-			{
-				my $s = lc $h;
-				$s =~ s/\[([^\]]*)\]\([^)]*\)/$1/g;
-				$s =~ s/[^\w\- ]//g;
-				$s =~ s/ /-/g;
-				my $k = $n{$s}++;
-				$a{ $k ? "$s-$k" : $s } = 1;
-			}
-			$a{$_} = 1 for $t =~ /<a\s+(?:name|id)="([^"]+)"/g;
-			\%a;
-		};
-	};
-	# In a release tree (git archive: no .git), the export-ignore paths of
-	# .gitattributes are absent, so developer docs' links to them (DESIGN.md
-	# to research/, say) can't resolve. 043_release_tree.pl makes sure no
-	# user doc links there.
-	my @export_ignored;
-	if (!-e "$root/.git" && -f "$root/.gitattributes")
-	{
-		for (split /\n/, slurp_file("$root/.gitattributes"))
-		{
-			my ($pat, @attrs) = split ' ';
-			next unless defined $pat && $pat =~ m{^/} && grep { $_ eq 'export-ignore' } @attrs;
-			push @export_ignored, $pat =~ s{^/}{}r;
-		}
-	}
-	my $omitted = sub {
-		my ($target) = @_;
-		return 0 unless index($target, "$root/") == 0;
-		my @out;
-		for (split m{/}, substr($target, length("$root/")))
-		{
-			next if $_ eq '' || $_ eq '.';
-			if ($_ eq '..') { pop @out; } else { push @out, $_; }
-		}
-		my $rel = join '/', @out;
-		return scalar grep { $rel eq $_ || index($rel, "$_/") == 0 } @export_ignored;
-	};
-	my @bad;
-	my $nlinks = 0;
-	my $nomitted = 0;
-	for my $f (sort @files)
-	{
-		my $t = slurp_file($f);
-		$t =~ s/^```.*?^```//msg;
-		$t =~ s/`[^`\n]*`//g;
-		my @links = $t =~ /\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
-		push @links, $t =~ /^\[[^\]]+\]:\s*(\S+)/mg;
-		for my $l (@links)
-		{
-			next if $l =~ /^[a-z][a-z0-9+.-]*:/i;
-			$nlinks++;
-			my ($p, $a) = split /#/, $l, 2;
-			my $target = $p eq '' ? $f : dirname($f) . "/$p";
-			if (!-e $target && $omitted->($target)) { $nomitted++; next; }
-			if (!-e $target) { push @bad, "$f: $l (no such file)"; next; }
-			push @bad, "$f: $l (no such anchor)"
-			  if defined $a && $target =~ /\.md$/ && !$anchors_of->($target)->{$a};
-		}
-	}
-	ok($nlinks > 100, "relative links found ($nlinks)");
-	is_deeply(\@bad, [], 'every relative link resolves') or diag(join("\n", @bad));
-	note("$nomitted links into paths left out of release tarballs not checked")
-	  if $nomitted;
+	my $r = check_relative_links($root);
+	ok($r->{nlinks} > 100, "relative links found ($r->{nlinks})");
+	is_deeply($r->{bad}, [], 'every relative link resolves')
+	  or diag(join("\n", @{ $r->{bad} }));
+	note("$r->{nomitted} links into paths left out of release tarballs not checked")
+	  if $r->{nomitted};
 }
 
 $node->stop;

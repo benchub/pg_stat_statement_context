@@ -28,6 +28,10 @@ use warnings;
 
 use File::Basename qw(dirname);
 use File::Find;
+use File::Path qw(make_path remove_tree);
+use FindBin;
+use lib "$FindBin::Bin/../perl";
+use PsscDocLinks qw(check_relative_links);
 use Test::More;
 
 my $root = dirname(__FILE__) . '/../..';
@@ -197,6 +201,11 @@ ok(!dev_only($_), "$_ ships in release tarballs") for @user_docs;
 	{
 		like($glossary // '', qr/^- \*\*\Q$term\E\*\*/m, "the glossary defines \"$term\"");
 	}
+	# exclude_tags applies only with tags = '*' (docs/configuration.md).
+	my ($key_def) = ($glossary // '') =~ /^- \*\*Key\*\*(.*)$/m;
+	like($key_def // '', qr/exclude_tags.*\Qtags = '*'\E|\Qtags = '*'\E.*exclude_tags/,
+		'the glossary limits exclude_tags to tags = \'*\'')
+	  if ($key_def // '') =~ /exclude_tags/;
 	ok(-f "$root/NOTICE", 'NOTICE exists');
 	my $notice = -f "$root/NOTICE" ? slurp("$root/NOTICE") : '';
 	like($notice, qr/\bLICENSE\b/, 'NOTICE refers to LICENSE');
@@ -204,6 +213,55 @@ ok(!dev_only($_), "$_ ships in release tarballs") for @user_docs;
 	my ($license) = $readme =~ /^## License\n(.*?)(?=^## |\z)/ms;
 	like($license // '', qr/\[NOTICE\]\(NOTICE\)/, 'README.md license section links to NOTICE');
 	like($license // '', qr/[Cc]opyright/, 'README.md says who holds the copyright');
+}
+
+# ------------------------------------------------------------ link checker
+# check_relative_links() (037's relative-link check) skips a missing link
+# target only in a release tree: no .git, and the export-ignored root that
+# would hold it absent. docker/run-tests.sh's copy has no .git but keeps
+# research/ and the backlog, so a broken link into them must still fail.
+{
+	my $fx = "$root/tmp_check/043_links";
+	my $mk = sub {
+		my (%o) = @_;
+		remove_tree($fx);
+		make_path("$fx/docs");
+		my $w = sub {
+			my ($f, $t) = @_;
+			make_path(dirname("$fx/$f"));
+			open my $fh, '>', "$fx/$f" or die "write $fx/$f: $!";
+			print $fh $t;
+			close $fh;
+		};
+		$w->('.gitattributes', "/research export-ignore\n/BACKLOG.md export-ignore\n");
+		$w->('DESIGN.md',
+			"# Design\n\nSee [gone](research/drivers/does-not-exist.md), "
+			  . "[log](BACKLOG.md#x) and [user](docs/a.md#a).\n");
+		$w->('docs/a.md', "# A\n");
+		$w->('research/drivers/README.md', "# Drivers\n") if $o{research};
+		$w->('BACKLOG.md', "# Backlog\n") if $o{backlog};
+		make_path("$fx/.git") if $o{git};
+	};
+
+	$mk->(research => 1, backlog => 1);
+	my $r = check_relative_links($fx);
+	is_deeply([ sort @{ $r->{bad} } ],
+		[ "$fx/DESIGN.md: BACKLOG.md#x (no such anchor)",
+		  "$fx/DESIGN.md: research/drivers/does-not-exist.md (no such file)" ],
+		'no .git, export-ignored roots present: broken links into them fail');
+	is($r->{nomitted}, 0, '... and none is skipped');
+
+	$mk->();
+	$r = check_relative_links($fx);
+	is_deeply($r->{bad}, [], 'release tree (roots absent, no .git): links into them are skipped');
+	is($r->{nomitted}, 2, '... both counted as skipped');
+	is($r->{nlinks}, 3, '... and the other link is checked');
+
+	$mk->(git => 1);
+	$r = check_relative_links($fx);
+	is(scalar @{ $r->{bad} }, 2, 'a git checkout missing the roots fails');
+
+	remove_tree($fx);
 }
 
 done_testing();
