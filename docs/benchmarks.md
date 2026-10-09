@@ -121,7 +121,7 @@ Earlier pgbench A/B runs of both features, in the previous version of this page,
 
 ## Campaign `2026-10-09-apple-m1-max-docker`
 
-- **Commit measured:** `33dad666c094`
+- **Commit measured:** `4ee7e5abd986` (measured as `33dad666c094` before a rebase that left the measured code unchanged)
 - **Date:** 2026-10-09
 - **Host:** Apple M1 Max, 10 CPUs (8 performance + 2 efficiency), 64 GB, macOS 26.6.2
 - **Docker:** Docker Desktop 29.0.1, VM/host: 10 CPUs, 8217448448 bytes

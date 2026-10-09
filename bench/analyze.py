@@ -509,7 +509,9 @@ def render_campaign(d):
     lab = lambda r: "`%s` %s" % (r["config"], labels.get((r["scenario"], r["config"]), ""))
     out = ["## Campaign `%s`" % name, ""]
     meta = [
-        ("Commit measured", "`%s`%s" % (camp.get("commit"), " (dirty tree)" if camp.get("dirty") else "")),
+        ("Commit measured", "`%s`%s%s" % (camp.get("commit"), " (dirty tree)" if camp.get("dirty") else "",
+                                           " (measured as `%s` before a rebase that left the measured code unchanged)"
+                                           % camp["rebased_from"] if camp.get("rebased_from") else "")),
         ("Date", camp.get("date")), ("Host", camp.get("host")), ("Docker", camp.get("docker")),
         ("PostgreSQL", camp.get("pg_version")), ("Build", camp.get("build")),
         ("CPUs", "server on %s (%s CPUs), pgbench on %s" % (camp.get("server_cpus"), camp.get("ncpu"),
