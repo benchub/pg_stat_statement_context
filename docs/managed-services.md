@@ -14,7 +14,7 @@ Every statement about privileges on this page is checked by `test/t/037_managed_
 
 1. In the parameter group, set `shared_preload_libraries` to include `pg_stat_statement_context`, **after** `pg_stat_statements` and `pg_stat_monitor` if you use them (see [Load order](../README.md#load-order)), for example `pg_stat_statements,pg_stat_statement_context`. This needs a reboot.
 2. Check that `compute_query_id` is `auto` or `on` (see [Query IDs](../README.md#query-ids)).
-3. In each database where you want to query the statistics, run `CREATE EXTENSION pg_stat_statement_context;` as the administrator role. The role that runs `CREATE EXTENSION` owns the extension's functions in that database, which matters for [the restricted functions](#functions-_reset-and-_extract).
+3. In each database where you want to query the statistics, run `CREATE EXTENSION pg_stat_statement_context;` as the administrator role. The role that runs `CREATE EXTENSION` owns the extension's functions in that database, which matters for [the restricted functions](#functions-pg_stat_statement_context_reset-and-pg_stat_statement_context_extract).
 
 ## Settings
 
@@ -207,9 +207,9 @@ SELECT pg_stat_statement_context_extract($$SELECT 1 /*route='%2Fusers%2F42%2Fpos
 
 ## Privileges
 
-### The views, `_info()` and `_counters()`
+### The views, `pg_stat_statement_context_info()` and `pg_stat_statement_context_counters()`
 
-Any role can read the views (`pg_stat_statement_context`, `_totals`, `_last_bucket`, `_activity`) and call `pg_stat_statement_context_info()` and `pg_stat_statement_context_counters()` <!-- check: views-public -->. In the views, a role sees its own rows in full, but other roles' rows with `queryid` and `tags` (and `exemplars`) `NULL` <!-- check: own-rows -->. A role with the privileges of `pg_read_all_stats`, for example through `pg_monitor`, sees every row in full; an administrator role that is a member of `pg_monitor` therefore sees everything, while a new monitoring role sees only its own rows until it is granted one of them <!-- check: read-all-stats -->. See [Visibility and privacy](sql-interface.md#visibility-and-privacy).
+Any role can read the views (`pg_stat_statement_context`, `pg_stat_statement_context_totals`, `pg_stat_statement_context_last_bucket`, `pg_stat_statement_context_activity`) and call `pg_stat_statement_context_info()` and `pg_stat_statement_context_counters()` <!-- check: views-public -->. In the views, a role sees its own rows in full, but other roles' rows with `queryid` and `tags` (and `exemplars`) `NULL` <!-- check: own-rows -->. A role with the privileges of `pg_read_all_stats`, for example through `pg_monitor`, sees every row in full; an administrator role that is a member of `pg_monitor` therefore sees everything, while a new monitoring role sees only its own rows until it is granted one of them <!-- check: read-all-stats -->. See [Visibility and privacy](sql-interface.md#visibility-and-privacy).
 
 ```sql
 GRANT pg_read_all_stats TO monitoring;   -- monitoring: an existing role
@@ -217,7 +217,7 @@ GRANT pg_read_all_stats TO monitoring;   -- monitoring: an existing role
 
 To run that grant, a non-superuser needs, on PostgreSQL 16 and later, `ADMIN OPTION` on `pg_read_all_stats` (being a member of it, or of `pg_monitor`, is not enough); on PostgreSQL 14 and 15, `CREATEROLE` is enough <!-- check: grant-read-all-stats -->. If your administrator role can't grant it, ask the provider how monitoring roles are set up there.
 
-### Functions `_reset()` and `_extract()`
+### Functions `pg_stat_statement_context_reset()` and `pg_stat_statement_context_extract()`
 
 `pg_stat_statement_context_reset()` and `pg_stat_statement_context_extract()` have `EXECUTE` revoked from `PUBLIC`. They can be called by superusers, by their **owner**, which is the role that ran `CREATE EXTENSION` in that database (on a managed service, normally your administrator role) <!-- check: functions-owner -->, and by roles granted `EXECUTE`. Any other role gets "permission denied for function"; so does your administrator role in a database where someone else, such as the provider, created the extension, and it can't grant `EXECUTE` there either <!-- check: functions-revoked -->.
 
@@ -243,7 +243,7 @@ PGHOST=mydb.example.com PGUSER=admin PGDATABASE=app make smoke
 psql -X -q -v ON_ERROR_STOP=1 -f test/smoke/smoke.sql
 ```
 
-It checks that `shared_preload_libraries` lists the library, that the extension exists, that `_counters()` and `_info()` work, and that recording is on (`enabled`, `track`) for its session. It checks what `_extract()` finds in its statements under the server's current extractor configuration. Then it runs one statement 3 times in SQLCommenter format and another 3 times in marginalia format, counting the calls of its entries before, between and after, and checks that each format the configuration recognizes was recorded exactly 3 times and is visible to the role in the views. Before the first count it runs each statement once more, unmeasured, so a run adds 8 calls to its entries (4 per recognized format). It prints an `ok:`, `skipped:` or `info:` line for each check. A check it cannot make as this role is skipped with the reason, for example `skipped: _extract() not executable by this role`. On a failure it prints a `FAIL:` line and exits non-zero; the [troubleshooting checklist](#troubleshooting) below helps find the cause.
+It checks that `shared_preload_libraries` lists the library, that the extension exists, that `pg_stat_statement_context_counters()` and `pg_stat_statement_context_info()` work, and that recording is on (`enabled`, `track`) for its session. It checks what `pg_stat_statement_context_extract()` finds in its statements under the server's current extractor configuration. Then it runs one statement 3 times in SQLCommenter format and another 3 times in marginalia format, counting the calls of its entries before, between and after, and checks that each format the configuration recognizes was recorded exactly 3 times and is visible to the role in the views. Before the first count it runs each statement once more, unmeasured, so a run adds 8 calls to its entries (4 per recognized format). It prints an `ok:`, `skipped:` or `info:` line for each check. A check it cannot make as this role is skipped with the reason, for example `skipped: _extract() not executable by this role`. On a failure it prints a `FAIL:` line and exits non-zero; the [troubleshooting checklist](#troubleshooting) below helps find the cause.
 
 - **Tags**: the statements carry a single tag, `controller=pssc_smoke`, which the default [`extractors`](configuration.md#extractors) and [`tags`](configuration.md#tags) allowlist keep. The two formats are told apart by their statements, not by a tag. The test fails if the configuration recognizes neither format or doesn't keep `controller`, and also if a [`tags_override`](configuration.md#tags_override) replaces or adds that tag.
 - **Cost**: the tag value is fixed, so repeated runs reuse the same two entries per role and database, and use one value of `controller` for a [cardinality cap](configuration.md#cardinality_cap). A value that changed on every run would add two entries and two capped values per run, and admitted values are only forgotten at a reset or restart. Don't use `pssc_smoke` in your applications: it is reserved for this test.
@@ -273,7 +273,7 @@ Each check below is SQL that the administrator role (a member of `pg_monitor`) c
    SHOW compute_query_id;
    ```
 
-3. Check what the configuration extracts from one of your real statements (as a role that may call [`_extract()`](#functions-_reset-and-_extract)). An empty `tags` means the comment format, its position or the allowlist doesn't match.
+3. Check what the configuration extracts from one of your real statements (as a role that may call [`pg_stat_statement_context_extract()`](#functions-pg_stat_statement_context_reset-and-pg_stat_statement_context_extract)). An empty `tags` means the comment format, its position or the allowlist doesn't match.
 
    ```sql
    SELECT pg_stat_statement_context_extract('SELECT 1 /*controller:users,action:show*/');
@@ -286,7 +286,7 @@ Each check below is SQL that the administrator role (a member of `pg_monitor`) c
      FROM pg_stat_statement_context_counters();
    ```
 
-5. Rows of other roles have `tags = NULL` without `pg_read_all_stats` (see [above](#the-views-_info-and-_counters)), so a query filtering on `tags` returns nothing for them. Rows also disappear when their buckets expire, after `bucket_count × bucket_interval`.
+5. Rows of other roles have `tags = NULL` without `pg_read_all_stats` (see [above](#the-views-pg_stat_statement_context_info-and-pg_stat_statement_context_counters)), so a query filtering on `tags` returns nothing for them. Rows also disappear when their buckets expire, after `bucket_count × bucket_interval`.
 
    ```sql
    SELECT count(*) AS rows, count(tags) AS rows_with_tags, count(DISTINCT userid) AS roles
@@ -352,7 +352,7 @@ Only if the order is wrong (the warning is logged at every startup) should you f
 
 ### Statistics vanished after a restart
 
-With [`save`](configuration.md#save) on, statistics survive a clean (smart or fast) shutdown. They are lost after a crash, an immediate shutdown, a failover (the new primary has only its own statistics, see [Replicas and failover](limitations.md#replicas-and-failover)), or when `bucket_interval`, `bucket_count` or the extension version changed. A `_reset()` also clears them. Compare the server's start time with `stats_reset`: if `stats_reset` is later, someone reset the statistics; if they are equal (to within seconds), the server started with an empty store.
+With [`save`](configuration.md#save) on, statistics survive a clean (smart or fast) shutdown. They are lost after a crash, an immediate shutdown, a failover (the new primary has only its own statistics, see [Replicas and failover](limitations.md#replicas-and-failover)), or when `bucket_interval`, `bucket_count` or the extension version changed. A `pg_stat_statement_context_reset()` also clears them. Compare the server's start time with `stats_reset`: if `stats_reset` is later, someone reset the statistics; if they are equal (to within seconds), the server started with an empty store.
 
 ```sql
 SELECT pg_postmaster_start_time(), stats_reset, entries

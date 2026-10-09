@@ -10,7 +10,7 @@ EXECUTE q /*controller:admin*/;   -- recorded with {"controller": "users"}
 DEALLOCATE q;
 ```
 
-**In practice, common drivers are not affected.** We tested (Oct 2026) pgx 5.11, pgjdbc 42.7.13, psycopg 3.3.6, ActiveRecord 7.0–8.1 with the pg gem 1.7 and marginalia 1.11, and pgbouncer 1.26 in transaction mode, in their default and most aggressive prepare settings. None reuses a prepared statement across different comments: they key their statement caches on the full SQL text, comment included, or re-Parse on every call, and pgbouncer shares server-side statements by query text. Stale tags appear only when the **application** holds on to one prepared handle (for example a pgx `conn.Prepare` name or a long-lived JDBC `PreparedStatement`) and reuses it across requests. The test harness and per-driver results are a developer reference, kept in the source repository but not in release tarballs: [driver prepared-statement experiments](https://github.com/benchub/pg_stat_statement_context/tree/main/research/driver-prepared-statements).
+**In practice, common drivers are not affected.** We tested (Oct 2026) pgx 5.11, pgjdbc 42.7.13, psycopg 3.3.6, ActiveRecord 7.0–8.1 with the pg gem 1.7 and marginalia 1.11, and pgbouncer 1.26 in transaction mode, in their default and most aggressive prepare settings. None reuses a prepared statement across different comments: they key their statement caches on the full SQL text, comment included, or re-Parse on every call, and pgbouncer shares server-side statements by query text. Stale tags appear only when the **application** holds on to one prepared handle (for example a pgx `conn.Prepare` name or a long-lived JDBC `PreparedStatement`) and reuses it across requests.
 
 Related findings:
 
@@ -23,7 +23,7 @@ For application-held prepared statements, and for drivers that can't add comment
 ## Scanner caveats
 
 - **`standard_conforming_strings`.** The scanner uses the *current* value of `standard_conforming_strings`, because the setting in effect when the statement was parsed isn't available to the hooks. If it is changed between `PREPARE` and `EXECUTE`, plain string literals containing backslashes may be mis-scanned. Leave it at its default (`on`).
-- **Heuristic scans.** For a statement longer than `scan_window`, an `append` extractor only looks at the last `scan_window` bytes, without knowing the lexical state at the start of that window. A string literal that ends in `*/`, or a `--` line comment that started before the window, can then produce tags from text that isn't really a comment. Such scans are counted in `_info().heuristic_scans`. Use `position=prepend` (exact) or a larger `scan_window` if this matters. See [Where comments are found](extractors.md#where-comments-are-found).
+- **Heuristic scans.** For a statement longer than `scan_window`, an `append` extractor only looks at the last `scan_window` bytes, without knowing the lexical state at the start of that window. A string literal that ends in `*/`, or a `--` line comment that started before the window, can then produce tags from text that isn't really a comment. Such scans are counted in `pg_stat_statement_context_info().heuristic_scans`. Use `position=prepend` (exact) or a larger `scan_window` if this matters. See [Where comments are found](extractors.md#where-comments-are-found).
 - **Comments in PL/pgSQL (`nested_tags = scan`).** A nested statement is scanned with the usual position rules, using the text PL/pgSQL passes on:
   - In a SQL statement (`SELECT`, `INSERT`, `UPDATE`, `DELETE`), a trailing comment is kept. `SELECT ... INTO n FROM t /*controller:x*/` works, because PL/pgSQL blanks out only the `INTO n` clause.
   - In `PERFORM` and in expressions (`RETURN (SELECT ...)`, `n := (SELECT ...)`, `IF` conditions), PL/pgSQL drops a comment that ends the expression. A comment inside the expression is mid-statement, so only an extractor with `position=any` sees it.
@@ -35,7 +35,7 @@ On PostgreSQL 14 and 15, core computes the query ID of a utility statement (DDL,
 
 ## `toplevel` on PostgreSQL 14–16
 
-`toplevel` matches `pg_stat_statements` on every version (see [Nested statements](sql-interface.md#nested-statements-toplevel-and-inclusive-costs)). On 14–16 this relies on reading pgss's `track` and `track_utility` settings: a utility statement only makes its children nested when pgss tracks it. As in pgss on those versions, statements run while a parent is being planned are top-level. There is no divergence to work around, but be aware that changing `pg_stat_statements.track_utility` on 14–16 changes which statements this extension reports as top-level.
+`toplevel` matches `pg_stat_statements` on every version (see [Nested statements](sql-interface.md#nested-statements-toplevel-and-inclusive-costs)). On 14–16 this relies on reading `pg_stat_statements`'s `track` and `track_utility` settings: a utility statement only makes its children nested when `pg_stat_statements` tracks it. As in `pg_stat_statements` on those versions, statements run while a parent is being planned are top-level. There is no divergence to work around, but be aware that changing `pg_stat_statements.track_utility` on 14–16 changes which statements this extension reports as top-level.
 
 ## Failed statements are not counted
 
@@ -62,10 +62,6 @@ On failover, a promoted standby keeps the statistics it had in memory, which cov
 ## Visibility and PII
 
 Tag values come from clients and can contain personal data. Other roles' `tags` and `queryid` are hidden unless the caller has the privileges of `pg_read_all_stats`, but anyone with those privileges sees every tag value. Don't put personal data in comments, and keep it out of the `tags` allowlist. See [Visibility and privacy](sql-interface.md#visibility-and-privacy).
-
-## Deployment
-
-The library must be in `shared_preload_libraries` (after `pg_stat_statements`), so enabling it requires a server restart. Managed PostgreSQL providers (Amazon RDS, Google Cloud SQL, Azure, ...) only allow extensions on their allowlists; until a provider adds this one, it can't be used there. Where it is available, see [Managed services](managed-services.md) for privileges, parameter groups and troubleshooting without a superuser.
 
 ## Not in v1
 

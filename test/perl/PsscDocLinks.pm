@@ -53,7 +53,7 @@ sub check_relative_links
 	};
 	# In a release tree (git archive: no .git), the export-ignore paths of
 	# .gitattributes are absent, so developer docs' links into them (DESIGN.md
-	# to research/, say) can't resolve: a missing target is skipped when its
+	# to BACKLOG.md, say) can't resolve: a missing target is skipped when its
 	# export-ignored root is absent too. 043_release_tree.pl makes sure no
 	# user doc links there.
 	my @export_ignored;
@@ -77,7 +77,7 @@ sub check_relative_links
 		}
 		my $rel = join '/', @out;
 		# Only when the root itself was left out: in docker/run-tests.sh's
-		# copy (no .git either) research/ and the backlog are still there.
+		# copy (no .git either) the backlog files are still there.
 		return scalar grep { ($rel eq $_ || index($rel, "$_/") == 0) && !-e "$root/$_" }
 		  @export_ignored;
 	};

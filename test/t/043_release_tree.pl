@@ -11,15 +11,15 @@
 #                   paragraph or list item, or the heading above it, says
 #                   "developer(s)".
 #   development-only  every path marked export-ignore in .gitattributes
-#                   (agent and planning files, research/): not in release
+#                   (agent and planning files): not in release
 #                   tarballs, so a user doc never links to or names them (a
 #                   labeled link to the repository on the web is fine).
 # Scripts, tests, docker/ and bench/ (harness, results and bench/README.md,
 # which tells anyone how to reproduce docs/benchmarks.md) are source that
 # users run: links to them need no label.
 #
-# Also checked: .gitattributes excludes the agent and planning files and
-# research/ from tarballs but keeps what building, testing and regenerating
+# Also checked: .gitattributes excludes the agent and planning files
+# from tarballs but keeps what building, testing and regenerating
 # the docs need; DESIGN.md describes the implemented version (no "Draft" or
 # "(proposed)"); src/ carries no backlog IDs; the README has a glossary and
 # says who holds the copyright (NOTICE).
@@ -62,8 +62,8 @@ my @ignored;
 		ok($pat =~ m{^/[^*]*[^/]$}, "export-ignore pattern $pat is a rooted path")
 		  if grep { $_ eq 'export-ignore' } @attrs;
 	}
-	for my $p ('/CLAUDE.md', '/BACKLOG.md', '/BACKLOG-COMPLETE.md', '/research',
-		'/worktrees', '/tmp')
+	for my $p ('/CLAUDE.md', '/BACKLOG.md', '/BACKLOG-COMPLETE.md', '/worktrees',
+		'/tmp')
 	{
 		ok((grep { $_ eq $p } @ignored), "export-ignore $p");
 	}
@@ -155,7 +155,7 @@ ok(!dev_only($_), "$_ ships in release tarballs") for @user_docs;
 			(my $named = $block) =~ s/\]\([a-z][a-z0-9+.-]*:[^)]*\)/]()/gi if $labeled;
 			$named //= $block;
 			push @mentions, "$f: $1"
-			  while $named =~ /(\bBACKLOG(?:-COMPLETE)?\.md\b|\bCLAUDE\.md\b|\bresearch\/|$backlog_id)/g;
+			  while $named =~ /(\bBACKLOG(?:-COMPLETE)?\.md\b|\bCLAUDE\.md\b|$backlog_id)/g;
 		}
 	}
 	ok($checked > 30, "relative links of user docs checked ($checked)");
@@ -219,7 +219,8 @@ ok(!dev_only($_), "$_ ships in release tarballs") for @user_docs;
 # check_relative_links() (037's relative-link check) skips a missing link
 # target only in a release tree: no .git, and the export-ignored root that
 # would hold it absent. docker/run-tests.sh's copy has no .git but keeps
-# research/ and the backlog, so a broken link into them must still fail.
+# the export-ignored files (here a made-up research/ and the backlog), so a
+# broken link into them must still fail.
 {
 	my $fx = "$root/tmp_check/043_links";
 	my $mk = sub {

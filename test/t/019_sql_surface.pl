@@ -228,7 +228,7 @@ sql(q{SELECT count(*) FROM t WHERE id < 100000 /*controller='orders',action='ind
 		push @out, 'OUT ' . shift(@c) . ' ' . shift(@c) while @c;
 		return $norm->(join(', ', @out));
 	};
-	is($table->('Both have the same columns:', 'An entry is one'), $srf_out,
+	is($table->('have the same columns:', 'An entry is one'), $srf_out,
 		'docs: the views\' column table matches the catalog');
 	is($table->("## `${P}_info()`", "## `${P}_reset()`"), $args->("${P}_info()"),
 		'docs: the _info() column table matches the catalog');

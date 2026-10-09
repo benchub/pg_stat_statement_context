@@ -14,5 +14,3 @@
 # Scratch space and item worktrees (git-ignored, listed in case one is added).
 /tmp                         export-ignore
 /worktrees                   export-ignore
-# Driver experiments behind docs/limitations.md and DESIGN.md §6.3.
-/research                    export-ignore

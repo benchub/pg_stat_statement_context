@@ -9,7 +9,7 @@
 #                                                  (default 18) from there: make,
 #                                                  make install, installcheck,
 #                                                  TAP, both builds
-# Contents: the agent and planning files and research/ are left out; what
+# Contents: the agent and planning files are left out; what
 # building, testing, packaging and regenerating docs/benchmarks.md need is
 # kept. With python3, docs/benchmarks.md is regenerated from the tarball's
 # bench/results/ and must match the shipped one.
@@ -31,11 +31,11 @@ LIST=$(git archive --format=tar HEAD | tar -tf -)
 [ -n "$LIST" ] || { echo "FAIL: empty archive" >&2; exit 1; }
 
 # Left out: agent and planning files (CLAUDE.md, BACKLOG*.md, the backlog
-# script, agent settings), scratch and worktree directories, and research/.
+# script, agent settings), and scratch and worktree directories.
 for p in CLAUDE.md BACKLOG.md BACKLOG-COMPLETE.md scripts/backlog-complete.py; do
 	if grep -qx "$p" <<<"$LIST"; then err "$p is in the archive"; fi
 done
-for d in research worktrees tmp .claude .copilot; do
+for d in worktrees tmp .claude .copilot; do
 	if grep -q "^$d/" <<<"$LIST"; then err "$d/ is in the archive"; fi
 done
 
@@ -53,7 +53,7 @@ done
 grep -q '^bench/results/.*/campaign\.json$' <<<"$LIST" || err "bench/results/ is missing from the archive"
 while IFS= read -r f; do
 	case $f in
-	CLAUDE.md | BACKLOG.md | BACKLOG-COMPLETE.md | scripts/backlog-complete.py | research/*) continue ;;
+	CLAUDE.md | BACKLOG.md | BACKLOG-COMPLETE.md | scripts/backlog-complete.py) continue ;;
 	esac
 	grep -qxF "$f" <<<"$LIST" || err "tracked file $f is missing from the archive"
 done < <(git ls-tree -r --name-only HEAD)

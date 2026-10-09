@@ -76,9 +76,9 @@ pg_stat_statement_context.cardinality_cap = 100
 - **Counted per role and database, per key** (by default; see [`cardinality_cap_scope`](#cardinality_cap_scope)). Values are counted across all queries and buckets, separately for each (role, database), as pg_stat_statements keys its entries. A key's first N distinct values (in the order statements bring them) are **admitted**; any other value is recorded as JSON `null`, so all its statements share one entry per query and other tags. Admitted values stay admitted: a value isn't forgotten when its entries are evicted, only by [`pg_stat_statement_context_reset()`](sql-interface.md#pg_stat_statement_context_reset) or a restart. Lowering the cap, or setting it to `0` and back, doesn't remove values already admitted.
 - **Where it applies**: step 8 of the [tag pipeline](extractors.md#the-tag-pipeline), after `rename`, [`normalize`](#normalize) and truncation, to tags from every source (comments, `application_name`, [`tags_override`](#tags_override)), and only to tags that are then kept within `max_tags` and `max_tagset_bytes`. Values are compared byte for byte; the cap is per **final** (renamed) key.
 - **`null` is unambiguous**: a client can only send strings (`'null'` and `''` stay strings), so `tags->'route' = 'null'` finds exactly the collapsed statements; `tags->>'route'` is SQL `NULL` for them.
-- **Counters**: each collapsed value is counted in `_info().capped_tags`; [`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract) shows what would collapse without admitting anything.
-- **When**: a value is admitted when its tags are extracted, at `ExecutorStart`, so it takes its place even if the statement then fails. `ExecutorStart` also runs for statements that are never executed or recorded: a portal that is bound but never executed (extended protocol `Bind` without `Execute`) and a plain `EXPLAIN` (without `ANALYZE`). Their values use cap space too. Under concurrency a key can very rarely collapse one value too many while two sessions admit its last values at the same time; it never exceeds its cap. While a `_reset()` clears the whole table (needed about once every million resets, when its generation number wraps around), new values collapse to `null` for that moment.
-- **Values, not combinations**: each key is capped on its own, so with k kept keys capped at N values, one query of one role can still have N^k entries without a single cap event: (N + 1)^k with `null`, and (N + 2)^k − 1 when keys are optional (absent is one more state). These bounds assume the caps have been enforced at N since the last `_reset()`, or since a restart that loaded no saved statistics ([`save`](#save)). Values admitted under a higher cap, or before the cap was set to `0` and back, still count. So do the values of live entries collected while a key was uncapped or restored at startup, until those entries expire or are evicted. Size `max_entries` for the combinations you observe; see [Caps bound values, not combinations](extractors.md#caps-bound-values-not-combinations) and [Watching for cardinality pressure](extractors.md#watching-for-cardinality-pressure).
+- **Counters**: each collapsed value is counted in `pg_stat_statement_context_info().capped_tags`; [`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract) shows what would collapse without admitting anything.
+- **When**: a value is admitted when its tags are extracted, at `ExecutorStart`, so it takes its place even if the statement then fails. `ExecutorStart` also runs for statements that are never executed or recorded: a portal that is bound but never executed (extended protocol `Bind` without `Execute`) and a plain `EXPLAIN` (without `ANALYZE`). Their values use cap space too. Under concurrency a key can very rarely collapse one value too many while two sessions admit its last values at the same time; it never exceeds its cap. While a `pg_stat_statement_context_reset()` clears the whole table (needed about once every million resets, when its generation number wraps around), new values collapse to `null` for that moment.
+- **Values, not combinations**: each key is capped on its own, so with k kept keys capped at N values, one query of one role can still have N^k entries without a single cap event: (N + 1)^k with `null`, and (N + 2)^k − 1 when keys are optional (absent is one more state). These bounds assume the caps have been enforced at N since the last `pg_stat_statement_context_reset()`, or since a restart that loaded no saved statistics ([`save`](#save)). Values admitted under a higher cap, or before the cap was set to `0` and back, still count. So do the values of live entries collected while a key was uncapped or restored at startup, until those entries expire or are evicted. Size `max_entries` for the combinations you observe; see [Caps bound values, not combinations](extractors.md#caps-bound-values-not-combinations) and [Watching for cardinality pressure](extractors.md#watching-for-cardinality-pressure).
 - **Cost**: the check is a lock-free lookup in a shared hash table (a few atomic reads, plus a compare-and-swap for a new value), with no lock taken; see [benchmarks](benchmarks.md#cardinality-caps). With no cap configured, nothing is checked.
 
 ### `cardinality_cap_overrides`
@@ -105,11 +105,11 @@ A key's cap is the same number in every scope (`cardinality_cap = 100` under `ro
 `database` and `server` share caps between roles, which has two security consequences:
 
 - **Membership oracle.** Once a key is at its cap, a value that another role (or, under `server`, another database) already sent stays a string, while a new one becomes `null`. Any role that can read its own rows can therefore send a candidate value and learn whether someone else sent it. Under `server` a role can also probe a value without filling the key's cap: slot positions follow from the value alone, so it can fill the slots after the candidate's with values of its own and see whether one more value still finds room.
-- **Poisoning.** Any role can use up a key's cap, so every other role's new values become `null` until a `_reset()`.
+- **Poisoning.** Any role can use up a key's cap, so every other role's new values become `null` until a `pg_stat_statement_context_reset()`.
 
 Use them only when all the roles sharing a scope trust each other; keep `role` on multi-tenant and managed services (see [Cap scope and trust](extractors.md#cap-scope-and-trust)).
 
-Under `role` (and between databases under `database`), the caps and admitted values of other scopes don't affect a role's values, and the positions of values in the shared table are keyed with a random secret drawn at startup and by every `_reset()`, so a role can't aim its own values at another scope's. What remains shared is the table's size: all scopes share the one table sized by [`cardinality_cap_slots`](#cardinality_cap_slots), and narrower scopes admit more distinct (key, value) pairs in total and use more key slots. When the table is (nearly) full, new values of every scope become `null`, which any role can observe; like `pg_stat_statements.max`, it's a shared limit, so size it for all roles and databases.
+Under `role` (and between databases under `database`), the caps and admitted values of other scopes don't affect a role's values, and the positions of values in the shared table are keyed with a random secret drawn at startup and by every `pg_stat_statement_context_reset()`, so a role can't aim its own values at another scope's. What remains shared is the table's size: all scopes share the one table sized by [`cardinality_cap_slots`](#cardinality_cap_slots), and narrower scopes admit more distinct (key, value) pairs in total and use more key slots. When the table is (nearly) full, new values of every scope become `null`, which any role can observe; like `pg_stat_statements.max`, it's a shared limit, so size it for all roles and databases.
 
 Tags are capped when they are extracted, for the current user. When they end up recorded or shown under another role, the caps are applied again for that role first, so every row obeys the caps of the role it belongs to:
 
@@ -121,9 +121,9 @@ Applying the caps again admits the values kept as strings in that role's scope a
 
 ### `cardinality_cap_slots`
 
-The number of distinct (key, value) pairs the caps can track, server-wide, in a shared table allocated at startup (8 bytes per slot, plus 16 bytes per key slot, one key slot per 16 value slots and at least 64; 147,488 bytes at the default; see [Shared memory sizing](#shared-memory-sizing)). It is allocated even while no cap is set, so caps can be turned on with a reload. This memory is not part of `_info().shmem_bytes`; `_info().cap_shmem_bytes` reports its exact size (about 576 MiB at the maximum of 2^26 slots).
+The number of distinct (key, value) pairs the caps can track, server-wide, in a shared table allocated at startup (8 bytes per slot, plus 16 bytes per key slot, one key slot per 16 value slots and at least 64; 147,488 bytes at the default; see [Shared memory sizing](#shared-memory-sizing)). It is allocated even while no cap is set, so caps can be turned on with a reload. This memory is not part of `pg_stat_statement_context_info().shmem_bytes`; `pg_stat_statement_context_info().cap_shmem_bytes` reports its exact size (about 576 MiB at the maximum of 2^26 slots).
 
-Size it above the sum of the caps of the keys you expect, with headroom (the table is an open-addressing hash table that slows down and fills early when nearly full). Under the default [`cardinality_cap_scope = role`](#cardinality_cap_scope), each (role, database) that sends a key takes up to that key's cap of slots and one key slot of its own, so on a server with many roles or databases, size it for the sum over all of them. When a new value finds no room (or a new key finds no key slot), the value is recorded as `null`, as if over its cap, and counted in both `_info().capped_tags` and `_info().cap_table_full`: the caps fail closed. `pg_stat_statement_context_reset()` empties the table.
+Size it above the sum of the caps of the keys you expect, with headroom (the table is an open-addressing hash table that slows down and fills early when nearly full). Under the default [`cardinality_cap_scope = role`](#cardinality_cap_scope), each (role, database) that sends a key takes up to that key's cap of slots and one key slot of its own, so on a server with many roles or databases, size it for the sum over all of them. When a new value finds no room (or a new key finds no key slot), the value is recorded as `null`, as if over its cap, and counted in both `pg_stat_statement_context_info().capped_tags` and `pg_stat_statement_context_info().cap_table_full`: the caps fail closed. `pg_stat_statement_context_reset()` empties the table.
 
 ### `enabled`
 
@@ -148,9 +148,9 @@ The value stored is the raw, validated value: [`normalize`](#normalize), [`max_t
 
 ### `exemplar_memory`
 
-Shared memory for the exemplar values of all entries, allocated at startup when `exemplar_keys` is not empty. It is split evenly: each entry gets `exemplar_memory / max_entries` bytes (rounded down to a multiple of 8), each key an equal share of that, and each value that share minus 2 bytes, at most 256 bytes. `_info().exemplar_value_bytes` shows the result and `_info().exemplar_shmem_bytes` the memory used (included in `shmem_bytes`, never more than `exemplar_memory`; see [Shared memory sizing](#shared-memory-sizing)).
+Shared memory for the exemplar values of all entries, allocated at startup when `exemplar_keys` is not empty. It is split evenly: each entry gets `exemplar_memory / max_entries` bytes (rounded down to a multiple of 8), each key an equal share of that, and each value that share minus 2 bytes, at most 256 bytes. `pg_stat_statement_context_info().exemplar_value_bytes` shows the result and `pg_stat_statement_context_info().exemplar_shmem_bytes` the memory used (included in `shmem_bytes`, never more than `exemplar_memory`; see [Shared memory sizing](#shared-memory-sizing)).
 
-A value longer than `exemplar_value_bytes` is **dropped**, not truncated (a truncated trace id identifies nothing): the entry keeps its previous value and `_info().exemplar_values_dropped` is incremented. At the defaults (10000 entries, 2 MB) one key gets 206 bytes and two keys 102 bytes each, enough for a 55-byte `traceparent`.
+A value longer than `exemplar_value_bytes` is **dropped**, not truncated (a truncated trace id identifies nothing): the entry keeps its previous value and `pg_stat_statement_context_info().exemplar_values_dropped` is incremented. At the defaults (10000 entries, 2 MB) one key gets 206 bytes and two keys 102 bytes each, enough for a 55-byte `traceparent`.
 
 ### `extractors`
 
@@ -158,7 +158,7 @@ The extractor list, which says which comment formats are parsed and where in the
 
 ### `max_entries`
 
-The maximum number of entries. An entry is one combination of (database, user, `queryid`, `toplevel`, tag set), i.e. one **(query × context)** combination. See [Sizing](#sizing-max_entries) and [Eviction](#eviction).
+The maximum number of entries. An entry is one {database, user, `queryid`, `toplevel`, tag set}. See [Sizing](#sizing-max_entries) and [Eviction](#eviction).
 
 ### `max_tag_value_len`
 
@@ -166,11 +166,11 @@ The maximum length of a tag value, in bytes. Longer values are truncated on a ch
 
 ### `max_tags`
 
-The maximum number of tags stored per entry. It also limits the number of capture groups in a `regex` extractor's pattern. Tags beyond the limit are dropped (in priority order, see [the tag pipeline](extractors.md#the-tag-pipeline)) and counted in `_info().dropped_tags`.
+The maximum number of tags stored per entry. It also limits the number of capture groups in a `regex` extractor's pattern. Tags beyond the limit are dropped (in priority order, see [the tag pipeline](extractors.md#the-tag-pipeline)) and counted in `pg_stat_statement_context_info().dropped_tags`.
 
 ### `max_tagset_bytes`
 
-A hard cap on the size of an entry's serialized tag set, which is part of the hash key. The size of a tag set is the sum of `length(key) + 1 + length(value) + 1` bytes over its tags (a value [capped](#cardinality_cap) to `null` counts as 2 bytes). Tags are kept greedily in priority order (`tags` list order, or sorted key order with `tags = '*'`). A tag that doesn't fit is dropped and counted in `_info().dropped_tags`, and smaller lower-priority tags may still be kept. This setting is the main factor in the size of an entry.
+A hard cap on the size of an entry's serialized tag set, which is part of the hash key. The size of a tag set is the sum of `length(key) + 1 + length(value) + 1` bytes over its tags (a value [capped](#cardinality_cap) to `null` counts as 2 bytes). Tags are kept greedily in priority order (`tags` list order, or sorted key order with `tags = '*'`). A tag that doesn't fit is dropped and counted in `pg_stat_statement_context_info().dropped_tags`, and smaller lower-priority tags may still be kept. This setting is the main factor in the size of an entry.
 
 Size it comfortably above the largest tag set you expect: the sum over the allowlisted keys of `length(key) + max_tag_value_len + 2`. The limit is applied after the extractor chain has picked its winner. A tag set that doesn't fit is therefore not replaced by another extractor's tags, and the statement can end up untagged (see [chain semantics](extractors.md#the-extractor-dsl)).
 
@@ -215,7 +215,7 @@ SELECT pg_reload_conf();
 
 Rules are compiled and fully validated when the value is set or reloaded; an invalid rule (syntax, bad pattern, back-reference, reference to a missing capture group, unknown escape, over a limit, a pattern that takes longer than 100 ms to compile) rejects the whole value and the previous one stays in effect. Test rules with [`pg_stat_statement_context_extract()`](sql-interface.md#pg_stat_statement_context_extract), which shows the normalized tags and counts the changed values in `normalized_tags`.
 
-Rules run on every tagged statement, under the same safety limits as regex extractors: each backend compiles a rule once (at first use after a configuration change), with the same [100 ms compile time limit](extractors.md#regex), and the engine's own complexity limits and query cancellation apply. If a rule fails at run time (the regex engine runs out of memory or reports an error), the tag is **dropped** rather than stored unnormalized, which could create many entries; this is counted in the debug function's `normalize_failures`. If a rule fails to compile in a backend at run time (including a compile stopped at the time limit), it is disabled there until the next `extractors` or `normalize` change (counted in `_info().regex_compile_failures`), and tags of its key are dropped. The user's statement does not fail because of a rule (an unexpected internal error in the regex engine is not hidden).
+Rules run on every tagged statement, under the same safety limits as regex extractors: each backend compiles a rule once (at first use after a configuration change), with the same [100 ms compile time limit](extractors.md#regex), and the engine's own complexity limits and query cancellation apply. If a rule fails at run time (the regex engine runs out of memory or reports an error), the tag is **dropped** rather than stored unnormalized, which could create many entries; this is counted in the debug function's `normalize_failures`. If a rule fails to compile in a backend at run time (including a compile stopped at the time limit), it is disabled there until the next `extractors` or `normalize` change (counted in `pg_stat_statement_context_info().regex_compile_failures`), and tags of its key are dropped. The user's statement does not fail because of a rule (an unexpected internal error in the regex engine is not hidden).
 
 ### `reclaim_worker`
 
@@ -285,7 +285,7 @@ Which statements are recorded, as in `pg_stat_statements.track`:
 
 ### `track_utility`
 
-Whether utility statements (DDL, `VACUUM`, `CALL`, `DO`, `COPY`, ...) are recorded. `EXECUTE` and `PREPARE` are never recorded as utilities, because the executor records the plan they run. `DEALLOCATE` is recorded only on PostgreSQL 17 and later, matching pgss.
+Whether utility statements (DDL, `VACUUM`, `CALL`, `DO`, `COPY`, ...) are recorded. `EXECUTE` and `PREPARE` are never recorded as utilities, because the executor records the plan they run. `DEALLOCATE` is recorded only on PostgreSQL 17 and later, matching `pg_stat_statements`.
 
 ### `untagged`
 
@@ -354,11 +354,11 @@ All of the extension's shared memory is requested once, at server start, in thre
 
 | Part | Reported by | Settings that size it |
 |---|---|---|
-| Statistics store: the entries, their hash table and the eviction array, including the exemplars | `_info().shmem_bytes` (exact) | `max_entries`, `max_tagset_bytes`, `bucket_count`, `exemplar_keys`, `exemplar_memory` |
-| Cardinality-cap table | `_info().cap_shmem_bytes` (exact) | `cardinality_cap_slots` |
+| Statistics store: the entries, their hash table and the eviction array, including the exemplars | `pg_stat_statement_context_info().shmem_bytes` (exact) | `max_entries`, `max_tagset_bytes`, `bucket_count`, `exemplar_keys`, `exemplar_memory` |
+| Cardinality-cap table | `pg_stat_statement_context_info().cap_shmem_bytes` (exact) | `cardinality_cap_slots` |
 | Activity slots ([`pg_stat_statement_context_activity`](sql-interface.md#pg_stat_statement_context_activity)) | `pg_shmem_allocations` (below) | `MaxBackends`, `max_tagset_bytes` |
 
-`_info().exemplar_shmem_bytes` is part of `shmem_bytes`, not an addition to it. The activity slots are not in `_info()`; a superuser (or a member of `pg_read_all_stats`) can read their exact size, and that of the other named parts, with:
+`pg_stat_statement_context_info().exemplar_shmem_bytes` is part of `shmem_bytes`, not an addition to it. The activity slots are not in `pg_stat_statement_context_info()`; a superuser (or a member of `pg_read_all_stats`) can read their exact size, and that of the other named parts, with:
 
 ```sql
 SELECT name, size FROM pg_shmem_allocations WHERE name LIKE 'pg_stat_statement_context%';
@@ -385,7 +385,7 @@ cap        = 32 + 8 × (cardinality_cap_slots + 2 × max(64, floor(cardinality_c
 activity   = 16 + MaxBackends × align8(36 + max_tagset_bytes)
 ```
 
-- **Exemplars** (0 when `exemplar_keys` is empty): `share = floor(exemplar_memory × 1024 / max_entries)` rounded down to a multiple of 8, `value = min(floor(share / nkeys) − 2, 256)` for `nkeys` exemplar keys, and `exemplar = align8(nkeys × (2 + value))` (0 when `value` would be below 1). `_info().exemplar_value_bytes` is `value` and `_info().exemplar_shmem_bytes` is `max_entries × exemplar`.
+- **Exemplars** (0 when `exemplar_keys` is empty): `share = floor(exemplar_memory × 1024 / max_entries)` rounded down to a multiple of 8, `value = min(floor(share / nkeys) − 2, 256)` for `nkeys` exemplar keys, and `exemplar = align8(nkeys × (2 + value))` (0 when `value` would be below 1). `pg_stat_statement_context_info().exemplar_value_bytes` is `value` and `pg_stat_statement_context_info().exemplar_shmem_bytes` is `max_entries × exemplar`.
 - **MaxBackends** is `max_connections + autovacuum_max_workers + max_worker_processes + max_wal_senders + 1` on PostgreSQL 14–16, `+ 2` on 17 (the slot sync worker), and on 18 `autovacuum_worker_slots` (default 16) replaces `autovacuum_max_workers`: 122, 123 and 136 at the defaults.
 - **Rounding.** `cap` and `activity` are exact, and so is `exemplar_shmem_bytes`. The 240- and 848-byte headers can change by a few bytes between versions, so `store` is exact to within 256 bytes. `test/t/034_shmem_sizing.pl` checks all of this against the server.
 - **Rule of thumb.** Each entry costs about `align8(24 + max_tagset_bytes) + 88 + 24 × bucket_count + exemplar` bytes, plus 8 per hash bucket (`pow2(max_entries)` of them), plus about 3 kB. So `max_tagset_bytes` dominates at the default 12 buckets, and `bucket_count` dominates for long histories (288 buckets take 6,912 bytes per entry).
@@ -432,7 +432,7 @@ The statistics live in shared memory. With [`save`](#save) on they survive a cle
 When a new combination arrives and the table already holds `max_entries` entries, an eviction pass runs:
 
 1. All **dead** entries (all buckets expired) are reclaimed.
-2. If that frees fewer than 5% of `max_entries`, live entries are evicted until 5% is free: least recently written first, then lowest usage (a call count that decays on each pass, as in pgss).
+2. If that frees fewer than 5% of `max_entries`, live entries are evicted until 5% is free: least recently written first, then lowest usage (a call count that decays on each pass, as in `pg_stat_statements`).
 
 Dead entries are not freed when they expire. They stay allocated (and are counted in `entries`) until the table fills up and a pass reclaims them. On a system whose tag combinations change over time, `entries` therefore normally climbs to `max_entries` and stays there, and passes run regularly even when no live history is lost.
 
