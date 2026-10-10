@@ -6,7 +6,9 @@
 # shared_preload_libraries" if the extension is not installed, else at
 # "make installcheck".
 #   1. A source tree that contains worktrees/ (other checkouts, with their
-#      own src/compat.h) passes the version-guard step.
+#      own src/compat.h) passes the version-guard step. The copy to
+#      $PSSC_BUILD skips worktrees/ and the top-level build output, but not
+#      nested directories of the same names (bench/results/).
 #   2. After that failure, no postmaster is left running in $PSSC_WORK.
 # Uses PGPORT (default 55190) and scratch space under tmp/test-run-tests/.
 set -euo pipefail
@@ -51,6 +53,10 @@ w=$T/worktrees/src/worktrees/item
 mkdir -p "$w/src"
 cp "$ROOT/src/compat.h" "$w/src/compat.h"
 printf '#if PG_VERSION_NUM >= 160000\n#endif\n' > "$w/src/unguarded.c"
+for d in bench/results x/log x/tmp x/tmp_check x/worktrees results log tmp_check; do
+	mkdir -p "$T/worktrees/src/$d" && touch "$T/worktrees/src/$d/.keep"
+done
+touch "$T/worktrees/src/regression.diffs"
 run_harness worktrees
 if echo "$out" | grep -q '^version guards ok$' && ! echo "$out" | grep -q 'FAIL: version-guard'; then
 	ok "a source tree with worktrees/ passes the version-guard step"
@@ -61,6 +67,26 @@ if [ -d "$T/worktrees/build/worktrees" ]; then
 	not_ok "worktrees/ is not copied to PSSC_BUILD"
 else
 	ok "worktrees/ is not copied to PSSC_BUILD"
+fi
+# The top-level excludes are anchored: bsdtar (macOS) matched --exclude=./results
+# against any path component and dropped bench/results/.
+missing=
+for f in bench/results/.keep x/log/.keep x/tmp/.keep x/tmp_check/.keep x/worktrees/.keep; do
+	[ -f "$T/worktrees/build/$f" ] || missing="$missing $f"
+done
+if [ -z "$missing" ]; then
+	ok "nested results/, log/, tmp/, tmp_check/ and worktrees/ are copied"
+else
+	not_ok "nested results/, log/, tmp/, tmp_check/ and worktrees/ are copied (missing:$missing)"
+fi
+leaked=
+for f in results log tmp_check regression.diffs; do
+	[ -e "$T/worktrees/build/$f" ] && leaked="$leaked $f"
+done
+if [ -z "$leaked" ]; then
+	ok "top-level results/, log/, tmp_check/ and regression.diffs are not copied"
+else
+	not_ok "top-level results/, log/, tmp_check/ and regression.diffs are not copied (copied:$leaked)"
 fi
 
 # 2. A failing run with a server up.

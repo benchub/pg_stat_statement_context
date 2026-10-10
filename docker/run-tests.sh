@@ -90,21 +90,24 @@ rm -rf "$BUILD"
 mkdir -p "$BUILD"
 # Skip host build/test output so artifacts from another PG version (or the
 # host OS) are never reused; make clean below is a second safeguard. Skip
-# worktrees/ (other checkouts of the repo, CLAUDE.md §7) too.
-tar -C "$SRC" --exclude=./.git --exclude=./tmp --exclude=./worktrees \
-	--exclude='*.o' --exclude='*.so' --exclude='*.dylib' --exclude='*.bc' \
-	--exclude='*.dSYM' --exclude=./results --exclude=./tmp_check \
-	--exclude=./log --exclude=./regression.diffs --exclude=./regression.out \
-	--exclude=./test/unit/test_scan --exclude=./test/unit/test_scan_checked \
-	--exclude=./test/unit/test_stmt --exclude=./test/unit/test_stmt_checked \
-	--exclude=./test/unit/test_pairs --exclude=./test/unit/test_pairs_checked \
-	--exclude=./test/unit/test_tagset --exclude=./test/unit/test_tagset_checked \
-	--exclude=./test/unit/test_counters \
-	--exclude=./test/unit/corpus \
-	--exclude=./fuzz/fuzz_scan --exclude=./fuzz/fuzz_tagset \
-	--exclude=./fuzz/fuzz_sqlcommenter --exclude=./fuzz/fuzz_marginalia \
-	--exclude='./fuzz/*_standalone' --exclude=./fuzz/corpus \
-	-cf - . | tar -C "$BUILD" -xf -
+# worktrees/ (other checkouts of the repo, CLAUDE.md §7) too. find prunes
+# the ./ paths at the top level only: bsdtar (macOS) matches an
+# --exclude=./results against any path component, so it dropped bench/results/.
+(cd "$SRC" && find . \( -path ./.git -o -path ./tmp -o -path ./worktrees \
+	-o -name '*.o' -o -name '*.so' -o -name '*.dylib' -o -name '*.bc' \
+	-o -name '*.dSYM' -o -path ./results -o -path ./tmp_check \
+	-o -path ./log -o -path ./regression.diffs -o -path ./regression.out \
+	-o -path ./test/unit/test_scan -o -path ./test/unit/test_scan_checked \
+	-o -path ./test/unit/test_stmt -o -path ./test/unit/test_stmt_checked \
+	-o -path ./test/unit/test_pairs -o -path ./test/unit/test_pairs_checked \
+	-o -path ./test/unit/test_tagset -o -path ./test/unit/test_tagset_checked \
+	-o -path ./test/unit/test_counters \
+	-o -path ./test/unit/corpus \
+	-o -path ./fuzz/fuzz_scan -o -path ./fuzz/fuzz_tagset \
+	-o -path ./fuzz/fuzz_sqlcommenter -o -path ./fuzz/fuzz_marginalia \
+	-o -path './fuzz/*_standalone' -o -path ./fuzz/corpus \) -prune \
+	-o -print0) |
+	tar -C "$SRC" --null --no-recursion -T - -cf - | tar -C "$BUILD" -xf -
 if [ "$(id -u)" = 0 ]; then chown -R postgres:postgres "$BUILD"; fi
 cd "$BUILD"
 as_pg make clean >/dev/null
