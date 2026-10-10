@@ -4,15 +4,15 @@
 
 | Object | Kind | Default access |
 |---|---|---|
-| [`pg_stat_statement_context`](#the-views) | View. One row for each entry and live bucket. | `SELECT` granted to `PUBLIC` |
-| [`pg_stat_statement_context()`](#pg_stat_statement_contextshowtags-merge_buckets) | Set-returning function. The `pg_stat_statement_context` and `pg_stat_statement_context_totals` views use it. | `PUBLIC` |
+| [`pg_stat_statement_context`](#the-historical-views) | View. One row for each entry and live bucket. | `SELECT` granted to `PUBLIC` |
+| [`pg_stat_statement_context()`](#pg_stat_statement_context) | Set-returning function. The `pg_stat_statement_context` and `pg_stat_statement_context_totals` views use it. | `PUBLIC` |
 | [`pg_stat_statement_context_activity`](#pg_stat_statement_context_activity) | View. The current tags of each backend. Join it to `pg_stat_activity` on `pid`. The view uses the function `pg_stat_statement_context_activity()`. | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context_counters()`](#pg_stat_statement_context_counters) | The store counters and diagnostic counters of `pg_stat_statement_context_info()`, without the table scan. It costs little, so use it for scrapers. | `PUBLIC` |
 | [`pg_stat_statement_context_extract()`](#pg_stat_statement_context_extract) | Debug function. Shows the tags that the extension extracts from a statement. | `EXECUTE` revoked from `PUBLIC` |
 | [`pg_stat_statement_context_info()`](#pg_stat_statement_context_info) | Store counters and diagnostic counters. | `PUBLIC` |
 | [`pg_stat_statement_context_last_bucket`](#pg_stat_statement_context_last_bucket) | View. One row for each entry, for the last closed bucket only. The view uses the function `pg_stat_statement_context_last_bucket(showtags)`. | `SELECT` granted to `PUBLIC` |
 | [`pg_stat_statement_context_reset()`](#pg_stat_statement_context_reset) | Clears all `pg_stat_statement_context` statistics. | `EXECUTE` revoked from `PUBLIC` |
-| [`pg_stat_statement_context_totals`](#the-views) | View. One row for each entry, with the live buckets added together. | `SELECT` granted to `PUBLIC` |
+| [`pg_stat_statement_context_totals`](#the-historical-views) | View. One row for each entry, with the live buckets added together. | `SELECT` granted to `PUBLIC` |
 
 These roles can call the restricted functions:
 

@@ -186,7 +186,7 @@ Developer references (they ship with the source but are written for maintainers)
 
 ## License
 
-MIT License: see [LICENSE](LICENSE).
+MIT License: see [LICENSE](LICENSE). Copyright is held by the holder named in LICENSE and [NOTICE](NOTICE).
 
 [marginalia]: https://github.com/basecamp/marginalia
 [SQLCommenter]: https://google.github.io/sqlcommenter/

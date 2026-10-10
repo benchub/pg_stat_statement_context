@@ -468,7 +468,7 @@ Real keys are related. For example, an action belongs to one controller, and a j
 
 ### Watching for cardinality pressure
 
-[`pg_stat_statement_context_counters()`](sql-interface.md#pg_stat_statement_context_counters()) and [`pg_stat_statement_context_info()`](sql-interface.md#pg_stat_statement_context_info()) show these counters. `pg_stat_statement_context_counters()` costs little, so you can call it on each scrape. The [exporter recipes](integrations/README.md) export the counters. This table shows what each counter means when it increases, and what to do:
+[`pg_stat_statement_context_counters()`](sql-interface.md#pg_stat_statement_context_counters) and [`pg_stat_statement_context_info()`](sql-interface.md#pg_stat_statement_context_info) show these counters. `pg_stat_statement_context_counters()` costs little, so you can call it on each scrape. The [exporter recipes](integrations/README.md) export the counters. This table shows what each counter means when it increases, and what to do:
 
 | Counter | What it counts | When it increases |
 |---------|----------------|---------------|

@@ -6,7 +6,7 @@ The rest of the documentation assumes a superuser who edits `postgresql.conf` or
 - Server settings are changed through the provider's **parameter groups** (or "flags", "server parameters"), not in `postgresql.conf`, and the provider decides when it reloads or restarts the server.
 - Server logs are not on a file system you can read; they are downloaded or streamed from the provider.
 
-This page describes what PostgreSQL itself allows in that situation and how to diagnose the extension from SQL alone. Providers differ in which parameters they expose, in what privileges their administrator role has, and in whether they apply a change with a reload or a reboot; check your provider's documentation for those details. The extension must also be on the provider's allowlist (see [Deployment](limitations.md#deployment)).
+This page describes what PostgreSQL itself allows in that situation and how to diagnose the extension from SQL alone. Providers differ in which parameters they expose, in what privileges their administrator role has, and in whether they apply a change with a reload or a reboot; check your provider's documentation for those details. The extension must also be on the provider's allowlist.
 
 Every statement about privileges on this page is checked by `test/t/037_managed_services.pl` against a role that stands in for a managed-service administrator: `NOSUPERUSER` with `CREATEDB`, `CREATEROLE` and membership in `pg_monitor`. That test also runs every example and checklist query below.
 
